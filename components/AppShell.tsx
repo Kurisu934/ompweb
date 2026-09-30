@@ -13,6 +13,8 @@ import { ChatWindow } from "./ChatWindow";
 import { PetCompanion } from "./PetCompanion";
 import { WallpaperBackground } from "./WallpaperBackground";
 import { WallpaperControls } from "./WallpaperControls";
+import { MemoPanel } from "./MemoPanel";
+import { openMemos } from "@/lib/memos";
 import "./wallpapers.css";
 import "./pets.css";
 import type { PetActivity } from "@/lib/pets";
@@ -21,7 +23,7 @@ import { type FileExplorerHandle } from "./FileExplorer";
 import type { RightPanelView } from "./RightPanel";
 import { BranchNavigator } from "./BranchNavigator";
 import { LanguageSwitcher } from "./LanguageSwitcher";
-import { Check, ChevronDown, Ellipsis, Folder, History, Menu, PanelLeft, Terminal, Wand2, Zap } from "lucide-react";
+import { Check, ChevronDown, Ellipsis, Folder, History, Menu, PanelLeft, StickyNote, Terminal, Wand2, Zap } from "lucide-react";
 import { ThemeSwitcher } from "./ThemeSwitcher";
 import { translate, useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
@@ -44,7 +46,6 @@ import {
   AppUpdateTransportError,
   COMPLETED_APP_UPDATE_KEY,
   DISMISSED_APP_UPDATE_KEY,
-  DISMISSED_OMP_UPDATE_KEY,
   fetchAppUpdateJson,
   isExactLegacyTargetCompletion,
   readDismissedVersion,
@@ -276,47 +277,10 @@ export function AppShell() {
       signal: controller.signal,
     })
       .then((response) => response.ok ? response.json() : null)
-      .then((data: { currentVersion?: string | null; availableVersion?: string | null; updateAvailable?: boolean; updateCommand?: string } | null) => {
+      .then((data: { updateAvailable?: boolean } | null) => {
+        // Background checks only update the settings badge. Keep update actions
+        // in Settings instead of interrupting startup or a return to this tab.
         setOmpUpdateAvailable(Boolean(data?.updateAvailable));
-        if (!data?.updateAvailable || !data.availableVersion) return;
-        // This check re-runs on every visibilitychange back to the tab, so a
-        // version the user already dismissed must not be re-announced.
-        if (readDismissedVersion(DISMISSED_OMP_UPDATE_KEY) === data.availableVersion) return;
-        const version = data.availableVersion;
-        const cmd = data.updateCommand || "omp update";
-        toast.info(
-          translate("appShell.ompUpdateAvailable"),
-          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 4 }}>
-            <div>{translate("appShell.updateVersion", { current: data.currentVersion ?? "?", available: data.availableVersion })}</div>
-            <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-              <code style={{ background: "var(--bg-panel)", padding: "3px 7px", borderRadius: "var(--radius-control)", fontSize: 11, fontFamily: "var(--font-mono)" }}>
-                {cmd}
-              </code>
-              <button
-                type="button"
-                onClick={() => {
-                  void copyText(cmd)
-                    .then(() => toast.success(translate("appShell.commandCopied")))
-                    .catch(() => toast.error(translate("appShell.commandCopyFailed")));
-                }}
-                style={{ padding: "3px 7px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text)", cursor: "pointer", fontSize: 11 }}
-              >
-                {translate("appShell.copyCommand")}
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setSettingsTab("system");
-                  toast.close("omp-update-available");
-                }}
-                style={{ padding: "3px 7px", border: "1px solid var(--accent-strong)", borderRadius: "var(--radius-control)", background: "var(--accent-strong)", color: "var(--on-accent)", cursor: "pointer", fontSize: 11, fontWeight: 600 }}
-              >
-                {translate("settingsConfig.ompUpdateAction")}
-              </button>
-            </div>
-          </div>,
-          { id: "omp-update-available", timeout: 0, onClose: () => rememberDismissedVersion(DISMISSED_OMP_UPDATE_KEY, version) }
-        );
       })
       .catch(() => {});
     return () => controller.abort();
@@ -1753,6 +1717,7 @@ export function AppShell() {
             <ThemeSwitcher />
             <WallpaperControls onOpen={() => setSettingsTab("wallpapers")} />
             <LanguageSwitcher />
+            <button type="button" onClick={openMemos} title={t("memos.title")} aria-label={t("memos.title")} aria-keyshortcuts="Insert" className="shell-toolbar-btn ui-focus-ring"><StickyNote size={16} strokeWidth={1.8} aria-hidden="true" /></button>
             {showChat && (
               <>
                 <div className="shell-toolbar-divider" aria-hidden="true" />
@@ -2248,6 +2213,7 @@ export function AppShell() {
         onRestored={handleArchiveRestored}
       />
     )}
+    <MemoPanel />
     </ToastProvider>
     </>
   );

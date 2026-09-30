@@ -75,6 +75,7 @@ test("attachment-only drafts stay protected across live draft-key changes and re
     ref.current.addFiles([new File(["important attachment"], "notes.txt", { type: "text/plain" })]);
   });
   await waitFor(() => assert.equal(getDraft("draft-a")?.files[0]?.content, "important attachment"));
+  assert.ok(document.querySelector(".composer-file-attachment.wallpaper-surface"));
   assert.equal(warnsOnExit(), true);
   rerender(React.createElement(Shell, { session: "draft-b" }));
   assert.equal(screen.getByRole("textbox").value, "");
@@ -85,4 +86,13 @@ test("attachment-only drafts stay protected across live draft-key changes and re
   await user.keyboard("{Enter}");
   assert.match(sent[0], /important attachment/);
   assert.equal(warnsOnExit(), false);
+});
+
+test("attachment errors stay accessible on their glass surface", async () => {
+  const ref = React.createRef();
+  render(React.createElement(ChatInput, { ref, onSend() {}, onAbort() {}, isStreaming: true }));
+  await act(async () => { ref.current.addFiles([new File(["notes"], "notes.txt", { type: "text/plain" })]); });
+  const alert = screen.getByRole("alert");
+  assert.ok(alert.classList.contains("wallpaper-surface"));
+  assert.match(alert.textContent, /Attachments are disabled/);
 });

@@ -64,6 +64,45 @@ MP4 texture payloads (with HTTP range support). The browser
 downloads them once and runs a Three.js/WebGL renderer on its own GPU. Animation
 does not make frame requests. Legacy POST stream requests return HTTP 410.
 
+Images and fonts load with bounded concurrency. Embedded videos are requested
+only when a visible layer, an effect input, a particle, or an explicit play
+command needs them. Time-of-day scenes therefore do not preload every 4K clip
+before their first frame. A first-time clip switch retains the last complete
+frame until the new clip can render; subsequent switches reuse the loaded media.
+Video responses yield bounded chunks rather than copying a whole clip per range
+request. TTF/OTF transfers use negotiated, cached, lossless gzip compression.
+These changes do not resize or transcode any video or image asset.
+
+### Persistent scene caches
+
+The server saves compiled manifests, converted textures, extracted original
+media and compressed fonts under `~/.omp/agent/web-wallpapers/scene-cache`.
+Subsequent loads, including after a server restart, reuse these files instead
+of unpacking and converting the original project again. Source file changes,
+scene property overrides and compiler cache revisions invalidate the result.
+Incomplete or damaged cache entries are rebuilt automatically. The default
+disk budget is 4096 MiB; `OMP_WEB_WALLPAPER_CACHE_MB` changes it (`0` disables it).
+Least-recently-used generated scenes are evicted when space is needed. A full
+or unwritable cache falls back to normal rendering; original projects are untouched.
+
+Each browser also keeps up to 256 MiB of scene resources in IndexedDB, including
+images, fonts, the requested video clips and native scene audio. This works on
+plain HTTP LAN addresses as well as HTTPS. After closing and reopening the
+browser, complete cached resources use local Blob URLs instead of downloading
+again. A small conditional manifest request still checks for server-side changes.
+Initial video/audio playback streams normally; after a short delay, a background
+download stores a complete local copy, reusing the browser HTTP cache where
+possible. An initial visit can therefore transfer extra bytes. Cancelled partial
+downloads are not saved, and individual files larger than the local budget are
+not persisted. Videos for unused times of day are not eagerly downloaded.
+
+Browser cache storage is per site address: a hostname, IP address or port change
+uses a different cache. Private browsing, OS storage pressure or clearing site
+data may remove it. This is not an offline copy of the entire app. Browser GPU
+textures and shader programs still need to be created for each renderer context;
+there is no portable GPU binary cache. These persistent caches currently cover
+browser-native scenes, not web wallpapers or the custom BGM library.
+
 The canvas keeps the original scene aspect ratio for the existing crop controls.
 Its resolution matches the displayed device pixels (including offscreen cropped
 edges), subject to GPU texture limits and a 16-megapixel safety budget. Smaller
@@ -102,8 +141,8 @@ from `project.json`'s `general.properties`. Only declared properties with matchi
 value types are applied, both to direct bindings and `applyUserProperties`.
 Scripts and animation wrappers are retained. These server-local settings apply
 to all OMPWeb clients using that wallpaper, not to Wallpaper Engine itself.
-Restart OMPWeb to apply changes immediately; otherwise the scene cache expires
-after five minutes and the client must reload the wallpaper.
+Reload the wallpaper to apply changes; manifest requests validate the source and
+override files even when a persistent cache exists. No server restart is required.
 
 When camera parallax is enabled, layer anchors receive the native static offset
 `(origin - sceneCenter) * cameraAmount * layerDepth` independently on each axis,
@@ -292,6 +331,41 @@ accent buttons preserve their contrasting foreground. Readability over arbitrary
 transparent wallpaper backgrounds still depends on glass and adaptive text.
 Disabling the checkbox or wallpaper, load failure and unmount remove the palette
 overrides and restore the selected theme. The preference is local to each browser.
+
+## Custom background music
+
+The wallpaper settings include a BGM library. Import an audio or video file and
+select it to replace the wallpaper soundtrack. Video imports keep only the first
+audio track; no video is played or retained in the BGM cache. Supported audio
+codecs are copied without re-encoding; other codecs are converted to AAC. Limits
+are 512 MiB per upload and four hours per track, with two concurrent extractions.
+Playlists and remote media URLs are not accepted.
+
+Install FFmpeg and ffprobe on the server, including inside a container when
+applicable. Both must be on PATH, or use `OMP_WEB_FFMPEG_BIN` and
+`OMP_WEB_FFPROBE_BIN` to set executable paths. No audio leaves the OMPWeb server.
+Completed imports live under the agent directory's `web-wallpapers/bgm/`, keyed
+by the original file's SHA-256. Selecting a cached track requires no extraction;
+uploading identical bytes also reuses that cache. Original videos are not kept.
+Deleting a cached track affects all browsers using that server but never deletes
+the source file on the user's computer. Back up this directory to preserve BGM
+when moving the server.
+
+The choice is persisted per browser and works with image, video, web and scene
+wallpapers. Selecting the original soundtrack restores native audio. Volume,
+mute and pause use the wallpaper toolbar, and scene audio-reactive effects use
+the replacement track. Browser autoplay rules still apply: a click or keypress
+may be needed to unlock sound after opening the page.
+
+## Long-running scene scripts
+
+Property scripts retain the 8 ms frame budget and bounded QuickJS sandbox.
+An interrupted frame restores the last validated layer state and retries on the
+next frame. A binding that repeatedly times out is disabled with a compatibility
+warning. An unrecoverable guest failure stops property scripting, not the whole
+renderer: the last valid picture, native videos and particles remain available.
+Script-driven transitions may then stay at their last state until reloading the
+wallpaper. GPU/context failures are separate and are not hidden by this fallback.
 
 ## Safe deployment
 

@@ -24,7 +24,10 @@ fork. Use the source installation below for these additions.
 | Addition | What it does |
 | --- | --- |
 | Local wallpapers | Original-file images and videos, local folders and Steam library discovery; playback, volume, brightness and draggable crop positioning. |
+| Custom background music | Import audio or video, replace the wallpaper soundtrack and reuse cached audio. Videos contribute only their first audio track; volume, mute and pause use the existing wallpaper controls. Requires FFmpeg on the server. |
+| Memos | Server-persisted notes with autosave, search, pinning, Markdown preview/export and revision-conflict protection. Press `Insert` to open or close, or use the toolbar/command palette. |
 | Browser-native scenes | Renders supported Wallpaper Engine scene resources on the browser GPU with Three.js/WebGL. No desktop capture or frame streaming. Includes supported effects, particles, parallax, animation, audio and sandboxed SceneScript. |
+| Persistent scene caching | Reuses server-side converted scene resources after restarts, plus browser-local images, fonts, videos and native audio to avoid repeat downloads on phones. Works over HTTP; bounded caches expire when sources change. |
 | Glass workspace | Default per-message/per-control glass, clear mode and full frosted mode, with adjustable opacity. Covers chat, tables, code, tool/thinking/status blocks, sidebars, usage meters and composer controls. |
 | Wallpaper color system | Material Color Utilities derives coordinated accents, selections, borders and progress colors. Ordinary text uses one unified color: fixed, automatic black/white, or Material-derived; semantic code/diff/status colors remain distinct. |
 | Animated pets | Import compatible Codex v1/v2 raster spritesheets, preview animations, follow the pointer and reflect the active chat's activity. No extra model calls. |
@@ -314,6 +317,8 @@ host (KDE Plasma, and most Wayland/X11 desktops).
 | `OMP_WEB_STT_ENDPOINT` | OpenAI-compatible transcription endpoint URL | _None (disabled)_ |
 | `OMP_WEB_STT_KEY` | Optional API key for the STT endpoint | _None_ |
 | `OMP_WEB_STT_MODEL` | Optional model name for the STT endpoint | _None_ |
+| `OMP_WEB_FFMPEG_BIN` / `OMP_WEB_FFPROBE_BIN` | Executable paths for custom BGM extraction | `ffmpeg` / `ffprobe` on PATH |
+| `OMP_WEB_WALLPAPER_CACHE_MB` | Server-side compiled scene cache budget in MiB (`0` disables) | `4096` |
 
 ## Development
 

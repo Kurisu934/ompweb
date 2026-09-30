@@ -60,6 +60,59 @@ html[data-wallpaper="on"][data-wallpaper-text-polarity="light"] [data-wallpaper-
 html[data-wallpaper="on"] .wallpaper-shell { background: transparent !important; }
 html[data-wallpaper="on"] .wallpaper-shell .shell-topbar { z-index: 40; }
 html[data-wallpaper="on"] { --wallpaper-glass: color-mix(in srgb, var(--bg-panel) var(--wallpaper-glass-opacity, 35%), transparent); }
+/* Resolve solid theme colors at the root before neutral UI tokens become translucent. */
+html[data-wallpaper="on"] {
+  --wallpaper-native-bg: var(--bg);
+  --wallpaper-native-panel: var(--bg-panel);
+  --wallpaper-native-selected: var(--bg-selected);
+  --wallpaper-inset-bg: color-mix(in srgb, var(--bg) 8%, transparent);
+  --wallpaper-inset-panel: color-mix(in srgb, var(--bg-panel) 12%, transparent);
+  --wallpaper-inset-subtle: color-mix(in srgb, var(--bg-subtle) 10%, transparent);
+  --wallpaper-inset-hover: color-mix(in srgb, var(--accent) 12%, transparent);
+  --wallpaper-inset-selected: color-mix(in srgb, var(--accent) 20%, transparent);
+}
+/* Shared tokens cover inline styles and CSS, including content mounted in portals. */
+html[data-wallpaper="on"] :is(.wallpaper-shell, [data-base-ui-portal], [role="dialog"], [role="alertdialog"], [role="menu"], [role="tooltip"], .pet-controls, .pet-unavailable) {
+  --bg: var(--wallpaper-inset-bg);
+  --bg-panel: var(--wallpaper-inset-panel);
+  --bg-subtle: var(--wallpaper-inset-subtle);
+  --bg-hover: var(--wallpaper-inset-hover);
+  --bg-selected: var(--wallpaper-inset-selected);
+  --user-bg: var(--wallpaper-inset-panel);
+  --tool-bg: var(--wallpaper-inset-subtle);
+}
+html[data-wallpaper="on"][data-glass="clear"] {
+  --wallpaper-inset-bg: transparent;
+  --wallpaper-inset-panel: transparent;
+  --wallpaper-inset-subtle: transparent;
+}
+/* Native option lists and artwork samples need their real, opaque colors. */
+html[data-wallpaper="on"] :is(option, .wallpaper-thumbnail, .wallpaper-palette-swatches) {
+  --bg: var(--wallpaper-native-bg);
+  --bg-panel: var(--wallpaper-native-panel);
+  --bg-selected: var(--wallpaper-native-selected);
+}
+html[data-wallpaper="on"] option { background: var(--wallpaper-native-panel); color: var(--text); }
+html[data-wallpaper="on"] :is(.settings-view, [role="dialog"], [role="alertdialog"], [role="menu"], [role="tooltip"], .dropdown-surface, .shell-topbar-overflow[data-compact="true"] > .shell-topbar-overflow-content, .pet-controls, .pet-unavailable) {
+  background: var(--wallpaper-glass) !important;
+  backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+}
+html[data-wallpaper="on"][data-glass="clear"] :is(.settings-view, [role="dialog"], [role="alertdialog"], [role="menu"], [role="tooltip"], .dropdown-surface, .shell-topbar-overflow[data-compact="true"] > .shell-topbar-overflow-content, .pet-controls, .pet-unavailable) {
+  background: transparent !important; backdrop-filter: none; -webkit-backdrop-filter: none;
+}
+/* Existing primary actions use inline theme tokens; keep their text readable on glass. */
+html[data-wallpaper="on"] button:not([role="switch"]):is([style*="background: var(--accent"], [style*="background-color: var(--accent"], [style*="background: var(--status-error)"], [style*="background-color: var(--status-error)"]) {
+  background: color-mix(in srgb, var(--accent) 18%, transparent) !important;
+  color: var(--text) !important;
+  box-shadow: none !important;
+}
+html[data-wallpaper="on"] button:is([style*="background: var(--status-error)"], [style*="background-color: var(--status-error)"]) {
+  background: color-mix(in srgb, var(--status-error) 18%, transparent) !important;
+  border-color: var(--status-error) !important;
+}
+html[data-wallpaper="on"][data-glass="clear"] button:not([role="switch"]):is([style*="background: var(--accent"], [style*="background-color: var(--accent"], [style*="background: var(--status-error)"], [style*="background-color: var(--status-error)"]) {
+  background: transparent !important;
+}
 html[data-wallpaper="on"] .wallpaper-shell :is(.sidebar-container, .shell-topbar, .wallpaper-chat-pane) { background: transparent !important; }
 html[data-wallpaper="on"] .wallpaper-shell :is(.wallpaper-user, .wallpaper-assistant, .chat-input-shell, .wallpaper-surface, .sidebar-project-header, .session-item-row, .sidebar-settings-row, .shell-topbar) {
   background: var(--wallpaper-glass) !important;
@@ -69,20 +122,41 @@ html[data-wallpaper="on"] .wallpaper-assistant { width: fit-content; min-width: 
 html[data-wallpaper="on"] .wallpaper-user { border-radius: 8px; padding-bottom: 3px; }
 html[data-wallpaper="on"] .wallpaper-user .chat-message-card { background: transparent !important; box-shadow: none !important; }
 /* Table fills must let the enclosing message or preview's frosted surface show through. */
-html[data-wallpaper="on"] .wallpaper-shell .markdown-body th { background: color-mix(in srgb, var(--text) 6%, transparent) !important; }
-html[data-wallpaper="on"] .wallpaper-shell .markdown-body tbody tr:nth-child(even) td { background: color-mix(in srgb, var(--text) 3%, transparent) !important; }
-html[data-wallpaper="on"][data-glass="clear"] .wallpaper-shell .markdown-body :is(th, tbody tr:nth-child(even) td) { background: transparent !important; }
+html[data-wallpaper="on"] .markdown-body th { background: color-mix(in srgb, var(--text) 6%, transparent) !important; }
+html[data-wallpaper="on"] .markdown-body tbody tr:nth-child(even) td { background: color-mix(in srgb, var(--text) 3%, transparent) !important; }
+html[data-wallpaper="on"][data-glass="clear"] .markdown-body :is(th, tbody tr:nth-child(even) td) { background: transparent !important; }
 html[data-wallpaper="on"] .wallpaper-shell .sidebar-project { background: transparent !important; }
 html[data-wallpaper="on"] .wallpaper-shell .provider-usage-account { background: transparent !important; }
 /* These controls sit on glass already; keep its blur visible without stacking it. */
-html[data-wallpaper="on"] .wallpaper-shell :is(.wallpaper-inset, .markdown-inline-code) {
-  background: color-mix(in srgb, var(--bg-panel) 10%, transparent) !important;
+html[data-wallpaper="on"] :is(.wallpaper-inset, .markdown-inline-code) {
+  background: color-mix(in srgb, var(--wallpaper-native-panel) 10%, transparent) !important;
 }
-html[data-wallpaper="on"] .wallpaper-shell .markdown-inline-code { color: inherit; }
+html[data-wallpaper="on"] .markdown-inline-code { color: inherit; }
+/* Fenced code sits on message/preview glass. Do not cover it with native fills. */
+html[data-wallpaper="on"] .markdown-code-block {
+  --wallpaper-code-ink: var(--text);
+  background: color-mix(in srgb, var(--wallpaper-native-panel) 10%, transparent);
+  box-shadow: none;
+}
+html[data-wallpaper="on"] :is(.markdown-code-header, .markdown-code-action) {
+  background: color-mix(in srgb, var(--wallpaper-native-panel) 10%, transparent);
+}
+html[data-wallpaper="on"] .markdown-code-block :is(pre, pre > code) {
+  background: transparent !important;
+  color: var(--text) !important;
+  text-shadow: none !important;
+  border: 0 !important;
+}
+html[data-wallpaper="on"] .markdown-code-action:is(:hover, .is-active) {
+  background: color-mix(in srgb, var(--accent) 14%, transparent);
+}
+html[data-wallpaper="on"][data-glass="clear"] :is(.markdown-code-block, .markdown-code-header, .markdown-code-action) {
+  background: transparent;
+}
 html[data-wallpaper="on"] .wallpaper-shell button.wallpaper-inset:not(:disabled):is(:hover, :focus-visible) {
   background: color-mix(in srgb, var(--accent) 14%, transparent) !important;
 }
-html[data-wallpaper="on"][data-glass="clear"] .wallpaper-shell :is(.wallpaper-inset, .markdown-inline-code) { background: transparent !important; }
+html[data-wallpaper="on"][data-glass="clear"] :is(.wallpaper-inset, .markdown-inline-code) { background: transparent !important; }
 html[data-wallpaper="on"][data-glass="clear"] .wallpaper-shell button.wallpaper-inset:not(:disabled):is(:hover, :focus-visible) {
   background: color-mix(in srgb, var(--accent) 8%, transparent) !important;
 }
@@ -121,18 +195,23 @@ html[data-wallpaper="on"][data-glass="frosted"] .wallpaper-shell :is(.wallpaper-
   backdrop-filter: none; -webkit-backdrop-filter: none; background: transparent !important;
 }
 /* Popovers overlap chat content, so keep their own glass even in pane-wide mode. */
-html[data-wallpaper="on"][data-glass="default"] .wallpaper-shell .chat-input-shell:has(.composer-toolbar .picker-panel),
-html[data-wallpaper="on"][data-glass="frosted"] .wallpaper-shell .wallpaper-chat-pane:has(.composer-toolbar .picker-panel) {
-  position: relative; isolation: isolate;
+html[data-wallpaper="on"]:not([data-glass="clear"]) .wallpaper-shell .shell-topbar:has(.dropdown-surface, .shell-topbar-overflow[data-compact="true"][open]),
+html[data-wallpaper="on"]:not([data-glass="clear"]) .shell-topbar-overflow[data-compact="true"] > .shell-topbar-overflow-content:has(.dropdown-surface),
+html[data-wallpaper="on"][data-glass="default"] .wallpaper-shell .chat-input-shell:has(.picker-panel, .dropdown-surface),
+html[data-wallpaper="on"][data-glass="frosted"] .wallpaper-shell .wallpaper-chat-pane:has(.picker-panel, .dropdown-surface) {
+  isolation: isolate;
   background: transparent !important; backdrop-filter: none; -webkit-backdrop-filter: none;
 }
+html[data-wallpaper="on"][data-glass="default"] .chat-input-shell:has(.picker-panel, .dropdown-surface) { position: relative; }
 /* A background sibling avoids making the composer a clipped backdrop root. */
-html[data-wallpaper="on"][data-glass="default"] .wallpaper-shell .chat-input-shell:has(.composer-toolbar .picker-panel)::before,
-html[data-wallpaper="on"][data-glass="frosted"] .wallpaper-shell .wallpaper-chat-pane:has(.composer-toolbar .picker-panel)::before {
+html[data-wallpaper="on"]:not([data-glass="clear"]) .wallpaper-shell .shell-topbar:has(.dropdown-surface, .shell-topbar-overflow[data-compact="true"][open])::before,
+html[data-wallpaper="on"]:not([data-glass="clear"]) .shell-topbar-overflow[data-compact="true"] > .shell-topbar-overflow-content:has(.dropdown-surface)::before,
+html[data-wallpaper="on"][data-glass="default"] .wallpaper-shell .chat-input-shell:has(.picker-panel, .dropdown-surface)::before,
+html[data-wallpaper="on"][data-glass="frosted"] .wallpaper-shell .wallpaper-chat-pane:has(.picker-panel, .dropdown-surface)::before {
   content: ""; position: absolute; inset: 0; z-index: -1; pointer-events: none; border-radius: inherit;
   background: var(--wallpaper-glass); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
 }
-html[data-wallpaper="on"][data-glass="frosted"] .wallpaper-shell .wallpaper-chat-pane:has(.composer-toolbar .picker-panel)::before {
+html[data-wallpaper="on"][data-glass="frosted"] .wallpaper-shell .wallpaper-chat-pane:has(.picker-panel, .dropdown-surface)::before {
   backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
 }
 html[data-wallpaper="on"] .wallpaper-shell .composer-toolbar .picker-panel {
@@ -225,3 +304,10 @@ html[data-wallpaper="on"] .wallpaper-shell .composer-toolbar :is(.picker-row[dat
   .wallpaper-controls button { width: 30px; height: 32px; }
 }
 .wallpaper-controls input.wallpaper-volume { width: 68px; min-width: 48px; flex: 0 1 68px; accent-color: var(--accent); }
+.wallpaper-bgm { border-block: 1px solid var(--border); padding: 16px 0; display: grid; gap: 12px; min-width: 0; }
+.wallpaper-bgm-heading, .wallpaper-bgm-selection, .wallpaper-bgm-progress { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; min-width: 0; }
+.wallpaper-bgm-heading h3 { display: flex; align-items: center; gap: 8px; margin: 0 auto 0 0; font-size: 14px; }
+.wallpaper-bgm-selection select { flex: 1; min-width: 0; max-width: 100%; width: 180px; text-overflow: ellipsis; }
+.wallpaper-bgm-meta { margin: 0; font-size: 12px; color: var(--text-muted); overflow-wrap: anywhere; }
+.wallpaper-bgm-progress { font-size: 12px; }
+.wallpaper-bgm-progress progress { flex: 1; min-width: 60px; width: 120px; }

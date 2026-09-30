@@ -13,6 +13,12 @@ export interface ScriptLayerState {
   boneWrites?: Record<string, number[]>;
   videoPlaying?: boolean;
 }
+type ScriptFrame = { layers: ScriptLayerState[]; audio: boolean; warnings: string[]; soundCommands: SceneSoundCommand[] };
+class SceneScriptExecutionError extends Error {
+  constructor(readonly interrupted: boolean) {
+    super(interrupted ? "SceneScript execution budget exceeded" : "SceneScript failed: unsupported API or invalid value");
+  }
+}
 
 // This factory executes ONLY inside QuickJS. Scene code receives value-copy
 // interfaces, never browser objects or host callbacks. Serialization is metered too.
@@ -61,15 +67,15 @@ const guest = String.raw`(function(input) {
   };
   const layers=[], states=new WeakMap(), scripts=[], buffers=[], pending=[], warnings=new Set(), timers=new Map(), soundCommands=[];
   const cursorEvents=['cursorDown','cursorUp','cursorClick','cursorMove','cursorEnter','cursorLeave'];
-  let activeScript, moduleSaved;
+  let activeScript, inFlight, moduleSaved;
   function invoke(script,fn,args,assign=false){
     select(script.spec);
-    const previous=activeScript,commandCount=soundCommands.length;activeScript=script;
+    const previous=activeScript,commandCount=soundCommands.length;activeScript=script;inFlight=script;
     const data=states.get(current),saved=config.partial?{...data,shaderValues:JSON.parse(stringify(data.shaderValues)),boneWrites:JSON.parse(stringify(data.boneWrites??{}))}:undefined;
-    try{const v=fn(...args);if(assign&&v!==undefined)write(script.spec,v);return true;}
+    try{const v=fn(...args);if(assign&&v!==undefined)write(script.spec,v);inFlight=undefined;script.interruptions=0;return true;}
     catch(e){
       if(!config.partial)throw e;
-      Object.assign(data,saved);script.disabled=true;
+      Object.assign(data,saved);script.disabled=true;inFlight=undefined;
       soundCommands.length=commandCount;
       for(const [key,timer] of timers)if(timer.script===script)timers.delete(key);
       warnings.add('SceneScript binding disabled after an unsupported API or invalid value: layer '+script.spec.id+', '+script.spec.property);
@@ -171,6 +177,20 @@ const guest = String.raw`(function(input) {
     target[spec.property]=Array.isArray(old)?['x','y','z','w'].slice(0,old.length).map(k=>finite(v[k])):finite(v);
   }
   return {
+    recover(json){
+      const frame=JSON.parse(json),script=inFlight;
+      for(const old of frame.layers){const layer=layers.find(l=>states.get(l).id===old.id);if(layer)Object.assign(states.get(layer),old);}
+      soundCommands.length=0;activeScript=undefined;inFlight=undefined;
+      if(script){
+        script.interruptions=(script.interruptions??0)+1;
+        if(script.interruptions>=3){
+          script.disabled=true;
+          for(const [key,timer] of timers)if(timer.script===script)timers.delete(key);
+          warnings.add('SceneScript binding disabled after repeated execution timeouts: layer '+script.spec.id+', '+script.spec.property);
+        }
+      }
+      return script?1:0;
+    },
     select(json){select(JSON.parse(json));moduleSaved=JSON.parse(stringify(states.get(current)));},
     loadFailed(json){const spec=JSON.parse(json);select(spec);Object.assign(states.get(current),moduleSaved);warnings.add('SceneScript module disabled after an unsupported API or invalid value: layer '+spec.id+', '+spec.property);},
     pending(){const out=stringify(pending);pending.length=0;return out;},
@@ -216,8 +236,10 @@ const guest = String.raw`(function(input) {
         buffer.left[i]=l/stride;buffer.right[i]=r/stride;buffer.average[i]=(l+r)/stride/2;
       }
       for(const script of scripts)if(!script.disabled&&typeof script.update==='function'){select(script.spec);invoke(script,script.update,[read(script.spec)],true);}
+      inFlight=undefined;
       const out=stringify({layers:layers.filter(l=>!states.get(l).sound).map(l=>{const {bones,bonePose,...state}=states.get(l);return state;}),soundCommands,audio:buffers.length>0,warnings:[...warnings]});
       soundCommands.length=0;
+      for(const script of scripts)script.interruptions=0;
       for(const layer of layers)states.get(layer).boneWrites={};
       return out;
     }
@@ -237,11 +259,19 @@ export class ScenePropertyScripts {
   private deadline = 0;
   private disposed = false;
   private bindingCount = 0;
+  private interrupted = false;
+  private lastFrame: ScriptFrame;
+  private recoveryFailures = 0;
+  recoveries = 0;
   private constructor(vm: QuickJSContext, private data: BrowserScene, private partial: boolean) {
     this.vm = vm;
+    this.lastFrame = { layers: data.layers.map(state), audio: false, warnings: [], soundCommands: [] };
     vm.runtime.setMemoryLimit(16 * 1024 * 1024);
     vm.runtime.setMaxStackSize(256 * 1024);
-    vm.runtime.setInterruptHandler(() => performance.now() > this.deadline);
+    vm.runtime.setInterruptHandler(() => {
+      if (performance.now() <= this.deadline) return false;
+      this.interrupted = true; return true;
+    });
     vm.runtime.setModuleLoader(sceneGuestModule);
   }
   static async create(data: BrowserScene, now = Date.now(), poses: ScriptBonePose[] = [], partial = false) {
@@ -295,7 +325,7 @@ export class ScenePropertyScripts {
     }
   }
   private result(result: ReturnType<QuickJSContext["evalCode"]>) {
-    if (result.error) { result.error.dispose(); throw new Error("SceneScript failed: unsupported API, invalid value, or execution limit"); }
+    if (result.error) { result.error.dispose(); throw new SceneScriptExecutionError(this.interrupted); }
     return result.value;
   }
   private call(name: string, json: string, first?: QuickJSHandle) {
@@ -305,21 +335,35 @@ export class ScenePropertyScripts {
   }
   update(time: number, dt: number, audio: number[] = [], now = Date.now(), input: SceneScriptInput = {}) {
     if (this.disposed) throw new Error("SceneScript is disposed");
-    this.deadline = performance.now() + 8;
     if (![time, dt, now].every(Number.isFinite) || dt < 0 || dt > 1 || audio.length > 128 || audio.some(n => !Number.isFinite(n) || n < 0 || n > 1)) throw new Error("Invalid SceneScript frame input");
     const vector=(v:number[],n:number)=>Array.isArray(v)&&v.length===n&&v.every(x=>Number.isFinite(x)&&Math.abs(x)<=1e6);
     if (input.cursor && !vector(input.cursor,3) || (input.events?.length??0)>32 || input.events?.some(e=>!["cursorDown","cursorUp","cursorClick","cursorMove","cursorEnter","cursorLeave"].includes(e.type)||!vector(e.cursor,3)||e.ids.length>512||e.ids.some(id=>!Number.isInteger(id))||Object.entries(e.local??{}).some(([id,v])=>!e.ids.includes(Number(id))||!vector(v,3))) || (input.bones?.length??0)>512 || input.bones?.some(b=>!Number.isInteger(b.id)||!vector(b.world,16)||b.local.length>64||b.local.some(m=>!vector(m,16)))) throw new Error("Invalid SceneScript interaction input");
     const frameInput=JSON.stringify({time,dt,audio,now,input});
     if ((input.sounds?.length ?? 0) > 16 || input.sounds?.some(s => !this.data.sounds?.some(d => d.id === s.id) || typeof s.playing !== "boolean" || !Number.isFinite(s.volume) || s.volume < 0 || s.volume > 1)) throw new Error("Invalid SceneScript sound input");
     if(frameInput.length>1024*1024)throw new Error("SceneScript interaction input exceeds limit");
-    const output = this.call("tick", frameInput);
+    // Validation/serialization happens outside the guest's execution budget.
+    this.interrupted = false; this.deadline = performance.now() + 8;
+    let output: QuickJSHandle;
+    try { output = this.call("tick", frameInput); }
+    catch (error) {
+      if (!this.partial || !(error instanceof SceneScriptExecutionError) || !error.interrupted) throw error;
+      // An interrupted VM call cannot finish its JS catch/finally cleanup. Restore
+      // the last validated layer state in a separately bounded recovery call.
+      this.interrupted = false; this.deadline = performance.now() + 8;
+      const recovery = this.call("recover", JSON.stringify({ layers: this.lastFrame.layers }));
+      let identified;
+      try { identified = this.vm.getNumber(recovery) !== 0; } finally { recovery.dispose(); }
+      if (!identified && ++this.recoveryFailures >= 3) throw error;
+      this.recoveries++;
+      return { ...this.lastFrame, soundCommands: [], warnings: [...this.lastFrame.warnings, "SceneScript frame deferred after an execution timeout; last valid layer state retained"] };
+    }
     let json: string;
     try {
       if (this.vm.typeof(output) !== "string") throw new Error("Invalid SceneScript result");
       json = this.vm.getString(output);
       if (json.length > 1024 * 1024) throw new Error("SceneScript result exceeds limit");
     } finally { output.dispose(); }
-    const frame = JSON.parse(json) as { layers: ScriptLayerState[]; audio: boolean; warnings: string[]; soundCommands: SceneSoundCommand[] };
+    const frame = JSON.parse(json) as ScriptFrame;
     if (!Array.isArray(frame.soundCommands) || frame.soundCommands.length > 64 || frame.soundCommands.some(c => !this.data.sounds?.some(s => s.id === c.id) || !["play","pause","stop","volume"].includes(c.action) || c.action === "volume" && (!Number.isFinite(c.value) || c.value! < 0 || c.value! > 1))) throw new Error("Invalid SceneScript sound command");
     if(!Array.isArray(frame.warnings)||frame.warnings.length>512||frame.warnings.some(w=>typeof w!=="string"||w.length>256))throw new Error("Invalid SceneScript warnings");
     if (!Array.isArray(frame.layers) || frame.layers.length > 512) throw new Error("SceneScript layer limit");
@@ -350,6 +394,7 @@ export class ScenePropertyScripts {
       }
     }
     this.attachCreatedLayers();
+    this.lastFrame = frame; this.recoveryFailures = 0;
     return frame;
   }
   dispose() { if (!this.disposed) { this.disposed = true; this.api?.dispose(); this.vm.dispose(); } }

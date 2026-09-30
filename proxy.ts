@@ -32,4 +32,4 @@ export function proxy(request: NextRequest) {
 // same goes for the web app manifest and its icons: browsers fetch them
 // without cookies, and a login redirect there breaks PWA installation.
 // The upload route applies guardApiRequest itself and streams the body to disk.
-export const config = { matcher: "/((?!api/wallpapers/upload$|_next/static|_next/image|favicon\\.ico|manifest\\.webmanifest|icon\\.svg|icon\\.png|icon-192\\.png).*)" };
+export const config = { matcher: "/((?!api/wallpapers/(?:bgm/)?upload$|_next/static|_next/image|favicon\\.ico|manifest\\.webmanifest|icon\\.svg|icon\\.png|icon-192\\.png).*)" };

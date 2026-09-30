@@ -11,6 +11,27 @@ const jiti = createJiti(import.meta.url, {
 const { ChatInput, ModelErrorBanner, filterModelOptions } = await jiti.import("./ChatInput.tsx");
 const { setDraft, clearDraft } = await jiti.import("@/lib/draft-store");
 
+test("populated composer notices, queued prompts and attachments use standalone glass", () => {
+  const draftKey = "composer-populated-glass-test";
+  setDraft(draftKey, { value: "", images: [], files: [{ name: "notes.txt", mimeType: "text/plain", content: "Notes", size: 5 }] });
+  try {
+    const html = renderToStaticMarkup(React.createElement(ChatInput, {
+      onSend() {}, onAbort() {}, isStreaming: true, draftKey,
+      modelError: "Model unavailable", retryInfo: { attempt: 1, maxAttempts: 3 },
+      compactResult: { tokensBefore: 12000, estimatedTokensAfter: 4000 },
+      activeGoal: { objective: "Review the output", startedAt: 0 },
+      activePlan: { objective: "Check all panels" },
+      queuedMessages: { followUp: ["Next task"], steering: [] },
+    }));
+    for (const name of ["model-error", "retry", "compaction-result", "goal", "plan", "queue-panel", "file-attachment"]) {
+      assert.ok(html.includes(`class="composer-${name} wallpaper-surface"`), `${name} glass`);
+    }
+    assert.match(html, /var\(--status-error\)/);
+    assert.match(html, /var\(--status-warning\)/);
+    assert.match(html, /var\(--status-success\)/);
+  } finally { clearDraft(draftKey); }
+});
+
 test("send, queue and stop all opt into inset glass styling", () => {
   const draftKey = "chat-input-glass-action-test";
   for (const [isStreaming, value] of [[false, ""], [false, "Send"], [true, ""], [true, "Queue"]]) {

@@ -1,3 +1,4 @@
+import { validBgmId } from "./wallpaper-bgm";
 export type GlassMode = "default" | "clear" | "frosted";
 export type WallpaperTextMode = "fixed" | "auto" | "material";
 export interface WallpaperInfo {
@@ -24,6 +25,7 @@ export interface WallpaperPreferences {
   adaptivePalette: boolean;
   volume: number;
   muted: boolean;
+  bgmId: string | null;
 }
 export function parseWallpaperPreferences(raw: string | null): WallpaperPreferences {
   let v: Partial<WallpaperPreferences> = {};
@@ -44,6 +46,7 @@ export function parseWallpaperPreferences(raw: string | null): WallpaperPreferen
     adaptivePalette: v.adaptivePalette === true,
     volume: typeof v.volume === "number" && Number.isFinite(v.volume) ? Math.max(0, Math.min(100, v.volume)) : 50,
     muted: v.muted === true,
+    bgmId: validBgmId(v.bgmId) ? v.bgmId : null,
   };
 }
 export function wallpaperUrl(id: string, preview = false) {

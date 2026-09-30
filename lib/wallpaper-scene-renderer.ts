@@ -16,6 +16,8 @@ import type { SceneScriptInput } from "./wallpaper-script-bones";
 import { pointInSceneMesh, sceneCursorPosition } from "./wallpaper-scene-pointer";
 import { audioUniformSpectrum, type WallpaperAudio } from "./wallpaper-audio";
 import { SceneTextScheduler } from "./wallpaper-text-scheduler";
+import { loadSceneFont, loadSceneResources, loadSceneVideo, sceneTextureDemand, type LoadedSceneFont } from "./wallpaper-scene-loading";
+import { cachedSceneAsset, cacheSceneVideo, sceneAssetBlob } from "./wallpaper-client-cache";
 
 const vertex = `precision highp float;
 attribute vec3 a_Position;
@@ -349,6 +351,12 @@ export class BrowserSceneRenderer {
   private camera: T.OrthographicCamera;
   private textures = new Map<string, T.Texture>();
   private videos: HTMLVideoElement[] = [];
+  private videoSources = new Map<HTMLVideoElement, string>();
+  private videoKeys = new Map<HTMLVideoElement, string>();
+  private videoObjectUrls = new Set<string>();
+  private videoCacheTimers = new Set<ReturnType<typeof setTimeout>>();
+  private videoLoads = new Map<HTMLVideoElement, Promise<void>>();
+  private resourceAbort = new AbortController();
   private videoPlayback = new Map<string, boolean>();
   private videoStarting = new WeakSet<HTMLVideoElement>();
   private compositionTargets: T.WebGLRenderTarget[] = [];
@@ -357,7 +365,7 @@ export class BrowserSceneRenderer {
   private audioRequired = false;
   private scriptStates = new Map<number, ScriptLayerState>();
   private scriptUniforms = new Map<number, Record<string, T.IUniform>[]>();
-  private fonts: FontFace[] = [];
+  private fonts: LoadedSceneFont[] = [];
   private textLayers: import("./wallpaper-scene-text").SceneTextTexture[] = [];
   private textScheduler = new SceneTextScheduler();
   private skins: { id: number; animation: SceneMeshAnimator; positions: T.BufferAttribute; opacities: T.BufferAttribute }[] = [];
@@ -504,48 +512,39 @@ gl_FragColor=vec4(max(vec3(0.0),2.0*c-gray)*excess,1.0);}`;
   private visibility = () => { this.last = 0; this.setPaused(this.paused); };
   static async create(canvas: HTMLCanvasElement, data: BrowserScene, signal: AbortSignal, onError: (e: string) => void) {
     const result = new BrowserSceneRenderer(canvas, data, onError);
+    const aborted = () => result.resourceAbort.abort();
+    signal.addEventListener("abort", aborted, { once: true });
+    if (signal.aborted) aborted();
+    const loadingSignal = result.resourceAbort.signal;
     try {
-      for (const info of data.textures) {
+      await loadSceneResources([...new Map(data.textures.map(info => [info.key, info])).values()], loadingSignal, async info => {
         if (info.mimeType === "video/mp4") {
           const video = document.createElement("video");
           result.videos.push(video);
-          video.muted = true; video.loop = true; video.playsInline = true; video.preload = "auto";
-          await new Promise<void>((resolve, reject) => {
-            const cleanup = () => { video.removeEventListener("loadeddata", loaded); video.removeEventListener("error", failed); signal.removeEventListener("abort", aborted); };
-            const loaded = () => { cleanup(); resolve(); };
-            const failed = () => { cleanup(); reject(new Error("Cannot decode embedded scene video")); };
-            const aborted = () => { cleanup(); reject(new DOMException("Aborted", "AbortError")); };
-            video.addEventListener("loadeddata", loaded); video.addEventListener("error", failed); signal.addEventListener("abort", aborted, { once: true });
-            if (signal.aborted) { aborted(); return; }
-            video.src = info.url;
-          });
-          video.width = video.videoWidth; video.height = video.videoHeight;
+          video.muted = true; video.loop = true; video.playsInline = true; video.preload = "none";
+          video.width = info.width; video.height = info.height;
+          result.videoSources.set(video, info.url);
+          result.videoKeys.set(video, info.key);
           const texture = new T.VideoTexture(video); texture.flipY = false; texture.colorSpace = T.NoColorSpace;
           result.textures.set(info.key, texture);
-          continue;
+          return;
         }
-        const response = await fetch(info.url, { signal });
-        if (!response.ok) throw new Error("Cannot load scene texture");
-        const bitmap = await createImageBitmap(await response.blob(), { premultiplyAlpha: "none", colorSpaceConversion: "none" });
+        const bitmap = await createImageBitmap(await sceneAssetBlob(info.url, info.key, signal), { premultiplyAlpha: "none", colorSpaceConversion: "none" });
         if (signal.aborted) { bitmap.close(); throw new DOMException("Aborted", "AbortError"); }
         const texture = new T.Texture(bitmap); texture.flipY = false; texture.colorSpace = T.NoColorSpace;
         texture.minFilter = T.LinearMipmapLinearFilter; texture.magFilter = T.LinearFilter;
         texture.anisotropy = Math.min(8, result.renderer.capabilities.getMaxAnisotropy()); texture.needsUpdate = true;
         result.textures.set(info.key, texture);
-      }
+      });
       if (data.layers.some(layer => layer.texture === "@transparent")) {
         const texture = new T.DataTexture(new Uint8Array(4), 1, 1);
         texture.needsUpdate = true;
         result.textures.set("@transparent", texture);
       }
-      for (const info of data.fonts || []) {
-        const response = await fetch(info.url, { signal });
-        if (!response.ok) throw new Error("Cannot load scene font");
-        const face = new FontFace(`we-${info.key}`, await response.arrayBuffer());
-        await face.load();
-        signal.throwIfAborted();
-        document.fonts.add(face); result.fonts.push(face);
-      }
+      await loadSceneResources(data.fonts || [], loadingSignal, async info => {
+        const blob = await sceneAssetBlob(info.url, info.key, signal);
+        result.fonts.push(await loadSceneFont(`we-${info.key}`, blob, signal));
+      });
       for (const [i, layer] of data.layers.entries()) {
         if (layer.text) {
           const { SceneTextTexture } = await import("./wallpaper-scene-text");
@@ -574,11 +573,17 @@ gl_FragColor=vec4(max(vec3(0.0),2.0*c-gray)*excess,1.0);}`;
         result.propertyScripts = await ScenePropertyScripts.create(data, Date.now(), result.scriptBonePoses(), true);
         signal.throwIfAborted();
       }
+      // Scripts decide the active time-of-day layer before any video downloads.
+      result.updatePropertyScripts(0); result.updateLayerTransforms(0);
+      const needed = result.neededVideoTextures();
+      await loadSceneResources([...result.textures].filter(([key, texture]) => texture instanceof T.VideoTexture && needed.has(key)), loadingSignal, async ([, texture]) => { await result.loadVideo(texture.image as HTMLVideoElement); });
+      signal.throwIfAborted();
       result.ready = true; result.resizeDirty = true;
       result.draw(0);
       if (result.shaderError) throw new Error(`Scene shader compilation failed: ${result.shaderError.slice(0, 400)}`);
       return result;
     } catch (e) { result.dispose(); throw e; }
+    finally { signal.removeEventListener("abort", aborted); }
   }
   private addLayer(layer: SceneLayer, order: number) {
     const capture = layer.texture === "@scene";
@@ -781,7 +786,17 @@ if(u_BlendMode==6.0`) : fragment;
     if (!this.propertyScripts) return;
     this.flushCursorMove();
     const bones = this.scriptBonePoses();
-    const frame = this.propertyScripts.update(this.time, dt, this.spectrum, Date.now(), { bones, sounds: this.audio?.soundStates(), cursor: this.cursorWorld(), events: this.cursorEvents.splice(0) });
+    let frame;
+    try {
+      frame = this.propertyScripts.update(this.time, dt, this.spectrum, Date.now(), { bones, sounds: this.audio?.soundStates(), cursor: this.cursorWorld(), events: this.cursorEvents.splice(0) });
+      this.canvas.dataset.scriptRecoveries = String(this.propertyScripts.recoveries);
+    } catch {
+      // A failed script guest must not hide the whole scene or leave sound over
+      // a blank page. Keep validated geometry; native video/particles still run.
+      this.propertyScripts.dispose(); this.propertyScripts = undefined;
+      this.scriptWarnings = ["Scene property scripts stopped after a runtime failure; last valid layer state retained"];
+      return;
+    }
     this.scriptWarnings=frame.warnings;
     if (this.audio) for (const command of frame.soundCommands) this.audio.command(command);
     else {
@@ -829,18 +844,48 @@ if(u_BlendMode==6.0`) : fragment;
     this.particles.forEach((p, i) => { p.mesh.renderOrder = frame.layers.length + i; });
     this.canvas.dataset.scriptLayerCount = String(frame.layers.length);
     this.audioRequired ||= frame.audio;
-    this.syncVideoPlayback();
+  }
+  private neededVideoTextures() {
+    const needed = sceneTextureDemand([...this.scriptLayers.values()].map(({ layer, mesh }) => ({ layer, visible: mesh.visible })), this.data.particles);
+    for (const [key, playing] of this.videoPlayback) if (playing) needed.add(key);
+    return needed;
+  }
+  private loadVideo(video: HTMLVideoElement) {
+    let loading = this.videoLoads.get(video);
+    if (!loading) {
+      loading = (async () => {
+        const key = this.videoKeys.get(video)!, source = this.videoSources.get(video)!;
+        const cached = await cachedSceneAsset(key);
+        this.resourceAbort.signal.throwIfAborted();
+        const url = cached ? URL.createObjectURL(cached) : source;
+        if (cached) this.videoObjectUrls.add(url);
+        await loadSceneVideo(video, url, this.resourceAbort.signal);
+        if (!cached) {
+          const timer = setTimeout(() => { this.videoCacheTimers.delete(timer); void cacheSceneVideo(source, key, this.resourceAbort.signal); }, 3000);
+          this.videoCacheTimers.add(timer);
+        }
+      })();
+      this.videoLoads.set(video, loading);
+    }
+    return loading;
   }
   private syncVideoPlayback() {
+    const needed = this.neededVideoTextures();
+    let waiting = false;
     for (const [key, texture] of this.textures) {
       if (!(texture instanceof T.VideoTexture)) continue;
       const video = texture.image as HTMLVideoElement;
-      if (this.paused || document.hidden || this.videoPlayback.get(key) === false) video.pause();
+      if (needed.has(key) && !this.videoLoads.has(video)) {
+        void this.loadVideo(video).then(() => { if (!this.disposed) { this.dirty = true; this.schedule(); } }).catch(e => { if (!this.disposed) this.onError(e.message); });
+      }
+      if (needed.has(key) && video.readyState < video.HAVE_CURRENT_DATA) waiting = true;
+      if (!needed.has(key) || this.paused || document.hidden || this.videoPlayback.get(key) === false) video.pause();
       else if (video.paused && !this.videoStarting.has(video)) {
         this.videoStarting.add(video);
         void video.play().catch(e => { if (!this.disposed && e.name !== "AbortError") this.onError(`Scene video playback failed: ${e.message}`); }).finally(() => this.videoStarting.delete(video));
       }
     }
+    return waiting;
   }
   setAudio(audio: WallpaperAudio) { this.audio = audio; for (const command of this.pendingSoundCommands.splice(0)) audio.command(command); }
   setPaused(paused: boolean) {
@@ -899,6 +944,8 @@ if(u_BlendMode==6.0`) : fragment;
       this.canvas.dataset.renderResolution = `${w}x${h}`;
     }
     this.updateLayerTransforms(this.propertyScripts && this.skins.length ? 0 : dt);
+    // Retain the last complete frame during a newly selected clip's first load.
+    if (this.syncVideoPlayback()) { this.dirty = true; return; }
     this.camera.updateMatrixWorld();
     const now = new Date();
     const daytime = (now.getHours() * 3600 + now.getMinutes() * 60 + now.getSeconds()) / 86400;
@@ -981,11 +1028,14 @@ if(u_BlendMode==6.0`) : fragment;
     for (const target of this.compositionTargets) target.dispose();
     for (const p of this.particles) p.dispose(); for (const target of new Set(this.passes.map(p => p.target))) target.dispose();
     for (const m of this.materials) m.dispose(); for (const g of this.geometries) g.dispose();
+    this.resourceAbort.abort();
+    for (const timer of this.videoCacheTimers) clearTimeout(timer);
     for (const video of this.videos) { video.pause(); video.removeAttribute("src"); video.load(); }
+    for (const url of this.videoObjectUrls) URL.revokeObjectURL(url);
     for (const text of this.textLayers) text.dispose();
     this.propertyScripts?.dispose();
     for (const skin of this.skins) skin.animation.dispose();
-    for (const font of this.fonts) document.fonts.delete(font);
+    for (const font of this.fonts) font.dispose();
     for (const t of this.textures.values()) { const image = t.image as { close?: () => void } | undefined; image?.close?.(); t.dispose(); }
     this.renderer.dispose(); this.renderer.forceContextLoss();
   }

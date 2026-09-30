@@ -1264,6 +1264,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
 
             {conversationMeta.hasCompaction && (
               <div
+                className="compacted-history-notice wallpaper-surface"
                 style={{
                   display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12,
                   marginBottom: 8, padding: "7px 10px", border: "1px solid var(--border)",
@@ -1323,6 +1324,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
             {toolCallsDefaultCollapsed && pendingToolHeaders.map((tool) => (
               <div
                 key={tool.id}
+                className="pending-tool-notice wallpaper-surface"
                 role="status"
                 aria-label={t("chatWindow.runningNamed", { names: tool.name })}
                 style={{
@@ -1452,7 +1454,7 @@ function ExtensionStatusBar({ statuses }: { statuses: Array<{ key: string; text:
       {statuses.map((status) => (
         <div
           key={status.key}
-          className="ui-compact-surface"
+          className="ui-compact-surface extension-status-surface wallpaper-surface"
           style={{
             display: "flex",
             alignItems: "center",
@@ -1481,7 +1483,7 @@ function ExtensionWidgets({ widgets }: { widgets: Array<{ key: string; lines: st
       {widgets.map((widget) => (
         <pre
           key={widget.key}
-          className="ui-compact-surface"
+          className="ui-compact-surface extension-widget-surface wallpaper-surface"
           role="group"
           aria-label={widget.key}
           title={widget.key}
@@ -1525,7 +1527,7 @@ function NoticeShelf({ notices, onDismiss, floating = false, align = "left" }: {
         return (
           <div
             key={notice.id}
-            className="notice-shelf-item"
+            className="notice-shelf-item wallpaper-surface"
             style={{
               display: "flex",
               alignItems: isError ? "flex-start" : "center",
@@ -1779,6 +1781,7 @@ const MinimizedComposerBar = memo(function MinimizedComposerBar({ draftKey, isSt
     <div style={{ flexShrink: 0, padding: "4px 16px calc(6px + env(safe-area-inset-bottom))" }}>
       <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
         <div
+          className="composer-minimized wallpaper-surface"
           style={{
             display: "flex",
             alignItems: "center",

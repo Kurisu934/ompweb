@@ -1240,7 +1240,7 @@ function CompactionMessageView({ message }: { message: CustomMessage }) {
 
   return (
     <div style={{ marginBottom: 16 }}>
-      <div style={{ border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden", background: "var(--bg)" }}>
+      <div className="wallpaper-surface message-compaction" style={{ border: "1px solid var(--border)", borderRadius: 8, overflow: "hidden", background: "var(--bg)" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, padding: "7px 10px", borderBottom: "1px solid var(--border)", background: "var(--bg-panel)", color: "var(--text-muted)" }}>
           <span style={{ fontFamily: "var(--font-mono)", fontSize: 11, fontWeight: 650 }}>{t("messageView.compactionLabel")}</span>
           {time && <span style={{ marginLeft: "auto", color: "var(--text-dim)", fontSize: 10 }}>{time}</span>}
@@ -1358,6 +1358,7 @@ function HiddenExtensionView({ message, cwd, onOpenFile }: { message: CustomMess
           <div style={{ flex: 1, height: 1, background: "var(--border)", opacity: 0.55 }} />
           <button
             type="button"
+            className="wallpaper-surface message-hidden-toggle"
             onClick={() => setExpanded((v) => !v)}
             aria-expanded={expanded}
             aria-label={expanded ? t("messageView.collapse") : t("messageView.expand")}
@@ -1395,6 +1396,7 @@ function HiddenExtensionView({ message, cwd, onOpenFile }: { message: CustomMess
         {time ? <span style={{ userSelect: "none", marginTop: 2, color: "var(--text-dim)", fontSize: 10, fontVariantNumeric: "tabular-nums", opacity: 0.75 }}>{time}</span> : null}
         {expanded ? (
           <div
+            className="wallpaper-surface message-hidden-content"
             style={{
               marginTop: 6,
               width: "100%",
@@ -1547,6 +1549,7 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
       <div
         data-selection-scope="message"
         tabIndex={-1}
+        className="wallpaper-surface message-custom"
         style={{
           border: "1px solid var(--border)",
           borderRadius: 8,
@@ -1805,7 +1808,7 @@ function BashExecutionView({ message, sessionId }: { message: BashExecutionMessa
     : null;
 
   return (
-    <div data-selection-scope="message" tabIndex={-1} style={{ margin: "6px 0" }}>
+    <div className="wallpaper-surface message-execution" data-selection-scope="message" tabIndex={-1} style={{ margin: "6px 0" }}>
       <ToolCallBlock block={block} result={result} />
       {downloadUrl && (
         <div style={{ display: "flex", alignItems: "center", gap: 12, marginTop: 6 }}>

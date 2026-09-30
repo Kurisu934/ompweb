@@ -84,6 +84,7 @@ async function setup(page, artwork, theme = 'dark') {
     if (p === `/api/wallpapers/${wid}/media`) return route.fulfill({ contentType: 'image/png', body: artwork });
     if (p === '/api/wallpapers') return reply({ wallpapers: [{ id: wid, title: 'Alpine dusk (demo)', kind: 'image', source: 'folder', preview: true }], roots: [], warnings: [] });
     if (p === '/api/wallpapers/scene-status') return reply({ available: true });
+    if (p === '/api/wallpapers/bgm') return reply({ tracks: [] });
     if (p === '/api/provider-usage') return reply({ generatedAt: Date.now(), reports: [{ provider: 'charm-hyper', accountLabel: 'Demo account', accountIndex: 0, credits: { remaining: 175, limit: 250, limitSource: 'fallback', percent: 30 } }] });
     if (p === '/api/worktrees') return reply({ worktrees: [] });
     if (p === '/api/git/status') return reply({ isGitRepo: false, files: [] });

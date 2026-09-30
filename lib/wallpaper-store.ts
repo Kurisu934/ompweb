@@ -7,7 +7,7 @@ import type { WallpaperInfo } from "./wallpapers";
 
 export const MAX_WALLPAPER_BYTES = 512 * 1024 * 1024;
 const TYPES: Record<string, string> = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif", ".avif": "image/avif", ".mp4": "video/mp4", ".webm": "video/webm" };
-type Entry = WallpaperInfo & { folder: string; file?: string; thumbnail?: string; resourceFolder?: string; metadata?: Record<string, unknown> };
+type Entry = WallpaperInfo & { folder: string; file?: string; thumbnail?: string; resourceFolder?: string; metadata?: Record<string, unknown>; projectFiles?: string[] };
 type Catalog = { entries: Entry[]; roots: string[]; warnings: string[] };
 const storeDir = () => path.join(getAgentDir(), "web-wallpapers");
 const uploadsDir = () => path.join(storeDir(), "imports");
@@ -111,7 +111,7 @@ async function scan(): Promise<Catalog> {
         let thumbnail: string | undefined;
         try { if (typeof p.preview === "string" && wallpaperMime(p.preview)?.startsWith("image/")) thumbnail = await safeWallpaperFile(folder, p.preview.replaceAll("\\", "/")); } catch { /* optional preview */ }
         const id = key(path.resolve(folder));
-        entries.set(id, { id, title, kind, source, folder, file, thumbnail, preview: !!thumbnail || kind === "image", metadata: p });
+        entries.set(id, { id, title, kind, source, folder, file, thumbnail, preview: !!thumbnail || kind === "image", metadata: p, projectFiles: [path.join(folder, "project.json")] });
       } catch { warnings.push(`Invalid project: ${path.basename(folder)}`); }
       return;
     }
@@ -142,6 +142,7 @@ async function scan(): Promise<Catalog> {
     resolvePreset(base, new Set(seen).add(e));
     if (base.kind === "unsupported" || base.reason) { e.reason = base.reason || "Unsupported base wallpaper"; return; }
     e.kind = base.kind; e.resourceFolder = base.resourceFolder || base.folder; e.file = base.file;
+    e.projectFiles = [...new Set([...(e.projectFiles || []), ...(base.projectFiles || [])])];
     e.metadata = { ...base.metadata, preset: { ...(base.metadata?.preset as object || {}), ...(e.metadata.preset as object || {}) } };
   }
   for (const e of entries.values()) resolvePreset(e);
@@ -168,7 +169,7 @@ export async function resolveSceneProject(id: string) {
   let file: string;
   try { file = await safeWallpaperFile(folder, entryFile.replace(/\.json$/, ".pkg")); }
   catch { file = await safeWallpaperFile(folder, entryFile); }
-  return { project, file, metadata, entryFile };
+  return { project, file, metadata, entryFile, projectFiles: [...new Set([project, ...(entry.projectFiles || [])])] };
 }
 export async function resolveWebProject(id: string) {
   if (!/^[a-f0-9]{32}$/.test(id)) throw new Error("Wallpaper not found");

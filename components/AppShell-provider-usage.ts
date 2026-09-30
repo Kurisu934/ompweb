@@ -55,30 +55,72 @@ export type ProviderUsageState = {
   error: boolean;
 };
 
-export function useProviderUsage(query: string | null, refreshMs?: number): ProviderUsageState {
+export function useProviderUsage(query: string | null, refreshMs = 60_000): ProviderUsageState {
   const [state, setState] = useState<ProviderUsageState>({ snapshot: null, loading: false, error: false });
   useEffect(() => {
     if (query === null) {
       setState({ snapshot: null, loading: false, error: false });
       return;
     }
-    const controller = new AbortController();
+    const polling = Number.isFinite(refreshMs) && refreshMs > 0;
+    let disposed = false;
+    let inFlight = false;
+    let nextRefreshAt = 0;
+    let controller: AbortController | undefined;
+    let refreshTimer: number | undefined;
+    let requestTimer: number | undefined;
+    const canLoad = () => document.visibilityState !== "hidden" && navigator.onLine !== false;
+    const clearRefreshTimer = () => {
+      window.clearTimeout(refreshTimer);
+      refreshTimer = undefined;
+    };
+    const schedule = () => {
+      clearRefreshTimer();
+      if (disposed || inFlight || !polling || !canLoad()) return;
+      refreshTimer = window.setTimeout(() => void load(), Math.max(0, nextRefreshAt - Date.now()));
+    };
     setState({ snapshot: null, loading: true, error: false });
     const load = async () => {
+      if (disposed || inFlight || !canLoad()) return;
+      clearRefreshTimer();
+      inFlight = true;
+      const request = new AbortController();
+      controller = request;
+      requestTimer = window.setTimeout(() => request.abort(), 35_000);
       try {
-        const response = await fetch(`/api/provider-usage${query ? `?${query}` : ""}`, { signal: controller.signal });
+        const response = await fetch(`/api/provider-usage${query ? `?${query}` : ""}`, { signal: request.signal, cache: "no-store" });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         const snapshot = await response.json() as ProviderUsageSnapshot;
-        if (!controller.signal.aborted) setState({ snapshot, loading: false, error: false });
+        if (!disposed && !request.signal.aborted) setState({ snapshot, loading: false, error: false });
       } catch {
-        if (!controller.signal.aborted) setState({ snapshot: null, loading: false, error: true });
+        if (!disposed) setState((previous) => ({ ...previous, loading: false, error: true }));
+      } finally {
+        window.clearTimeout(requestTimer);
+        inFlight = false;
+        // Count from completion so slow requests neither overlap nor race the server cache TTL.
+        nextRefreshAt = polling ? Date.now() + refreshMs : Infinity;
+        schedule();
       }
     };
+    const resume = () => {
+      if (!canLoad()) clearRefreshTimer();
+      else if (Date.now() >= nextRefreshAt) void load();
+      else schedule();
+    };
     void load();
-    const interval = refreshMs ? window.setInterval(() => void load(), refreshMs) : undefined;
+    document.addEventListener("visibilitychange", resume);
+    window.addEventListener("focus", resume);
+    window.addEventListener("online", resume);
+    window.addEventListener("offline", resume);
     return () => {
-      controller.abort();
-      if (interval !== undefined) window.clearInterval(interval);
+      disposed = true;
+      controller?.abort();
+      clearRefreshTimer();
+      window.clearTimeout(requestTimer);
+      document.removeEventListener("visibilitychange", resume);
+      window.removeEventListener("focus", resume);
+      window.removeEventListener("online", resume);
+      window.removeEventListener("offline", resume);
     };
   }, [query, refreshMs]);
   return state;

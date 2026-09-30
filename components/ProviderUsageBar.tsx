@@ -80,7 +80,7 @@ function DetailMeter({ short, window, t }: {
 // slim row per account (worst window only), click to expand the full detail.
 export function ProviderUsageBar() {
   const { t } = useI18n();
-  const { snapshot, loading, error } = useProviderUsage("", 5 * 60_000);
+  const { snapshot, loading, error } = useProviderUsage("");
   const reports = snapshot?.reports ?? [];
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
   // The first render must match the server, where localStorage is unavailable,

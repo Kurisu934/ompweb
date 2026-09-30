@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, type CSSProperties } from "react";
 import { ensureLanguageRegistered, isLanguageRegistered, SyntaxHighlighter, vs, vscDarkPlus } from "@/lib/syntax-highlight";
 import { useTheme } from "@/hooks/useTheme";
 
@@ -8,6 +8,18 @@ interface Props {
   code: string;
   lang: string;
 }
+
+// Keep the native palette without wallpaper; on glass, tint readable ink with
+// the existing syntax colors instead of assuming the native theme's backdrop.
+function withWallpaperInk(theme: Record<string, CSSProperties>) {
+  return Object.fromEntries(Object.entries(theme).map(([selector, style]) => [selector, {
+    ...style,
+    ...(style.color ? { color: `color-mix(in srgb, var(--wallpaper-code-ink, ${style.color}) 85%, ${style.color})` } : {}),
+  }]));
+}
+
+const lightCodeTheme = withWallpaperInk(vs);
+const darkCodeTheme = withWallpaperInk(vscDarkPlus);
 
 function PlainCode({ code }: { code: string }) {
   return (
@@ -50,7 +62,7 @@ export function SyntaxHighlightedCode({ code, lang }: Props) {
   return (
     <SyntaxHighlighter
       language={lang || "text"}
-      style={isDark ? vscDarkPlus : vs}
+      style={isDark ? darkCodeTheme : lightCodeTheme}
       showLineNumbers
       lineNumberStyle={{ color: "var(--text-dim)", fontStyle: "normal" }}
       customStyle={{

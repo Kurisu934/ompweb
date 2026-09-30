@@ -16,12 +16,13 @@ export function useWallpaperContrast(p: WallpaperPreferences, ready: boolean) {
     const paint = () => {
       timer = 0;
       if (stopped || document.hidden) return;
-      const active = new Set<HTMLElement>();
+      const active = new Set<HTMLElement>(), measured = new Set<HTMLElement>();
       const add = (el: HTMLElement) => {
+        if (measured.has(el)) return false;
+        measured.add(el);
         const r = el.getBoundingClientRect();
         if (!r.width || !r.height || r.right <= 0 || r.bottom <= 0 || r.left >= innerWidth || r.top >= innerHeight || getComputedStyle(el).visibility !== "visible") return false;
-        if (el.dataset.wallpaperInk !== "global") el.dataset.wallpaperInk = "global";
-        active.add(el); touched.add(el); return true;
+        active.add(el); return true;
       };
       for (const root of document.querySelectorAll<HTMLElement>(ROOTS)) {
         const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, { acceptNode(node) {
@@ -31,6 +32,12 @@ export function useWallpaperContrast(p: WallpaperPreferences, ready: boolean) {
         while ((node = walker.nextNode()) && count < 6000) if (node.parentElement instanceof HTMLElement && add(node.parentElement)) count++;
         for (const el of root.querySelectorAll<HTMLElement>(CONTROLS)) if (!el.closest(PROTECTED)) add(el);
         if (root.matches(CONTROLS) && !root.closest(PROTECTED)) add(root);
+      }
+      // Read every bound before writing styles; interleaving them forces layout
+      // for each text node in restored, long chat transcripts.
+      for (const el of active) {
+        if (el.dataset.wallpaperInk !== "global") el.dataset.wallpaperInk = "global";
+        touched.add(el);
       }
       for (const el of touched) if (!active.has(el)) { delete el.dataset.wallpaperInk; touched.delete(el); }
     };

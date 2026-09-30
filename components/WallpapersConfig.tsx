@@ -6,6 +6,7 @@ import { useI18n } from "@/lib/i18n";
 import { wallpaperUrl, type WallpaperInfo, type WallpaperTextMode } from "@/lib/wallpapers";
 import { WallpaperControls } from "./WallpaperControls";
 import { WallpaperCrop } from "./WallpaperCrop";
+import { WallpaperBgmConfig } from "./WallpaperBgmConfig";
 
 type Library = { wallpapers: WallpaperInfo[]; roots: string[]; warnings: string[] };
 export function WallpapersConfig() {
@@ -102,6 +103,7 @@ export function WallpapersConfig() {
       <label>{zh ? "玻璃不透明度" : "Glass opacity"}<input aria-label={zh ? "玻璃不透明度" : "Glass opacity"} type="range" min="0" max="100" disabled={p.glass === "clear"} value={p.glassOpacity} onChange={e => update({ glassOpacity: Number(e.target.value) })} /><output>{p.glassOpacity}%</output></label>
     </div>
     {p.id && p.kind !== "web" && <WallpaperCrop key={p.id} />}
+    <WallpaperBgmConfig />
     <form className="wallpaper-folder" onSubmit={e => { e.preventDefault(); void action(async () => { await mutate("POST", { folder }); setFolder(""); }); }}>
       <input aria-label={zh ? "服务器壁纸文件夹" : "Server wallpaper folder"} placeholder={zh ? "服务器壁纸文件夹的完整路径" : "Absolute server wallpaper folder"} value={folder} onChange={e => setFolder(e.target.value)} />
       <button className="wallpaper-icon" type="submit" disabled={busy || !folder.trim()} title={zh ? "添加文件夹" : "Add folder"} aria-label={zh ? "添加文件夹" : "Add folder"}><FolderPlus size={17} /></button>

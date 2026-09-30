@@ -10,11 +10,9 @@ import { sceneWorldTransforms } from "./wallpaper-scene-parent";
 import { parseSceneTimeline } from "./wallpaper-timeline";
 import { readScenePropertyOverrides, resolveSceneProject, safeWallpaperFile } from "./wallpaper-store";
 import type { BrowserScene, SceneLayer, ScenePass, SceneParticles, ScenePropertyScript, SceneValues } from "./wallpaper-scene-types";
+import { cachedBrowserScene } from "./wallpaper-scene-cache";
 
 type Compiled = { manifest: BrowserScene; assets: Map<string, Buffer> };
-type CacheEntry = { time: number; pending: boolean; promise: Promise<Compiled> };
-const state = globalThis as typeof globalThis & { __ompBrowserScenes?: Map<string, CacheEntry> };
-const cache = state.__ompBrowserScenes ??= new Map();
 const obj = (v: unknown): SceneValues => v && typeof v === "object" && !Array.isArray(v) ? v as SceneValues : {};
 const array = (v: unknown): SceneValues[] => Array.isArray(v) ? v.map(obj) : [];
 export function sceneVector(v: unknown, fallback: number[]) {
@@ -36,8 +34,11 @@ function builtinRoots(project: string) {
   if (process.platform === "win32") roots.push(path.join(process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)", "Steam/steamapps/common/wallpaper_engine/assets"));
   return [...new Set(roots)];
 }
-export async function compileBrowserScene(id: string): Promise<Compiled> {
-  const { project, file, entryFile, metadata } = await resolveSceneProject(id);
+export async function compileBrowserScene(id: string, observe: (file: string) => Promise<void> = async () => {}): Promise<Compiled> {
+  const { project, file, entryFile, metadata, projectFiles } = await resolveSceneProject(id);
+  for (const input of projectFiles) await observe(input);
+  await observe(path.join(path.dirname(project), entryFile.replace(/\.json$/, ".pkg")));
+  await observe(file);
   const propertyDefinitions = obj(obj(metadata.general).properties);
   const overrides = Object.fromEntries(Object.entries(await readScenePropertyOverrides(id)).filter(([key, value]) =>
     Object.hasOwn(propertyDefinitions, key) && typeof value === typeof obj(propertyDefinitions[key]).value));
@@ -49,6 +50,7 @@ export async function compileBrowserScene(id: string): Promise<Compiled> {
     const packed = resources.get(name);
     if (packed) { if (packed.length > limit) throw new Error("Scene resource too large"); return packed; }
     for (const root of roots) {
+      await observe(path.resolve(root, name));
       try { return await boundedRead(await safeWallpaperFile(root, name), limit); }
       catch (e) { if (!/ENOENT|not a directory/i.test(String(e))) throw e; }
     }
@@ -376,20 +378,4 @@ export async function compileBrowserScene(id: string): Promise<Compiled> {
   return { manifest, assets };
 }
 
-export async function browserScene(id: string) {
-  if (!/^[a-f0-9]{32}$/.test(id)) throw new Error("Invalid scene identifier");
-  const key = `${process.env.PI_CODING_AGENT_DIR || ""}|${process.env.OMP_WEB_WALLPAPER_ASSETS || ""}|${id}`;
-  let entry = cache.get(key);
-  if (entry && !entry.pending && Date.now() - entry.time > 300_000) { cache.delete(key); entry = undefined; }
-  if (!entry) {
-    if (cache.size >= 2) {
-      const evict = [...cache].find(([, value]) => !value.pending);
-      if (!evict) throw new Error("Two scenes are loading. Please retry after they finish.");
-      cache.delete(evict[0]);
-    }
-    entry = { time: Date.now(), pending: true, promise: compileBrowserScene(id) }; cache.set(key, entry);
-    const current = entry;
-    void current.promise.then(() => { current.pending = false; current.time = Date.now(); }, () => { if (cache.get(key) === current) cache.delete(key); });
-  }
-  return entry.promise;
-}
+export async function browserScene(id: string, validate = false) { return cachedBrowserScene(id, observe => compileBrowserScene(id, observe), validate); }

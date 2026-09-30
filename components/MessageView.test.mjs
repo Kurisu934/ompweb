@@ -14,6 +14,51 @@ const { MessageView, SafeMarkdownBody, TaskResultPanel, isInterruptedMessage } =
 const { CodeBlock } = await jiti.import("./MermaidBlock.tsx");
 afterEach(cleanup);
 
+test("custom and compaction messages expose glass surfaces without losing their content", async (t) => {
+  let copied;
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async text => { copied = text; } } });
+  t.after(() => { delete navigator.clipboard; });
+  const content = "2 background jobs have completed.\n\nJob bg_15: done.";
+  const view = render(React.createElement(MessageView, { message: {
+    role: "custom", customType: "async-result", display: true, content, details: { jobs: 2 },
+  } }));
+  assert.ok(view.container.querySelector(".message-custom.wallpaper-surface"));
+  fireEvent.click(view.getByRole("button", { name: "Show details" }));
+  assert.deepEqual(JSON.parse(view.container.querySelector("pre").textContent), { jobs: 2 });
+  await act(async () => { fireEvent.click(view.getByRole("button", { name: "Copy", exact: true })); });
+  assert.equal(copied, content);
+  fireEvent.click(view.getByRole("button", { name: "Hide details" }));
+  assert.equal(view.container.querySelector("pre"), null);
+  view.rerender(React.createElement(MessageView, { message: {
+    role: "custom", customType: "compaction", content: "Summary retained.", details: { tokensBefore: 1000, tokensAfter: 400 },
+  } }));
+  assert.ok(view.container.querySelector(".message-compaction.wallpaper-surface"));
+  assert.match(view.container.textContent, /Summary retained/);
+});
+
+test("hidden extension glass survives expand, details and collapse", () => {
+  const view = render(React.createElement(MessageView, { message: {
+    role: "custom", customType: "extension_debug", display: false,
+    content: "<note>Extension content.</note>", details: { state: "ready" },
+  } }));
+  const toggle = view.container.querySelector(".message-hidden-toggle.wallpaper-surface");
+  assert.ok(toggle);
+  fireEvent.click(toggle);
+  assert.ok(view.container.querySelector(".message-hidden-content.wallpaper-surface"));
+  fireEvent.click(view.getByRole("button", { name: "Show details" }));
+  assert.deepEqual(JSON.parse(view.container.querySelector("pre").textContent), { state: "ready" });
+  fireEvent.click(toggle);
+  assert.equal(view.container.querySelector(".message-hidden-content"), null);
+});
+
+test("standalone shell executions have their own glass surface", () => {
+  const view = render(React.createElement(MessageView, { message: {
+    role: "bashExecution", command: "echo ready", output: "ready", exitCode: 0,
+  } }));
+  assert.ok(view.container.querySelector(".message-execution.wallpaper-surface"));
+  assert.match(view.container.textContent, /echo ready/);
+});
+
 test("expanded thinking uses an inset surface and retains whitespace and streaming updates", () => {
   const props = thinking => ({
     message: { role: "assistant", content: [{ type: "thinking", thinking }] },

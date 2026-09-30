@@ -24,6 +24,7 @@ test("renders live todo phases, task states, and blockers", () => {
   }));
 
   assert.match(html, /Implementation/);
+  assert.match(html, /class="composer-todo-panel wallpaper-surface /);
   assert.match(html, /Trace todo state/);
   assert.match(html, /Render task list/);
   assert.match(html, /Verify in browser/);
@@ -64,6 +65,7 @@ test("collapsible mode collapses to a toggle header and expands again", () => {
     defaultExpanded: false,
   }));
   assert.match(collapsedHtml, /aria-expanded="false"/);
+  assert.match(collapsedHtml, /class="composer-todo-panel wallpaper-surface /);
   assert.doesNotMatch(collapsedHtml, /Wire panels/);
   const expandedHtml = renderToStaticMarkup(React.createElement(TodoList, {
     phases,
@@ -71,6 +73,7 @@ test("collapsible mode collapses to a toggle header and expands again", () => {
     defaultExpanded: true,
   }));
   assert.match(expandedHtml, /aria-expanded="true"/);
+  assert.match(expandedHtml, /class="composer-todo-panel wallpaper-surface /);
   assert.match(expandedHtml, /Wire panels/);
 });
 

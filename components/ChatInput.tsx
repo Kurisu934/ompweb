@@ -8,6 +8,7 @@ import type { ActiveGoal, ActivePlan } from "@/lib/web-mode-state";
 import { toast } from "@/components/ui/toast";
 import { ConfirmDialog } from "@/components/ui/field";
 import { useDictation } from "@/hooks/useDictation";
+import { useDictationShortcut } from "@/hooks/useDictationShortcut";
 import type { GenerationSpeedInfo, SessionStatsInfo } from "@/lib/pi-types";
 import { formatCompactNumber, formatPercent } from "@/lib/format";
 import { ContextDetailPanel } from "./ComposerPanels";
@@ -304,6 +305,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const [atServerResult, setAtServerResult] = useState<{ cwd: string; query: string; matches: FileIndexEntry[] } | null>(null);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const composerRef = useRef<HTMLDivElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const modelDropdownPanelRef = useRef<HTMLDivElement>(null);
   const modelSearchInputRef = useRef<HTMLInputElement>(null);
@@ -339,7 +341,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const insertTextAtCursor = useCallback((text: string) => {
     const ta = textareaRef.current;
     if (!ta) {
-      setValue((v) => v + (v ? " " : "") + text);
+      setValue((v) => v + (v && !v.endsWith(" ") ? " " : "") + text);
       return;
     }
     const start = ta.selectionStart ?? ta.value.length;
@@ -677,6 +679,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   type DictationAfterMode = "send" | "steer" | "followup";
   const dictationAfterRef = useRef<DictationAfterMode | null>(null);
   const {
+    isStarting: isStartingDictation,
     isRecording,
     isPaused,
     isReviewing,
@@ -708,6 +711,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       } else if (after === "steer" || after === "followup") {
         sendQueued(after, finalText);
       } else {
+        requestAnimationFrame(() => textareaRef.current?.focus());
         toast.success(t("chatInput.dictationSuccess"));
       }
     },
@@ -747,16 +751,30 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     dictationAfterRef.current = null;
     toggleDictation();
   }, [toggleDictation]);
+  useDictationShortcut({
+    rootRef: composerRef,
+    inputRef: textareaRef,
+    isComposingRef,
+    onToggle: () => {
+      if (isTranscribing) return;
+      dictationAfterRef.current = null;
+      if (isStartingDictation) cancelDictation();
+      else if (isRecording || isPaused) stopDictation({ immediateSend: true });
+      else if (transcribeError) retryDictation();
+      else if (isReviewing) confirmTranscribeDictation();
+      else startFreshDictation();
+    },
+  });
   // While the recording deck replaces the textarea there is no focused input,
   // so Escape/Enter are handled at window level: Escape cancels/discard, Enter
   // retries after an error or converts the recording to text.
   useEffect(() => {
-    if (!(isRecording || isPaused || isReviewing || isTranscribing || transcribeError)) return;
+    if (!(isStartingDictation || isRecording || isPaused || isReviewing || isTranscribing || transcribeError)) return;
     const onKeyDown = (e: globalThis.KeyboardEvent) => {
       if (e.key === "Escape") {
         e.preventDefault();
         cancelDictationAndReset();
-      } else if (e.key === "Enter" && !e.shiftKey && !isTranscribing) {
+      } else if (e.key === "Enter" && !e.shiftKey && !isTranscribing && !isStartingDictation) {
         // Let focused deck/toolbar controls keep their own activation;
         // only hijack Enter from the non-interactive page context.
         const target = e.target as HTMLElement | null;
@@ -769,7 +787,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [isRecording, isPaused, isReviewing, isTranscribing, transcribeError, cancelDictationAndReset, retryDictation, confirmTranscribeDictation, stopAndInsertDictation]);
+  }, [isStartingDictation, isRecording, isPaused, isReviewing, isTranscribing, transcribeError, cancelDictationAndReset, retryDictation, confirmTranscribeDictation, stopAndInsertDictation]);
 
   const slashQuery = value.startsWith("/") && !/\s/.test(value.slice(1))
     ? value.slice(1).toLowerCase()
@@ -1529,6 +1547,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
   return (
     <div
+      ref={composerRef}
       style={{
         flexShrink: 0,
         background: "transparent",
@@ -1578,7 +1597,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         <ComposerModeStatus goal={activeGoal} plan={activePlan} />
         {/* Retry banner */}
         {retryInfo && (
-          <div style={{
+          <div className="composer-retry wallpaper-surface" style={{
             marginBottom: 8, padding: "5px 10px",
             background: "color-mix(in srgb, var(--status-warning) 8%, transparent)", border: "1px solid color-mix(in srgb, var(--status-warning) 25%, transparent)",
             borderRadius: 6, fontSize: 12, color: "var(--status-warning)",
@@ -1615,7 +1634,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           </div>
         )}
         {compactResultText && (
-          <div style={{
+          <div className="composer-compaction-result wallpaper-surface" style={{
             marginBottom: 8, padding: "5px 10px",
             background: "color-mix(in srgb, var(--status-success) 8%, transparent)", border: "1px solid color-mix(in srgb, var(--status-success) 24%, transparent)",
             borderRadius: 6, fontSize: 12, color: "var(--status-success)",
@@ -1629,7 +1648,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         )}
         {/* Image previews */}
         {attachError && (
-          <div role="alert" style={{
+          <div className="composer-attachment-error wallpaper-surface" role="alert" style={{
             marginBottom: 8, padding: "5px 10px",
             background: "color-mix(in srgb, var(--status-error) 7%, transparent)", border: "1px solid color-mix(in srgb, var(--status-error) 30%, transparent)",
             borderRadius: 6, fontSize: 12, color: "var(--status-error)",
@@ -1675,6 +1694,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             {attachedTextFiles.map((file, i) => (
               <div
                 key={i}
+                className="composer-file-attachment wallpaper-surface"
                 style={{
                   display: "flex", alignItems: "center", gap: 7,
                   maxWidth: 260, height: 30,
@@ -2078,6 +2098,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             When 1 item: compact single row. When multiple items: compact row with expand toggle, or full list when expanded. */}
         {queuedCount > 0 && (
           <div
+            className="composer-queue-panel wallpaper-surface"
             aria-label={t("chatInput.queuedPrompts")}
             style={{
               border: "1px solid var(--border)",
@@ -2887,7 +2908,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             )}
 
             {/* Dictation */}
-            {isRecording || isPaused || isReviewing || isTranscribing || transcribeError ? (
+            {isStartingDictation || isRecording || isPaused || isReviewing || isTranscribing || transcribeError ? (
               <button
                 type="button"
                 onClick={cancelDictationAndReset}
@@ -2910,7 +2931,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               <button
                 type="button"
                 onClick={startFreshDictation}
-                title={t("chatInput.startDictation")}
+                title={`${t("chatInput.startDictation")} (Alt)`}
+                aria-keyshortcuts="Alt"
                 aria-label={t("chatInput.startDictation")}
                 style={{
                   display: "flex", alignItems: "center", justifyContent: "center",
