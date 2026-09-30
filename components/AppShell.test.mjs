@@ -7,6 +7,15 @@ test("generation speed inherits topbar glass instead of a solid chip", async () 
   assert.match(source, /aria-label=\{speedTitle\}\s+className="shell-metric-pill shell-pill-extra wallpaper-inset"/);
 });
 
+test("closed sidebar and file drawers do not block global shortcuts as phantom dialogs", async () => {
+  const shell = await readFile(new URL("./AppShell.tsx", import.meta.url), "utf8");
+  const panel = await readFile(new URL("./RightPanel.tsx", import.meta.url), "utf8");
+  assert.match(shell, /role=\{isMobile && sidebarOpen \? "dialog" : undefined\}/);
+  assert.match(shell, /aria-modal=\{isMobile && sidebarOpen \? true : undefined\}/);
+  assert.match(panel, /role=\{isCompactOverlay && rightPanelOpen \? "dialog" : undefined\}/);
+  assert.match(panel, /aria-modal=\{isCompactOverlay && rightPanelOpen \? true : undefined\}/);
+});
+
 test("sidebar drag scales pointer deltas by the interface zoom", async () => {
   const source = await readFile(new URL("./AppShell.tsx", import.meta.url), "utf8");
   // clientX is viewport pixels while --sidebar-width is zoomed layout pixels;

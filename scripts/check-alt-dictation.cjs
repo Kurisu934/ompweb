@@ -39,7 +39,12 @@ const sessionContext = { entryIds: [], messages: [], thinkingLevel: 'high', mode
         if (path === '/api/sessions') return reply({ sessions: [info], runningSessionIds: [], runningSessions: [] });
         if (path === `/api/sessions/${sid}`) return reply({ sessionId: sid, filePath: info.path, info, leafId: null, tree: [], context: sessionContext, agent: { running: false } });
         if (path === `/api/sessions/${sid}/context`) return reply({ context: sessionContext, leafId: null, tree: [] });
-        if (path.startsWith('/api/agent/') && request.method() === 'POST') sends.push(request.postData());
+        if (path.startsWith('/api/agent/') && request.method() === 'POST') {
+          const command = request.postDataJSON();
+          if (command.type === 'predict_word') return reply({ suffix: null });
+          if (command.type === 'predict_word_feedback') return reply({ ok: true });
+          sends.push(request.postData());
+        }
         if (path === '/api/projects') return reply({ projects: [{ path: cwd }] });
         if (path === '/api/cwd/validate') return reply({ valid: true, cwd, isDirectory: true });
         if (path === '/api/stt') {

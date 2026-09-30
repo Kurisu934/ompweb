@@ -234,7 +234,7 @@ html[data-wallpaper="on"] .wallpaper-shell .composer-toolbar :is(.picker-row[dat
   background: color-mix(in srgb, var(--accent) 20%, transparent) !important;
 }
 .wallpaper-controls { display: inline-flex; align-items: center; flex-shrink: 0; gap: 2px; }
-.wallpaper-shell .shell-topbar-overflow[data-compact="true"] > .shell-topbar-overflow-content { flex-wrap: wrap; height: auto; min-height: 48px; }
+.wallpaper-shell .shell-topbar-overflow[data-compact="true"] > .shell-topbar-overflow-content { flex-wrap: wrap; height: auto; min-height: 48px; overflow: visible; }
 .wallpaper-shell .shell-topbar-overflow[data-compact="true"] .wallpaper-controls { flex-wrap: wrap; min-width: 0; max-width: 100%; }
 .wallpaper-controls button, .wallpaper-icon { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; flex-shrink: 0; border: 1px solid transparent; border-radius: 5px; color: var(--text-muted); background: transparent; cursor: pointer; }
 .wallpaper-controls button:hover, .wallpaper-icon:hover { background: var(--bg-hover); color: var(--text); }

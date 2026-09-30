@@ -184,6 +184,7 @@ export function GitChangesPanel({ cwd, refreshKey, onOpenFile, onAtMention, onRe
         />
         {filter && (
           <button
+            className="git-clear-filter"
             type="button"
             onClick={() => {
               setFilter("");
@@ -204,6 +205,7 @@ export function GitChangesPanel({ cwd, refreshKey, onOpenFile, onAtMention, onRe
           </button>
         )}
         <button
+          className="git-refresh"
           type="button"
           onClick={() => setTreeRefreshKey((k) => k + 1)}
           title={t("gitChanges.refreshChanges")}
@@ -222,9 +224,19 @@ export function GitChangesPanel({ cwd, refreshKey, onOpenFile, onAtMention, onRe
       </div>
 
       {loading ? (
-        <div style={{ padding: "8px 12px", fontSize: 11, color: "var(--text-dim)" }}>{t("fileExplorer.loadingFiles")}</div>
+        <div role="status" aria-live="polite" style={{ padding: "8px 12px", fontSize: 11, color: "var(--text-dim)" }}>{t("fileExplorer.loadingFiles")}</div>
       ) : error ? (
-        <div role="alert" style={{ padding: "8px 12px", fontSize: 11, color: "var(--status-error)" }}>{error}</div>
+        <div role="alert" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "8px 12px", fontSize: 11, color: "var(--status-error)" }}>
+          <span>{error}</span>
+          <button
+            className="load-retry-button"
+            type="button"
+            onClick={() => setTreeRefreshKey((key) => key + 1)}
+            style={{ minHeight: 32, padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text)", cursor: "pointer", fontSize: 11, fontWeight: 600 }}
+          >
+            {t("chatWindow.retry")}
+          </button>
+        </div>
       ) : !isRepo ? (
         <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", gap: 8, padding: 24, textAlign: "center" }}>
           <GitBranch size={26} strokeWidth={1.5} aria-hidden="true" style={{ color: "var(--text-dim)" }} />
@@ -253,8 +265,8 @@ export function GitChangesPanel({ cwd, refreshKey, onOpenFile, onAtMention, onRe
               const isHovered = file.filePath === hoveredPath;
               return (
                 <div
+                  className="git-change-row wallpaper-surface"
                   key={file.filePath}
-                  className="wallpaper-surface"
                   role="option"
                   tabIndex={0}
                   aria-selected={isSelected}
@@ -338,6 +350,7 @@ export function GitChangesPanel({ cwd, refreshKey, onOpenFile, onAtMention, onRe
                     {file.code}
                   </span>
                     <button
+                      className="git-change-open-action"
                       type="button"
                       onClick={(e) => {
                         e.stopPropagation();
@@ -407,6 +420,7 @@ export function GitChangesPanel({ cwd, refreshKey, onOpenFile, onAtMention, onRe
             )}
             {onAtMention && (
               <button
+                className="git-change-mention-action"
                 type="button"
                 onClick={mentionSelected}
                 disabled={!selectedPath}
@@ -429,6 +443,7 @@ export function GitChangesPanel({ cwd, refreshKey, onOpenFile, onAtMention, onRe
               </button>
             )}
             <button
+              className="git-change-footer-open"
               type="button"
               onClick={openSelected}
               disabled={!selectedPath}
@@ -451,9 +466,19 @@ export function GitChangesPanel({ cwd, refreshKey, onOpenFile, onAtMention, onRe
           </div>
           <div style={{ flex: 1, minHeight: 0, overflow: "auto", background: "var(--bg)" }}>
             {patchLoading ? (
-              <div style={{ padding: "12px 16px", fontSize: 12, color: "var(--text-dim)" }}>{t("fileViewer.loading")}</div>
+              <div role="status" aria-live="polite" style={{ padding: "12px 16px", fontSize: 12, color: "var(--text-dim)" }}>{t("fileViewer.loading")}</div>
             ) : patchError ? (
-              <div role="alert" style={{ padding: "12px 16px", fontSize: 12, color: "var(--status-error)" }}>{patchError}</div>
+              <div role="alert" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, padding: "12px 16px", fontSize: 12, color: "var(--status-error)" }}>
+                <span>{patchError}</span>
+                <button
+                  className="load-retry-button"
+                  type="button"
+                  onClick={() => setTreeRefreshKey((key) => key + 1)}
+                  style={{ minHeight: 32, padding: "4px 8px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text)", cursor: "pointer", fontSize: 11, fontWeight: 600 }}
+                >
+                  {t("chatWindow.retry")}
+                </button>
+              </div>
             ) : !patchSupported || patch === null ? (
               <div style={{ padding: "12px 16px", fontSize: 12, color: "var(--text-dim)" }}>{t("gitChanges.diffUnavailable")}</div>
             ) : (

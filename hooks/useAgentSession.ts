@@ -3,6 +3,7 @@
 import { useState, useCallback, useRef, useEffect, useMemo, useReducer } from "react";
 import type {
   AgentMessage,
+  ExitedRpcSession,
   CustomMessage,
   ExtensionStatusItem,
   ExtensionWidgetItem,
@@ -12,11 +13,10 @@ import type {
   ToolResultMessage,
 } from "@/lib/types";
 import { normalizeToolCalls } from "@/lib/normalize";
-import { encodeFilePathForApi, getFileName, resolveWorkspaceFilePath } from "@/lib/file-paths";
 import { hasVisibleAssistantContent } from "@/lib/assistant-response";
 import type { ThinkingModelMeta } from "@/lib/thinking-levels";
 import { sendAgentCommand, setSessionAdvisorSpawn } from "@/lib/agent-client";
-import { translate } from "@/lib/i18n";
+import { formatExitedSessionNotice, translate } from "@/lib/i18n";
 import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
 import { createMessageUpdateCoalescer, type MessageUpdateCoalescer } from "@/lib/message-update-coalescer";
 import { createReconcileGuard, type ReconcileGuard } from "@/lib/reconcile-guard";
@@ -26,7 +26,7 @@ import { toast } from "@/components/ui/toast";
 import { expandWebSlashCommand } from "@/lib/web-slash-commands";
 import { validateOutgoingPrompt } from "@/lib/image-attachments";
 import { createActiveGoal, parseActiveGoal, type ActiveGoal, type ActivePlan } from "@/lib/web-mode-state";
-import type { HostToolDefinition, HostUriSchemeDefinition, RpcAvailableSlashCommand, SessionStatsInfo, TodoPhase } from "@/lib/pi-types";
+import type { HostToolDefinition, HostUriSchemeDefinition, RpcAskDialogAnswer, RpcAvailableSlashCommand, SessionStatsInfo, TodoPhase } from "@/lib/pi-types";
 import { isRecord } from "@/lib/type-guards";
 import { subscribeSessionsChanged } from "@/lib/session-change-bus";
 import { createSessionCatchUp, type SessionCatchUp, type SessionLiveFields } from "./useAgentSession-sync";
@@ -86,6 +86,7 @@ import {
   historyEntryToSubagentInfo,
   isQuotaLikeError,
   isSafeOpenUrl,
+  runHostTool,
   normalizeThinkingLevel,
   pruneSubagentIdMap,
   readCompactResult,
@@ -179,13 +180,15 @@ export interface UseAgentSessionOptions {
   setToolPreset?: (preset: "none" | "default" | "full") => void;
   /** Opens a file in the web UI's file viewer (used by the open_file host tool). */
   onOpenFile?: (filePath: string, name: string, sessionId?: string) => void;
+  /** Handles the open_url host tool (may ask the user first); returns the result text. */
+  onOpenUrl?: (url: string) => string;
 }
 
 export function useAgentSession(opts: UseAgentSessionOptions) {
   const {
     session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked,
     modelsRefreshKey, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsPanelOpen,
-    onOpenFile,
+    onOpenFile, onOpenUrl,
   } = opts;
   const reducedMotion = usePrefersReducedMotion();
   const isNew = session === null && newSessionCwd !== null;
@@ -372,6 +375,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // agent_end itself is often deliberately payload-free. Keep the message
   // until the terminal path can surface it exactly once.
   const lastRunErrorRef = useRef<string | null>(null);
+  const lastShownExitRef = useRef<string | null>(null);
   const runHadContentRef = useRef(false);
   // Native starts/epoch changes also fence recovery, even without a local send.
   const responseRunVersionRef = useRef(0);
@@ -776,7 +780,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         const token = beginAuthoritativeModelSync();
         const stateRes = await fetch(`/api/sessions/${encodeURIComponent(sid)}/state`);
         if (!stateRes.ok) throw new Error(`HTTP ${stateRes.status}`);
-        const agentState = await stateRes.json() as { running: boolean; state?: AgentStateResponse };
+        const agentState = await stateRes.json() as { running: boolean; state?: AgentStateResponse; exited?: ExitedRpcSession };
         if (sessionIdRef.current !== sid) {
           if (showLoading) setLoading(false);
           return null;
@@ -1105,7 +1109,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
 
   const respondToExtensionUi = useCallback(async (
     request: ExtensionUiDialogRequest,
-    response: { value: string } | { confirmed: boolean } | { cancelled: true },
+    response: { value: string } | { confirmed: boolean } | { cancelled: true } | { answers: RpcAskDialogAnswer[] },
   ) => {
     const sid = sessionIdRef.current;
     if (!sid) {
@@ -1225,65 +1229,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const handleHostToolCall = useCallback(async (id: string, toolName: string, args: Record<string, unknown>) => {
     const sid = sessionIdRef.current;
     if (!sid) return;
-    const str = (value: unknown): string | undefined => (typeof value === "string" ? value : undefined);
-    switch (toolName) {
-      case "open_url": {
-        const raw = typeof args.url === "string" ? args.url : "";
-        const safe = isSafeOpenUrl(raw);
-        const url = safe ? raw : "";
-        if (url && typeof window !== "undefined") {
-          const opened = window.open(url, "_blank", "noopener,noreferrer");
-          opened?.focus?.();
-        }
-        const message = safe ? (raw ? `Opened ${raw}` : "No URL provided") : "Unsafe or invalid URL not opened";
-        await respondHostTool(sid, id, message, !safe && !!raw);
-        break;
-      }
-      case "notify": {
-        const title = str(args.title) ?? "OMP";
-        const message = str(args.message) ?? "";
-        if (typeof Notification !== "undefined") {
-          try {
-            if (Notification.permission === "granted") {
-              new Notification(title, { body: message });
-            } else if (Notification.permission === "default") {
-              const permission = await Notification.requestPermission();
-              if (permission === "granted") new Notification(title, { body: message });
-            }
-          } catch {
-            // Notification API blocked — the result still succeeds.
-          }
-        }
-        await respondHostTool(sid, id, "Notification shown");
-        break;
-      }
-      case "open_file": {
-        const path = resolveWorkspaceFilePath(str(args.path) ?? "", session?.cwd ?? newSessionCwd);
-        if (!path || !onOpenFile) {
-          await respondHostTool(sid, id, !path ? "Invalid file path or workspace unavailable" : "File viewer is unavailable", true);
-          break;
-        }
-        try {
-          const query = new URLSearchParams({ type: "meta", sessionId: sid });
-          const response = await fetch(`/api/files/${encodeFilePathForApi(path)}?${query}`, {
-            signal: AbortSignal.timeout(10_000),
-          });
-          if (!response.ok) {
-            const detail = await response.json().catch(() => null);
-            throw new Error(isRecord(detail) && typeof detail.error === "string" ? detail.error : `File check failed (${response.status})`);
-          }
-          if (sessionIdRef.current !== sid || !hookAliveRef.current) throw new Error("Session changed before opening the file");
-          onOpenFile(path, getFileName(path), sid);
-          await respondHostTool(sid, id, `Opened ${path}`);
-        } catch (error) {
-          await respondHostTool(sid, id, `Could not open ${path}: ${error instanceof Error ? error.message : String(error)}`, true);
-        }
-        break;
-      }
-      default:
-        await respondHostTool(sid, id, `Host tool \"${toolName}\" is not available in omp-web`, true);
-    }
-  }, [onOpenFile, respondHostTool, session?.cwd, newSessionCwd]);
+    const { text, isError } = await runHostTool(toolName, args, {
+      cwd: session?.cwd ?? newSessionCwd,
+      sessionId: sid,
+      canOpenFile: () => sessionIdRef.current === sid && hookAliveRef.current,
+      openUrl: onOpenUrl ?? ((url) => {
+        window.open(url, "_blank", "noopener,noreferrer")?.focus?.();
+        return `Opened ${url}`;
+      }),
+      openFile: onOpenFile ? (path, name) => onOpenFile(path, name, sid) : undefined,
+    });
+    await respondHostTool(sid, id, text, isError);
+  }, [onOpenFile, onOpenUrl, respondHostTool, session?.cwd, newSessionCwd]);
 
   /** Answer a host_uri_request (agent read/write of a registered scheme). */
   const respondHostUri = useCallback(async (sid: string, id: string, frame: { content?: string; contentType?: "text/markdown" | "application/json" | "text/plain"; isError?: boolean; error?: string }) => {
@@ -1385,6 +1342,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "confirm":
       case "input":
       case "editor":
+      case "ask":
         if (extensionDialogClearTimerRef.current) {
           clearTimeout(extensionDialogClearTimerRef.current);
           extensionDialogClearTimerRef.current = null;
@@ -3258,6 +3216,17 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       loadSession(session.id, true, true).then((loaded) => {
         if (!hookAliveRef.current || sessionIdRef.current !== session.id) return;
         const agentState = loaded?.agentState;
+        if (agentState?.exited) {
+          const exitKey = `${agentState.exited.id}:${agentState.exited.at}`;
+          if (lastShownExitRef.current !== exitKey) {
+            lastShownExitRef.current = exitKey;
+            addNotice({
+              id: `process-exit-${exitKey}`,
+              type: "error",
+              message: formatExitedSessionNotice(agentState.exited),
+            });
+          }
+        }
         if (agentState?.running && !eventSourceRef.current) {
           void connectEvents(session.id);
           if (agentState.state?.isStreaming || agentState.state?.isPromptRunning) {
@@ -3369,10 +3338,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!container) return;
     container.addEventListener("wheel", markUserScrollIntent, { passive: true });
     container.addEventListener("touchstart", markUserScrollIntent, { passive: true });
+    container.addEventListener("touchmove", markUserScrollIntent, { passive: true });
     container.addEventListener("scroll", handleScrollPositionChange, { passive: true });
     return () => {
       container.removeEventListener("wheel", markUserScrollIntent);
       container.removeEventListener("touchstart", markUserScrollIntent);
+      container.removeEventListener("touchmove", markUserScrollIntent);
       container.removeEventListener("scroll", handleScrollPositionChange);
     };
   }, [messages.length, loading, handleScrollPositionChange, markUserScrollIntent]);
@@ -3499,10 +3470,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     pendingScrollToUserRef, initialScrollDoneRef,
     // Actions
     handleSend, handleAbort, handleFork, handleNavigate, handleModelChange, handleFastModeChange, handleAutoRetryChange, handleInterruptModeChange, handleAutoCompactionChange, handleSteeringModeChange, handleFollowUpModeChange, handleCycleModel, handleCycleThinkingLevel, handleAbortRetry, handleInterruptAndReply,
+    retrySession: () => { const sid = sessionIdRef.current; if (sid) void loadSession(sid, true, true); },
     handleCompact, handleHandoff, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
-    removeQueuedMessage, promoteQueuedToSteer,
     handleBuiltinSlashCommand, togglePreCompactionHistory,
-    handleToolPresetChange, handleThinkingLevelChange, loadSlashCommands, setActiveLeafId, setData, setMessages,
+    handleToolPresetChange, handleThinkingLevelChange, loadSlashCommands, removeQueuedMessage, promoteQueuedToSteer, setActiveLeafId, setData, setMessages,
     dispatch, setAgentRunning, setForkingEntryId,
     bashRunning, pendingBash,
     liveToolResults,

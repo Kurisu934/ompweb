@@ -1,7 +1,8 @@
 "use client";
+import { sendAgentCommand } from "@/lib/agent-client";
 import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type Ref } from "react";
-import { ChevronDown, ChevronUp, Layers, Paperclip, Square } from "lucide-react";
+import { ArrowDown, ChevronDown, ChevronUp, Layers, Paperclip, Square } from "lucide-react";
 import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolCallContent, ToolResultMessage } from "@/lib/types";
 import { translate, useI18n } from "@/lib/i18n";
 import { getDisplayableAssistantBlocks, splitFinalAssistantBlocks } from "@/lib/message-display";
@@ -15,11 +16,14 @@ import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
 import { ComposerPanels } from "./ComposerPanels";
 import OmpWebLogo from "./OmpWebLogo";
 import { CHAT_COLUMN_MAX_WIDTH, MINIMAP_WIDTH } from "@/lib/chat-layout";
+import { WorkspaceState } from "./AppShell-layout";
 import { useAgentSession, type AgentPhase, type NoticeItem, type SubagentInfo } from "@/hooks/useAgentSession";
 import { useAudio } from "@/hooks/useAudio";
 import { useSpeechSynthesis, SpeechSynthesisProvider } from "@/hooks/useSpeechSynthesis";
+import { GithubRepoContext } from "@/lib/github-refs";
 import { useDragDrop } from "@/hooks/useDragDrop";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { useModalDialog } from "@/hooks/useModalDialog";
 import type { SessionStatsInfo, GenerationSpeedInfo } from "@/lib/pi-types";
 import type { ProviderUsageContext } from "@/lib/provider-usage-types";
 import { normalizeCustomPanelLines, parseAnsiLine } from "@/lib/ansi";
@@ -52,6 +56,8 @@ interface Props {
   onSessionStatsPanelOpen?: () => void;
   onProviderUsageContextChange?: (context: ProviderUsageContext | null) => void;
   onOpenFile?: (filePath: string) => void;
+  /** Handles the open_url host tool; returns the result text for the agent. */
+  onOpenUrl?: (url: string) => string;
   onGenerationSpeedChange?: (speed: GenerationSpeedInfo | null) => void;
   /** Open Settings → API Keys & Providers (from the model picker). */
   onOpenProviders?: () => void;
@@ -559,7 +565,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
   );
 });
 
-export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCallsDefaultCollapsed = true, onAgentEnd, onPetActivityChange, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onProviderUsageContextChange, onGenerationSpeedChange, onOpenFile, onOpenProviders }: Props) {
+export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCallsDefaultCollapsed = true, onAgentEnd, onPetActivityChange, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsChange, onSessionStatsPanelOpen, onProviderUsageContextChange, onGenerationSpeedChange, onOpenFile, onOpenUrl, onOpenProviders }: Props) {
   const { t, tn } = useI18n();
   const { playDoneSound, unlockAudio } = useAudio();
   const isMobile = useIsMobile();
@@ -606,7 +612,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
     subagents, subagentEvents, subagentTranscriptVersions, activeSubagentCount, currentTodoPhase, todoPhases,
     isNew,
     sessionIdRef, messagesEndRef, scrollContainerRef,
-    handleSend, handleAbort, handleFork, handleNavigate, handleModelChange,
+    handleSend, handleAbort, handleFork, handleNavigate, handleModelChange, retrySession,
     handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction, handleCompact,
     removeQueuedMessage, promoteQueuedToSteer,
     handleBuiltinSlashCommand, togglePreCompactionHistory,
@@ -615,7 +621,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
   } = useAgentSession({
     session, newSessionCwd, onAgentEnd: wrappedOnAgentEnd, onSessionCreated, onSessionForked,
     modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSystemPromptLoaderChange, onSessionStatsPanelOpen,
-    onOpenFile,
+    onOpenFile, onOpenUrl,
   });
   useEffect(() => {
     if (!autoplayPendingRef.current) return;
@@ -787,6 +793,13 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
       if (raf !== null) cancelAnimationFrame(raf);
     };
   }, [loading, scrollContainerRef]);
+  const scrollToBottom = useCallback(() => {
+    const el = scrollContainerRef.current;
+    if (!el) return;
+    const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    el.scrollTo({ top: el.scrollHeight, behavior: reduceMotion ? "auto" : "smooth" });
+    setNearBottom(true);
+  }, [scrollContainerRef]);
   const sentinelRef = useRef<HTMLButtonElement>(null);
   const prevScrollDistanceRef = useRef<number | null>(null);
   // "auto" (observer fired while scrolling) anchors the viewport to the old
@@ -1021,6 +1034,19 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
     return () => controller.abort();
   }, [advisorEnabled]);
 
+  // GitHub repo of the session checkout, so bare `#123` in messages links to it.
+  const [githubRepo, setGithubRepo] = useState<string | null>(null);
+  useEffect(() => {
+    setGithubRepo(null);
+    if (!messageCwd) return;
+    const controller = new AbortController();
+    fetch(`/api/github-repo?cwd=${encodeURIComponent(messageCwd)}`, { signal: controller.signal })
+      .then((response) => response.ok ? response.json() as Promise<{ repo?: string | null }> : null)
+      .then((data) => setGithubRepo(data?.repo ?? null))
+      .catch(() => {});
+    return () => controller.abort();
+  }, [messageCwd]);
+
   const advisorModelMeta = useMemo(() => {
     if (!advisorRoleSelector) return null;
     const [qualified, effort] = advisorRoleSelector.split(":");
@@ -1032,6 +1058,20 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
       reasoning: effort || null,
     };
   }, [advisorRoleSelector, modelList]);
+
+  // Ghost-text word completion rides the session's live omp process (the route
+  // never spawns one for a keystroke); before the first send there is none.
+  const handlePredictWord = useCallback(async (text: string, cursor: number) => {
+    const sid = session?.id ?? sessionIdRef.current;
+    if (!sid) return null;
+    const data = await sendAgentCommand<{ suffix: string | null } | null>(sid, { type: "predict_word", text, cursor });
+    return data?.suffix ?? null;
+  }, [session?.id, sessionIdRef]);
+  const handlePredictWordFeedback = useCallback((text: string, cursor: number, suggestion: string, accepted: boolean) => {
+    const sid = session?.id ?? sessionIdRef.current;
+    if (!sid) return;
+    sendAgentCommand(sid, { type: "predict_word_feedback", text, cursor, suggestion, accepted }).catch(() => {});
+  }, [session?.id, sessionIdRef]);
 
   const handleMinimize = useCallback(() => {
     setComposerMinimized(true);
@@ -1069,6 +1109,8 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
     <ChatInput
       ref={chatInputRef}
       onSend={handleSend}
+      onPredictWord={handlePredictWord}
+      onPredictWordFeedback={handlePredictWordFeedback}
       onAbort={handleAbort}
       onSteer={agentRunning ? handleSteer : undefined}
       onFollowUp={agentRunning ? handleFollowUp : undefined}
@@ -1132,22 +1174,30 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
   const belowEditorWidgets = extensionWidgets.filter((widget) => widget.placement === "belowEditor");
 
   if (loading) {
-    return (
-      <div role="status" className="flex h-full items-center justify-center" style={{ color: "var(--text-muted)" }}>
-        {t("chatWindow.loadingSession")}
-      </div>
-    );
+    return <WorkspaceState kind="loading" title={t("chatWindow.loadingSession")} />;
   }
 
   if (error) {
     return (
-      <div role="alert" className="flex h-full items-center justify-center" style={{ color: "var(--accent-strong)", padding: "0 16px", textAlign: "center", fontSize: 13 }}>
-        {error}
-      </div>
+      <WorkspaceState
+        kind="error"
+        title={error}
+        detail={(
+          <button
+            className="load-retry-button"
+            type="button"
+            onClick={retrySession}
+            style={{ justifySelf: "start", minHeight: 36, padding: "6px 14px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text)", cursor: "pointer", fontWeight: 600, transition: "background var(--dur-fast) var(--ease-out-warm), transform var(--dur-fast) var(--ease-out-warm)" }}
+          >
+            {t("chatWindow.retry")}
+          </button>
+        )}
+      />
     );
   }
   return (
     <SpeechSynthesisProvider value={tts}>
+    <GithubRepoContext.Provider value={githubRepo}>
     <div
       className="relative flex h-full flex-col overflow-hidden"
       onDragEnter={handleDragEnter}
@@ -1161,7 +1211,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
             {[0, 0.8, 1.6].map((delay) => (
               <div
                 key={delay}
-                className="drop-ripple-ring absolute h-[720px] w-[720px] rounded-full border-[1.5px] border-solid"
+                className="drop-ripple-ring absolute h-180 w-180 rounded-full border-[1.5px] border-solid"
                 style={{ transformOrigin: "center", animationDelay: `${delay}s` }}
               />
             ))}
@@ -1204,7 +1254,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
 
       {isEmptyNew ? (
         <div className="relative flex flex-1 flex-col overflow-hidden">
-          <div className="flex flex-1 flex-col items-center justify-center overflow-y-auto px-4 py-8" style={{ minHeight: 0 }}>
+          <div className="flex flex-1 flex-col items-center justify-center overflow-y-auto py-8" style={{ minHeight: 0, paddingInline: CHAT_COLUMN_PADDING }}>
           <div className="w-full" style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH }}>
             <div
                className="mb-3 empty-chat-brand"
@@ -1229,15 +1279,21 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
                 <OmpRuntimeVersion />
               </div>
             </div>
-            <div style={{ padding: `0 ${CHAT_COLUMN_PADDING}px` }}>{newSessionWorkspace}</div>
+            <div className="empty-session-intro">
+              <h1 className="display-serif">{t("appShell.newSessionTitle")}</h1>
+              <p>{t("appShell.newSessionDescription")}</p>
+            </div>
+            {newSessionWorkspace}
             <NoticeShelf notices={notices} onDismiss={dismissNotice} align="right" />
-            {chatInputElement}
+            {/* ChatInput insets itself by CHAT_COLUMN_PADDING; cancel this column's
+                padding so the composer matches its in-session width. */}
+            <div style={{ margin: `0 -${CHAT_COLUMN_PADDING}px` }}>{chatInputElement}</div>
           </div>
         </div>
         </div>
       ) : (
       <>
-      <div className="relative flex flex-1 overflow-hidden">
+      <div className="relative flex flex-1 overflow-hidden" style={{ minHeight: 0 }}>
         <div
           style={{
             position: "absolute",
@@ -1256,7 +1312,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
         {/* Hide the Firefox scrollbar on desktop only: ChatMinimap provides the
             position indicator there, but on mobile there is no minimap and
             users need the scrollbar (Chrome's overlay scrollbar still shows). */}
-        <div ref={scrollContainerRef} data-selection-scope="chat" tabIndex={-1} className={`flex-1 overflow-y-auto pt-6` + (isMobile ? "" : " [scrollbar-width:none] [&::-webkit-scrollbar]:hidden")}>
+        <div ref={scrollContainerRef} data-selection-scope="chat" tabIndex={-1} role="log" aria-live={streamState.isStreaming ? "off" : "polite"} aria-busy={streamState.isStreaming || undefined} aria-relevant="additions text" aria-label={t("chatWindow.conversation")} className={`flex-1 overflow-y-auto pt-6` + (isMobile ? "" : " scrollbar-none [&::-webkit-scrollbar]:hidden")} style={{ minHeight: 0 }}>
           <div style={{ padding: `0 ${CHAT_COLUMN_PADDING}px` }}>
             <div style={{ maxWidth: isMobile ? CHAT_COLUMN_MAX_WIDTH : CHAT_COLUMN_MAX_WIDTH_DESKTOP, margin: "0 auto" }}>
               <ExtensionStatusBar statuses={extensionStatuses} />
@@ -1358,6 +1414,18 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
             </div>
           </div>
         </div>
+        {!nearBottom && (
+          <button
+            type="button"
+            onClick={scrollToBottom}
+            title={t("chatWindow.scrollToBottom")}
+            aria-label={t("chatWindow.scrollToBottom")}
+            className="chat-scroll-bottom ui-focus-ring"
+            style={{ position: "absolute", right: isMobile ? 16 : 48, bottom: 16, zIndex: 35, display: "flex", alignItems: "center", justifyContent: "center", width: 36, height: 36, padding: 0, border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text-muted)", cursor: "pointer", boxShadow: "var(--shadow-pop)" }}
+          >
+            <ArrowDown size={15} strokeWidth={1.8} aria-hidden="true" />
+          </button>
+        )}
         {isMobile ? null : (
           <div style={{ position: "absolute", top: 0, bottom: 0, right: 0, zIndex: 30, display: "flex", alignItems: "center", pointerEvents: "none" }}>
             <ChatMinimap
@@ -1443,6 +1511,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
       </>
       )}
       </div>
+    </GithubRepoContext.Provider>
     </SpeechSynthesisProvider>
   );
 }
@@ -1633,6 +1702,9 @@ function ExtensionCustomPanel({
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const composingRef = useRef(false);
   const displayLines = normalizeCustomPanelLines(request.lines);
+  const panelRef = useModalDialog<HTMLDivElement>({
+    onClose: () => onInput(request, "\x03"),
+  });
 
   useEffect(() => {
     inputRef.current?.focus();
@@ -1652,6 +1724,9 @@ function ExtensionCustomPanel({
       }}
     >
       <div
+        ref={panelRef}
+        aria-label={t("chatWindow.extensionPanel")}
+        tabIndex={-1}
         role="dialog"
         aria-modal="true"
         onClick={(event) => {

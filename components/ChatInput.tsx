@@ -2,7 +2,7 @@
 
 import React, { useRef, useState, useCallback, useEffect, useLayoutEffect, useImperativeHandle, forwardRef, memo, KeyboardEvent } from "react";
 import { ChevronDown, ListChecks, Loader2, Mic, Paperclip, Plus, Shrink, Sparkles, Wrench, X, Zap } from "lucide-react";
-import { getSubmitDuringRunBehavior } from "@/lib/composer-prefs";
+import { getSubmitDuringRunBehavior, isWordCompletionEnabled } from "@/lib/composer-prefs";
 import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
 import type { ActiveGoal, ActivePlan } from "@/lib/web-mode-state";
 import { toast } from "@/components/ui/toast";
@@ -63,6 +63,9 @@ import {
 } from "@/lib/file-fuzzy";
 import { FolderIcon, getFileIcon } from "./FileIcons";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { useWordPrediction, type PredictWord, type PredictWordFeedback } from "@/hooks/useWordPrediction";
+import { acceptGhost } from "@/lib/word-prediction";
+import { GhostMirror } from "@/components/GhostMirror";
 import { useI18n } from "@/lib/i18n";
 import { selectableThinkingLevels } from "@/lib/thinking-levels";
 import type { ToolPreset } from "@/lib/tool-presets";
@@ -79,6 +82,9 @@ const TOOL_PRESET_OPTIONS: Array<{ value: ToolPreset; descriptionKey: string }> 
 
 interface Props {
   onSend: (message: string, images?: AttachedImage[]) => void;
+  /** Ghost-text word completion for the draft (omp `predict_word`); absent = no ghost text. */
+  onPredictWord?: PredictWord;
+  onPredictWordFeedback?: PredictWordFeedback;
   onAbort: () => void;
   onSteer?: (message: string, images?: AttachedImage[]) => void;
   onFollowUp?: (message: string, images?: AttachedImage[]) => void;
@@ -237,7 +243,7 @@ function menuDropStyle(placement: MenuPlacement, maxHeight: number | null): Reac
 
 
 export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatInput({
-  onSend, onAbort, onSteer, onFollowUp, isStreaming, model, isAutoModelSelection, modelNames, modelList, modelError, modelsLoading, onModelChange, fastModeEnabled, fastModeActive, fastModeSupported, onFastModeChange,
+  onSend, onPredictWord, onPredictWordFeedback, onAbort, onSteer, onFollowUp, isStreaming, model, isAutoModelSelection, modelNames, modelList, modelError, modelsLoading, onModelChange, fastModeEnabled, fastModeActive, fastModeSupported, onFastModeChange,
   onAbortCompaction, isCompacting, compactResult,
   thinkingLevel, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap, modelNameOverride,
   toolPreset, onToolPresetChange,
@@ -266,6 +272,35 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   onOpenProviders,
 }: Props, ref) {
   const isMobile = useIsMobile();
+  // Read per render so a Settings change applies on the next keystroke.
+  const wordCompletionOn = isWordCompletionEnabled();
+  const wordPrediction = useWordPrediction(
+    wordCompletionOn ? onPredictWord : undefined,
+    wordCompletionOn ? onPredictWordFeedback : undefined,
+  );
+  const ghostMirrorRef = useRef<HTMLDivElement>(null);
+  const composerId = React.useId();
+  const historyListboxId = `${composerId}-history`;
+  const slashListboxId = `${composerId}-slash`;
+  const atListboxId = `${composerId}-at`;
+  const plusMenuId = `${composerId}-plus-menu`;
+  const modelPickerId = `${composerId}-model-picker`;
+  const thinkingMenuId = `${composerId}-thinking-menu`;
+  const moveMenuFocus = useCallback((event: React.KeyboardEvent<HTMLElement>) => {
+    if (!["ArrowDown", "ArrowUp", "Home", "End"].includes(event.key)) return;
+    event.preventDefault();
+    const items = Array.from(event.currentTarget.querySelectorAll<HTMLButtonElement>("button:not([disabled])"));
+    if (items.length === 0) return;
+    const current = items.indexOf(document.activeElement as HTMLButtonElement);
+    const next = event.key === "Home"
+      ? 0
+      : event.key === "End"
+        ? items.length - 1
+        : event.key === "ArrowDown"
+          ? (current < 0 ? 0 : (current + 1) % items.length)
+          : (current <= 0 ? items.length - 1 : current - 1);
+    items[next]?.focus();
+  }, []);
   const { t, tn, locale } = useI18n();
   const modelCollator = React.useMemo(
     () => new Intl.Collator(locale, { numeric: true, sensitivity: "base" }),
@@ -308,6 +343,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const composerRef = useRef<HTMLDivElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const modelDropdownPanelRef = useRef<HTMLDivElement>(null);
+  const modelTriggerRef = useRef<HTMLButtonElement>(null);
+  const modelWasOpenRef = useRef(false);
   const modelSearchInputRef = useRef<HTMLInputElement>(null);
   const thinkingDropdownRef = useRef<HTMLDivElement>(null);
   const contextWrapRef = useRef<HTMLDivElement>(null);
@@ -418,8 +455,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       if (files.length > 0) {
         setAttachError(
           remaining === 0
-            ? `Maximum of ${MAX_ATTACHED_IMAGES} attached images reached.`
-            : `${files.length} image(s) skipped: images up to ${formatAttachmentBytes(MAX_ATTACHED_IMAGE_BYTES)} are supported.`,
+            ? t("chatInput.attachmentImageLimit", { count: MAX_ATTACHED_IMAGES })
+            : t("chatInput.attachmentImagesSkipped", { count: files.length, size: formatAttachmentBytes(MAX_ATTACHED_IMAGE_BYTES) }),
         );
       }
       return;
@@ -461,7 +498,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     } catch {
       // A failed read in the batch must not leak the siblings' blob URLs.
       created.forEach(revokeImagePreview);
-      setAttachError("One or more images could not be read. Try a different file.");
+      setAttachError(t("chatInput.attachmentImageReadFailed"));
     } finally {
       pendingImageCountRef.current -= imageFiles.length;
     }
@@ -481,10 +518,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     // Report every dropped candidate, not just an entirely rejected batch: a
     // drop of several files can lose some to the budget while accepting others.
     const limitMessage = remaining === 0 && files.length > 0
-      ? `Maximum of ${MAX_ATTACHED_TEXT_FILES} text files reached.`
+      ? t("chatInput.attachmentTextFilesLimit", { count: MAX_ATTACHED_TEXT_FILES })
       : describeTextAttachmentSkip({ tooLarge, overBudget });
     if (!textFiles.length) {
-      if (files.length > 0) setAttachError(limitMessage ?? `${files.length} file(s) skipped.`);
+      if (files.length > 0) setAttachError(limitMessage ?? t("chatInput.attachmentFilesSkipped", { count: files.length }));
       return;
     }
     const revision = attachmentRevisionRef.current;
@@ -515,10 +552,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       ]);
       setAttachError(
         limitMessage
-          ?? (skipped > 0 ? `${skipped} file(s) skipped: binary or non-text files cannot be attached.` : null),
+          ?? (skipped > 0 ? t("chatInput.attachmentBinarySkipped", { count: skipped }) : null),
       );
     } catch {
-      setAttachError("One or more files could not be read. Try a different file.");
+      setAttachError(t("chatInput.attachmentTextReadFailed"));
     } finally {
       pendingTextFileCountRef.current -= textFiles.length;
       pendingTextFileBytesRef.current -= textFiles.reduce((total, file) => total + file.size, 0);
@@ -527,7 +564,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
   const processFiles = useCallback((files: File[]) => {
     if (isStreaming) {
-      setAttachError("Attachments are disabled while the agent is running.");
+      setAttachError(t("chatInput.attachmentsDisabled"));
       return;
     }
     const imageFiles = files.filter((file) => file.type.startsWith("image/"));
@@ -617,7 +654,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     setAttachedTextFiles(draftFilesToAttachedFiles(draft?.files));
   }, [draftKey]);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
     const ta = textareaRef.current;
     if (!ta) return;
     ta.style.height = "auto";
@@ -925,6 +962,23 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     && atServerResult.cwd === cwd
     && atServerResult.query === atQueryText;
   const atMatches: FileIndexEntry[] = serverResultInUse ? atServerResult.matches : atLocalMatches;
+  const historyMenuVisible = historyMenuOpen && inputHistory.length > 0;
+  const slashMenuVisible = slashMenuOpen && slashQuery !== null;
+  const atMenuVisible = atMenuOpen && atQuery !== null;
+  const composerMenuId = historyMenuVisible
+    ? historyListboxId
+    : slashMenuVisible
+      ? slashListboxId
+      : atMenuVisible
+        ? atListboxId
+        : undefined;
+  const composerActiveDescendant = historyMenuVisible
+    ? `${historyListboxId}-${historyActiveIndex}`
+    : slashMenuVisible && filteredSlashCommands.length > 0
+      ? `${slashListboxId}-${slashActiveIndex}`
+      : atMenuVisible && atMatches.length > 0
+        ? `${atListboxId}-${atActiveIndex}`
+        : undefined;
 
   // Open/reset the menu whenever the @token appears or changes (mirrors the
   // slash menu: Escape closes it, the next keystroke re-opens it).
@@ -1325,6 +1379,29 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         }
       }
 
+      // Tab (or → at the end of the line) accepts the ghost word, like omp's editor.
+      const ghost = wordPrediction.peek();
+      if (
+        ghost && ghost.text === value && !isComposing && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey &&
+        (e.key === "Tab" || e.key === "ArrowRight") &&
+        e.currentTarget.selectionStart === ghost.cursor && e.currentTarget.selectionEnd === ghost.cursor
+      ) {
+        e.preventDefault();
+        const taken = wordPrediction.take();
+        if (taken) {
+          const next = acceptGhost(taken);
+          setValue(next.text);
+          requestAnimationFrame(() => {
+            const el = textareaRef.current;
+            if (!el) return;
+            el.setSelectionRange(next.cursor, next.cursor);
+            el.style.height = "auto";
+            el.style.height = `${Math.min(el.scrollHeight, 200)}px`;
+          });
+        }
+        return;
+      }
+
       if (e.key === "ArrowUp" && !isComposing && !isStreaming && inputHistory.length > 0 && value.trim().length === 0) {
         e.preventDefault();
         setSlashMenuOpen(false);
@@ -1363,15 +1440,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         }
       }
     },
-    [isMobile, isStreaming, onSteer, onFollowUp, onAbort, onMinimize, slashMenuOpen, slashQuery, filteredSlashCommands, slashActiveIndex, applySlashCommand, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, historyMenuOpen, inputHistory, historyActiveIndex, applyHistoryInput, value, startFreshDictation]
+    [isMobile, isStreaming, onSteer, onFollowUp, onAbort, onMinimize, slashMenuOpen, slashQuery, filteredSlashCommands, slashActiveIndex, applySlashCommand, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, historyMenuOpen, inputHistory, historyActiveIndex, applyHistoryInput, value, startFreshDictation, wordPrediction]
   );
 
-  const handleInput = useCallback(() => {
-    const ta = textareaRef.current;
-    if (!ta) return;
-    ta.style.height = "auto";
-    ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
-  }, []);
 
   const handlePaste = useCallback((e: React.ClipboardEvent) => {
     const items = Array.from(e.clipboardData?.items ?? []);
@@ -1514,10 +1585,26 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   useEffect(() => {
     if (!modelDropdownOpen) {
       setModelSearchQuery("");
+      if (!modelWasOpenRef.current) return;
+      modelWasOpenRef.current = false;
+      requestAnimationFrame(() => {
+        const active = document.activeElement;
+        if (active instanceof HTMLElement && active !== document.body && active !== modelTriggerRef.current) return;
+        modelTriggerRef.current?.focus();
+      });
       return;
     }
+    modelWasOpenRef.current = true;
     requestAnimationFrame(() => modelSearchInputRef.current?.focus());
   }, [modelDropdownOpen]);
+  useEffect(() => {
+    if (!plusMenuOpen) return;
+    requestAnimationFrame(() => plusMenuRef.current?.querySelector<HTMLButtonElement>('[role="menuitem"]:not([disabled])')?.focus());
+  }, [plusMenuOpen]);
+  useEffect(() => {
+    if (!thinkingDropdownOpen) return;
+    requestAnimationFrame(() => thinkingDropdownRef.current?.querySelector<HTMLButtonElement>('[role="menuitemradio"]:not([disabled])')?.focus());
+  }, [thinkingDropdownOpen]);
 
   // Close dropdowns on outside click
   useEffect(() => {
@@ -1548,10 +1635,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   return (
     <div
       ref={composerRef}
+      role="group"
+      aria-label={t("chatInput.composerLabel")}
       style={{
         flexShrink: 0,
         background: "transparent",
-         padding: "0 16px calc(8px + env(safe-area-inset-bottom))",
+        padding: "0 16px calc(8px + env(safe-area-inset-bottom))",
       }}
     >
       <ConfirmDialog
@@ -1612,7 +1701,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               <button
                 type="button"
                 onClick={onAbortRetry}
-                title="Stop the automatic retry and leave the failed turn as-is"
+                title={t("chatInput.abortRetryTitle")}
                 style={{
                   marginLeft: "auto",
                   padding: "3px 9px",
@@ -1628,7 +1717,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 onMouseEnter={(e) => { e.currentTarget.style.background = "color-mix(in srgb, var(--status-warning) 12%, transparent)"; }}
                 onMouseLeave={(e) => { e.currentTarget.style.background = "transparent"; }}
               >
-                Abort retry
+                {t("chatInput.abortRetry")}
               </button>
             )}
           </div>
@@ -1667,9 +1756,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   style={{ width: 56, height: 56, objectFit: "cover", borderRadius: 6, border: "1px solid var(--border)", display: "block" }}
                 />
                 <button
+                  className="attachment-remove-button"
                   onClick={() => removeImage(i)}
-                  title="Remove image"
-                  aria-label="Remove image"
+                  title={t("chatInput.removeImage")}
+                  aria-label={t("chatInput.removeImage")}
                   style={{
                     position: "absolute", top: -5, right: -5,
                     width: 24, height: 24, borderRadius: "50%",
@@ -1725,9 +1815,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   {file.size < 1024 ? `${file.size} B` : `${Math.round(file.size / 1024)} KB`}
                 </span>
                 <button
+                  className="attachment-remove-button"
                   onClick={() => removeTextFile(i)}
-                  title="Remove file"
-                  aria-label="Remove file"
+                  title={t("chatInput.removeFile")}
+                  aria-label={t("chatInput.removeFile")}
                   style={{
                     flexShrink: 0, width: 18, height: 18,
                     borderRadius: "50%",
@@ -1750,7 +1841,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
         {/* Main input */}
         <div style={{ position: "relative" }}>
-          {historyMenuOpen && inputHistory.length > 0 && (
+          {historyMenuVisible && (
             <div
               ref={historyMenuRef}
               className="dropdown-surface"
@@ -1793,6 +1884,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 </svg>
               </div>
               <div
+                id={historyListboxId}
+                role="listbox"
+                aria-label={t("chatInput.inputHistory")}
                 style={{
                   flex: 1,
                   minHeight: 0,
@@ -1812,6 +1906,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                         historyItemRefs.current[index] = node;
                       }}
                       type="button"
+                      id={`${historyListboxId}-${index}`}
+                      role="option"
+                      aria-selected={active}
                       onMouseDown={(e) => {
                         e.preventDefault();
                         applyHistoryInput(item);
@@ -1845,7 +1942,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               </div>
             </div>
           )}
-          {slashMenuOpen && slashQuery !== null && (
+          {slashMenuVisible && (
             <div
               ref={slashMenuRef}
               className="dropdown-surface"
@@ -1876,6 +1973,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 <span style={{ fontFamily: "var(--font-mono)" }}>{t("chatInput.tabEnterHint")}</span>
               </div>
               <div
+                id={slashListboxId}
+                role="listbox"
+                aria-label={t("chatInput.slashCommandsHeader", { countLabel: slashCommandCountLabel })}
                 style={{
                   flex: 1,
                   minHeight: 0,
@@ -1892,7 +1992,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   </div>
                 ) : (
                   groupedSlashCommands.map((group) => (
-                    <section key={group.source} style={{ marginBottom: 12 }}>
+                    <section key={group.source} role="group" aria-label={t(SLASH_SOURCE_GROUP_LABEL_KEYS[group.source])} style={{ marginBottom: 12 }}>
                       <div
                         style={{
                           position: "sticky",
@@ -1930,6 +2030,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                                 slashItemRefs.current[index] = node;
                               }}
                               type="button"
+                              id={`${slashListboxId}-${index}`}
+                              role="option"
+                              aria-selected={active}
                               onMouseDown={(e) => {
                                 e.preventDefault();
                                 applySlashCommand(command);
@@ -1988,7 +2091,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               </div>
             </div>
           )}
-          {atMenuOpen && atQuery !== null && (() => {
+          {atMenuVisible && (() => {
             const indexLoading = fileIndexLoading && (!fileIndex || fileIndex.cwd !== cwd);
             const matchCountLabel = tn("chatInput.matchCount", atMatches.length);
             // With a truncated index, local results are provisional — the
@@ -2031,6 +2134,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   <span style={{ fontFamily: "var(--font-mono)" }}>{t("chatInput.tabEnterHint")}</span>
                 </div>
                 <div
+                  id={atListboxId}
+                  role="listbox"
+                  aria-label={t("chatInput.filesHeader", { countLabel: matchCountLabel })}
                   style={{
                     flex: 1,
                     minHeight: 0,
@@ -2057,6 +2163,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                             atItemRefs.current[index] = node;
                           }}
                           type="button"
+                          id={`${atListboxId}-${index}`}
+                          role="option"
+                          aria-selected={active}
                           onMouseDown={(e) => {
                             e.preventDefault();
                             applyAtCompletion(entry);
@@ -2337,7 +2446,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               borderRadius: (queuedCount > 0 || Boolean(statusText)) ? "0 0 var(--radius-card) var(--radius-card)" : "var(--radius-card)",
               padding: "12px 12px 10px",
               boxShadow: "var(--shadow-card)",
-              transition: "border-color var(--dur-fast) var(--ease-out-warm), background var(--dur-fast) var(--ease-out-warm), box-shadow var(--dur-fast) var(--ease-out-warm)",
             } as React.CSSProperties}
           >
           {isRecording || isPaused || isReviewing || isTranscribing || transcribeError ? (
@@ -2359,6 +2467,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               onDiscard={cancelDictationAndReset}
             />
           ) : (
+          <div style={{ position: "relative" }}>
+          <GhostMirror ref={ghostMirrorRef} textareaRef={textareaRef} prediction={wordPrediction} value={value} />
           <textarea
             ref={textareaRef}
             value={value}
@@ -2366,10 +2476,18 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               setValue(e.target.value);
               setHistoryMenuOpen(false);
               updateAtQuery(e.target.value, e.target.selectionStart);
+              // Half-composed IME text is not a word yet; compositionend reports the result.
+              if (!isComposingRef.current) {
+                wordPrediction.update(e.target.value, e.target.selectionStart, e.target.selectionEnd);
+              }
             }}
             onSelect={(e) => {
               const el = e.currentTarget;
               updateAtQuery(el.value, el.selectionStart);
+              if (!isComposingRef.current) wordPrediction.update(el.value, el.selectionStart, el.selectionEnd);
+            }}
+            onScroll={(e) => {
+              if (ghostMirrorRef.current) ghostMirrorRef.current.scrollTop = e.currentTarget.scrollTop;
             }}
             onKeyDown={handleKeyDown}
             onCompositionStart={() => {
@@ -2380,10 +2498,17 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               lastCompositionEndAtRef.current = Date.now();
               const el = e.currentTarget;
               updateAtQuery(el.value, el.selectionStart);
+              wordPrediction.update(el.value, el.selectionStart, el.selectionEnd);
             }}
-            onInput={handleInput}
             onPaste={handlePaste}
             placeholder={t("chatInput.placeholder")}
+            aria-label={t("chatInput.composerLabel")}
+            role={composerMenuId ? "combobox" : undefined}
+            aria-expanded={composerMenuId ? true : undefined}
+            aria-controls={composerMenuId}
+            aria-activedescendant={composerActiveDescendant}
+            aria-autocomplete="list"
+            aria-haspopup="listbox"
             rows={1}
             style={{
               width: "100%",
@@ -2398,8 +2523,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               minHeight: 24,
               maxHeight: 200,
               overflow: "auto",
+              position: "relative",
             }}
           />
+          </div>
           )}
 
           {/* Toolbar: plus menu · model · reasoning · fast · compact · send/queue/stop */}
@@ -2410,7 +2537,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             marginTop: 8,
             paddingTop: 8,
             borderTop: "1px solid color-mix(in srgb, var(--border) 62%, transparent)",
-            flexWrap: "nowrap",
+            flexWrap: "wrap",
+            rowGap: 6,
           }}>
             {/* Plus menu — attachment · tools submenu · advisor submenu */}
             <div ref={plusMenuRef} style={{ position: "relative", flexShrink: 0 }}>
@@ -2418,12 +2546,13 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 className="wallpaper-inset"
                 onClick={() => setPlusMenuOpen((v) => !v)}
                 title={t("chatInput.plusMenu")}
+                aria-controls={plusMenuId}
                 aria-label={t("chatInput.plusMenu")}
                 aria-expanded={plusMenuOpen}
                 aria-haspopup="menu"
                 style={{
                   display: "flex", alignItems: "center", justifyContent: "center",
-                  width: 28, height: 28, padding: 0,
+                  width: "var(--control-height-sm)", height: "var(--control-height-sm)", padding: 0,
                   background: plusMenuOpen ? "var(--bg-hover)" : "none",
                   border: "none",
                   borderRadius: 7,
@@ -2438,10 +2567,20 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               </button>
               {plusMenuOpen && (
                 <div
+                  id={plusMenuId}
+                  aria-orientation="vertical"
                   className="picker-panel"
                   role="menu"
                   aria-label={t("chatInput.plusMenu")}
-                  onKeyDown={(e) => { if (e.key === "Escape") { e.stopPropagation(); setPlusMenuOpen(false); } }}
+                  onKeyDown={(event) => {
+                    if (event.key === "Escape") {
+                      event.stopPropagation();
+                      setPlusMenuOpen(false);
+                      requestAnimationFrame(() => plusMenuRef.current?.querySelector<HTMLButtonElement>("button")?.focus());
+                      return;
+                    }
+                    moveMenuFocus(event);
+                  }}
                   style={{
                     position: "absolute", left: 0,
                     zIndex: 100, width: 230, maxWidth: "calc(100vw - 32px)",
@@ -2455,6 +2594,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   </div>
                   <button
                     role="menuitem"
+                    type="button"
                     onClick={() => { setPlusMenuOpen(false); fileInputRef.current?.click(); }}
                     disabled={isStreaming}
                     title={t("chatInput.attachFile")}
@@ -2473,6 +2613,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     <>
                       <button
                         role="menuitem"
+                        type="button"
                         aria-expanded={plusExpanded === "tools"}
                         onClick={() => setPlusExpanded((v) => (v === "tools" ? null : "tools"))}
                         title={t("chatInput.changeToolPresetTitle", { preset: toolPreset ?? "full" })}
@@ -2494,6 +2635,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                           <button
                             className="picker-row"
                             role="menuitemradio"
+                            type="button"
                             aria-checked={isActive}
                             data-active={isActive}
                             key={opt.value}
@@ -2514,6 +2656,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     <>
                       <button
                         role="menuitem"
+                        type="button"
                         aria-expanded={plusExpanded === "advisor"}
                         onClick={() => setPlusExpanded((v) => (v === "advisor" ? null : "advisor"))}
                         title={advisorEnabled ? t("chatInput.advisorDisableTitle", { model: advisorModel?.name ?? t("messageView.advisorLabel"), reasoning: advisorModel?.reasoning ?? t("chatInput.advisorReasoningDefault") }) : t("chatInput.advisorEnableTitle")}
@@ -2533,6 +2676,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                         <button
                           className="picker-row"
                           role="menuitem"
+                          type="button"
                           onClick={() => { setPlusMenuOpen(false); onAdvisorChange(!advisorEnabled); }}
                           title={advisorEnabled ? t("chatInput.advisorDisableTitle", { model: advisorModel?.name ?? t("messageView.advisorLabel"), reasoning: advisorModel?.reasoning ?? t("chatInput.advisorReasoningDefault") }) : t("chatInput.advisorEnableTitle")}
                           style={{ paddingLeft: 30 }}
@@ -2552,6 +2696,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               <div ref={dropdownRef} className="composer-model-control" style={{ position: "relative", minWidth: 0 }}>
                 <button
                   className="wallpaper-inset"
+                  ref={modelTriggerRef}
                   onClick={() => setModelDropdownOpen((v) => !v)}
                   disabled={modelSelectorDisabled}
                   aria-label={`${t("chatInput.changeModel")}: ${currentName ?? (modelOptions.length > 0
@@ -2559,7 +2704,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     : showModelsLoading ? t("chatInput.loadingModels") : t("chatInput.noModels"))}`}
                   style={{
                     display: "flex", alignItems: "center", gap: 5,
-                    height: 28,
+                    height: "var(--control-height-sm)",
                     maxWidth: "100%",
                     width: "100%",
                     padding: "0 4px",
@@ -2569,7 +2714,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     borderRadius: 7,
                     color: "var(--text-muted)",
                     cursor: modelSelectorDisabled ? "not-allowed" : "pointer",
-                    fontSize: 12,
+                    fontSize: "var(--text-sm)",
                     opacity: modelSelectorDisabled ? 0.5 : 1,
                     transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
                   }}
@@ -2587,6 +2732,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     : showModelsLoading ? t("chatInput.loadingModels") : t("chatInput.noAvailableModels")}
                   aria-expanded={modelDropdownOpen}
                   aria-haspopup="dialog"
+                  aria-controls={modelPickerId}
                 >
                   <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
                     <rect x="4" y="4" width="16" height="16" rx="2" />
@@ -2605,6 +2751,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 </button>
                 {modelDropdownOpen && (
                   <div
+                    id={modelPickerId}
+                    role="dialog"
+                    aria-label={t("chatInput.modelsLabel")}
                     ref={modelDropdownPanelRef}
                     className="picker-panel"
                     style={{
@@ -2662,14 +2811,15 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   onClick={() => setThinkingDropdownOpen((v) => !v)}
                   disabled={isStreaming}
                   title={t("chatInput.changeReasoningTitle", { level: thinkingDisplayLabel })}
+                  aria-controls={thinkingMenuId}
                   aria-label={`${t("chatInput.changeReasoning")}: ${thinkingDisplayLabel}`}
                   aria-expanded={thinkingDropdownOpen}
                   aria-haspopup="menu"
                   style={{
                     display: "flex", alignItems: "center", gap: 5,
-                    height: 28, width: "100%", padding: "0 4px", background: thinkingDropdownOpen ? "var(--bg-hover)" : "none",
+                    height: "var(--control-height-sm)", width: "100%", padding: "0 4px", background: thinkingDropdownOpen ? "var(--bg-hover)" : "none",
                     border: "none", borderRadius: 7, color: "var(--text-muted)", cursor: isStreaming ? "not-allowed" : "pointer",
-                    opacity: isStreaming ? 0.5 : 1, fontSize: 12,
+                    opacity: isStreaming ? 0.5 : 1, fontSize: "var(--text-sm)",
                     transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
                   }}
                   onMouseEnter={(e) => { if (!isStreaming) { e.currentTarget.style.background = "var(--bg-hover)"; e.currentTarget.style.color = "var(--text)"; } }}
@@ -2684,8 +2834,19 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 </button>
                 {thinkingDropdownOpen && (
                   <div
+                    id={thinkingMenuId}
+                    aria-label={t("chatInput.reasoningLabel")}
                     className="picker-panel"
                     role="menu"
+                    onKeyDown={(event) => {
+                      if (event.key === "Escape") {
+                        event.stopPropagation();
+                        setThinkingDropdownOpen(false);
+                        requestAnimationFrame(() => thinkingDropdownRef.current?.querySelector<HTMLButtonElement>("button")?.focus());
+                        return;
+                      }
+                      moveMenuFocus(event);
+                    }}
                     style={{
                       position: "absolute", bottom: "calc(100% + 6px)", left: 0,
                       zIndex: 100, width: 190, maxWidth: "calc(100vw - 32px)",
@@ -2745,7 +2906,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 aria-pressed={fastModeEnabled}
                 style={{
                   display: "flex", alignItems: "center", gap: 5,
-                  height: 28,
+                  height: "var(--control-height-sm)",
                   padding: "0 8px",
                   background: fastModeEnabled ? "var(--bg-selected)" : "none",
                   border: "none",
@@ -2753,7 +2914,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   color: fastModeEnabled && fastModeActive === false ? "var(--status-warning)" : fastModeEnabled ? "var(--accent)" : "var(--text-muted)",
                   cursor: isStreaming ? "not-allowed" : "pointer",
                   opacity: isStreaming ? 0.5 : 1,
-                  fontSize: 12,
+                  fontSize: "var(--text-sm)",
                   fontWeight: 600,
                   transition: "background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)",
                 }}
@@ -2765,7 +2926,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               </button>
             )}
 
-            <div style={{ marginLeft: "auto" }} />
+            <div className="composer-toolbar-spacer" style={{ marginLeft: "auto" }} />
 
             {/* Advisor activity — thunder while the advisor model reviews this run */}
             {advisorActive && (

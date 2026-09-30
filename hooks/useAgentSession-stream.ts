@@ -18,6 +18,7 @@ import type {
 } from "@/lib/subagent-types";
 import { translate } from "@/lib/i18n";
 import type { SessionStreamCursor } from "@/lib/session-sync";
+import { encodeFilePathForApi, getFileName, resolveWorkspaceFilePath } from "@/lib/file-paths";
 
 export interface SessionData {
   sessionId: string;
@@ -187,7 +188,7 @@ export function toThinkingModelMeta(model: { provider?: string; id?: string; nam
   return { provider: model.provider, modelId: model.id, name: model.name, reasoning: model.reasoning, thinking: model.thinking };
 }
 
-export type ExtensionUiDialogRequest = Extract<ExtensionUiRequest, { method: "select" | "confirm" | "input" | "editor" }>;
+export type ExtensionUiDialogRequest = Extract<ExtensionUiRequest, { method: "select" | "confirm" | "input" | "editor" | "ask" }>;
 export type ExtensionUiCustomRequest = Extract<ExtensionUiRequest, { method: "custom" }>;
 // omp's rpc-ui frames add open_url (OAuth) and cancel on top of lib/types' union.
 export type IncomingExtensionUiRequest =
@@ -284,6 +285,77 @@ export function isSafeOpenUrl(raw: unknown): boolean {
   if (!match) return false;
   const scheme = match[1].toLowerCase();
   return scheme === "http" || scheme === "https" || scheme === "mailto";
+}
+
+export interface HostToolHandlers {
+  /** Open a validated URL; returns the result text reported to the agent. */
+  openUrl: (url: string) => string;
+  /** Open a file tab; may return the result text reported to the agent. */
+  openFile?: (path: string, name: string) => string | void;
+  cwd?: string | null;
+  sessionId?: string;
+  canOpenFile?: () => boolean;
+}
+
+/**
+ * Execute an omp-web host tool (open_url / notify / open_file) and return the
+ * toolResult text. Shared by the session's own stream and by tabs answering
+ * calls for a session they are not viewing.
+ */
+export async function runHostTool(
+  toolName: string,
+  args: Record<string, unknown>,
+  handlers: HostToolHandlers,
+): Promise<{ text: string; isError: boolean }> {
+  const str = (value: unknown): string | undefined => (typeof value === "string" ? value : undefined);
+  switch (toolName) {
+    case "open_url": {
+      const raw = str(args.url) ?? "";
+      if (!isSafeOpenUrl(raw)) return { text: "Unsafe or invalid URL not opened", isError: !!raw };
+      return { text: handlers.openUrl(raw), isError: false };
+    }
+    case "notify": {
+      const title = str(args.title) ?? "OMP";
+      const message = str(args.message) ?? "";
+      if (typeof Notification !== "undefined") {
+        try {
+          if (Notification.permission === "granted") {
+            new Notification(title, { body: message });
+          } else if (Notification.permission === "default") {
+            const permission = await Notification.requestPermission();
+            if (permission === "granted") new Notification(title, { body: message });
+          }
+        } catch {
+          // Notification API blocked — the result still succeeds.
+        }
+      }
+      return { text: "Notification shown", isError: false };
+    }
+    case "open_file": {
+      const path = resolveWorkspaceFilePath(str(args.path) ?? "", handlers.cwd);
+      if (!path || !handlers.openFile) {
+        return { text: !path ? "Invalid file path or workspace unavailable" : "File viewer is unavailable", isError: true };
+      }
+      try {
+        const query = new URLSearchParams({ type: "meta" });
+        if (handlers.sessionId) query.set("sessionId", handlers.sessionId);
+        const response = await fetch(`/api/files/${encodeFilePathForApi(path)}?${query}`, {
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (!response.ok) {
+          const detail = await response.json().catch(() => null);
+          throw new Error(typeof detail?.error === "string" ? detail.error : `File check failed (${response.status})`);
+        }
+        if (handlers.canOpenFile && !handlers.canOpenFile()) throw new Error("Session changed before opening the file");
+        const text = handlers.openFile(path, getFileName(path));
+        return { text: typeof text === "string" && text ? text : `Opened ${path}`, isError: false };
+      } catch (error) {
+        return { text: `Could not open ${path}: ${error instanceof Error ? error.message : String(error)}`, isError: true };
+      }
+    }
+    default:
+      return { text: `Host tool "${toolName}" is not available in omp-web`, isError: true };
+  }
 }
 
 export function delay(ms: number): Promise<void> {

@@ -198,6 +198,8 @@ async function blurPixels(page, selector) {
             await themeButton.click();
             await page.waitForTimeout(300);
             const menu = '.shell-topbar .dropdown-surface[role="menu"]';
+            const menuBounds = await page.locator(menu).boundingBox();
+            assert.ok(menuBounds && menuBounds.y >= 0 && menuBounds.x >= 0 && menuBounds.x + menuBounds.width <= viewport.width + 1, 'theme menu stays inside the viewport');
             await checkGlass(page, menu, mode);
             const menuPixels = mode === 'clear' ? null : await blurPixels(page, menu);
             await themeButton.click();

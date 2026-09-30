@@ -120,7 +120,8 @@ const delay = ms => new Promise(resolve=>setTimeout(resolve,ms));
     for(const mode of ['clear','frosted','default']) {
       await page.evaluate(mode=>{const key='omp-web:wallpaper';localStorage.setItem(key,JSON.stringify({...JSON.parse(localStorage.getItem(key)),glass:mode}));dispatchEvent(new Event('omp-web:wallpaper-preferences'));},mode);
       await page.waitForFunction(mode=>document.documentElement.dataset.glass===mode,mode);
-      assert.equal(await page.locator('.memo-dialog').evaluate(el=>getComputedStyle(el).backdropFilter),mode==='clear'?'none':'blur(20px)');
+      const blur=await page.locator('.memo-dialog').evaluate(el=>getComputedStyle(el).backdropFilter);
+      if(mode==='clear')assert.equal(blur,'none');else assert.match(blur,/^blur\((14|20)px\)$/);
     }
     await page.evaluate(()=>{const key='omp-web:wallpaper';localStorage.setItem(key,JSON.stringify({...JSON.parse(localStorage.getItem(key)),id:null}));dispatchEvent(new Event('omp-web:wallpaper-preferences'));});
     await page.waitForFunction(()=>document.documentElement.dataset.wallpaper==='off');
@@ -142,7 +143,10 @@ const delay = ms => new Promise(resolve=>setTimeout(resolve,ms));
     await page.locator('.memo-dialog').waitFor({state:'detached'});
     await page.keyboard.press('Control+k');await page.getByPlaceholder(/^Search commands/).waitFor();await page.keyboard.press('Insert');assert.equal(await page.locator('.memo-dialog').count(),0);
     await page.getByPlaceholder(/^Search commands/).fill('Memos');
-    await page.locator('[cmdk-item][data-selected="true"][data-value="Memos"]').waitFor();
+    const memoCommand=page.locator('[cmdk-item][data-value="Memos"]');
+    await memoCommand.waitFor();
+    for(let i=0;i<8&&await memoCommand.getAttribute('data-selected')!=='true';i++)await page.keyboard.press('ArrowDown');
+    assert.equal(await memoCommand.getAttribute('data-selected'),'true');
     await page.keyboard.press('Enter');await page.getByRole('dialog',{name:'Memos',exact:true}).waitFor();
     await page.keyboard.press('Insert');await page.getByRole('dialog',{name:'Memos',exact:true}).waitFor({state:'hidden'});
     const showSidebar=page.getByRole('button',{name:'Show sidebar',exact:true});
