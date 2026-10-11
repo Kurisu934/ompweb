@@ -1381,7 +1381,8 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
       {/* Workspaces */}
         <div
           style={{
-            flex: "1 1 auto",
+            // Scroll within the remaining space; content-sized flex basis can collapse the running list.
+            flex: "1 1 0",
             overflowY: "auto",
             padding: "2px 10px 10px",
             minHeight: 80,
