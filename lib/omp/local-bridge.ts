@@ -9,6 +9,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
+import * as fsRuntime from "node:fs";
 import { createConnection, type Socket } from "node:net";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
@@ -25,6 +26,9 @@ import {
 export const LOCAL_BRIDGE_VERSION = 1;
 export const MAX_BRIDGE_LINE_BYTES = 16 * 1024 * 1024;
 export const DEFAULT_BRIDGE_COMMAND_TIMEOUT_MS = 60_000;
+
+// Resolve user-session directories at runtime, not during Next's file tracing.
+const readDirectorySyncRuntime = Reflect.get(fsRuntime, "readdirSync") as typeof fsRuntime.readdirSync;
 
 export interface LocalSessionMetadata {
   version: 1;
@@ -89,8 +93,29 @@ export type ReadMetadataResult =
 
 /** Read and strictly validate local bridge metadata for a session file. */
 export function readSessionMetadata(sessionFile: string): ReadMetadataResult {
+  return readMetadataFile(getSessionMetadataPath(sessionFile), sessionFile);
+}
+
+/** Enumerate only authenticated, live owners; never wake an inactive session. */
+export function listLiveSessionMetadata(): LocalSessionMetadata[] {
+  const dir = getLocalSessionsDir();
+  let names: string[];
+  try {
+    names = readDirectorySyncRuntime(dir);
+  } catch {
+    return [];
+  }
+  const owners: LocalSessionMetadata[] = [];
+  for (const name of names) {
+    if (!/^[a-f0-9]{64}\.json$/.test(name)) continue;
+    const result = readMetadataFile(join(dir, name));
+    if (result.status === "live") owners.push(result.metadata);
+  }
+  return owners;
+}
+
+function readMetadataFile(metaPath: string, sessionFile?: string): ReadMetadataResult {
   const metaDir = getLocalSessionsDir();
-  const metaPath = getSessionMetadataPath(sessionFile);
   if (!existsSync(metaPath)) {
     return { status: "none" };
   }
@@ -148,13 +173,13 @@ export function readSessionMetadata(sessionFile: string): ReadMetadataResult {
     return { status: "invalid", error: "Invalid pid in metadata (must be integer > 1)", path: metaPath };
   }
 
-  // 5. Validate sessionFile (must be non-empty string and canonically match requested file)
+  // 5. Bind sessionFile to its metadata filename and, when supplied, requested file.
   if (typeof m.sessionFile !== "string" || !m.sessionFile.trim()) {
     return { status: "invalid", error: "Missing or invalid sessionFile in metadata", pid: m.pid, path: metaPath };
   }
   const metaFileCanonical = canonicalSessionPath(m.sessionFile);
-  const reqFileCanonical = canonicalSessionPath(sessionFile);
-  if (metaFileCanonical !== reqFileCanonical) {
+  const reqFileCanonical = sessionFile === undefined ? metaFileCanonical : canonicalSessionPath(sessionFile);
+  if (metaFileCanonical !== reqFileCanonical || metaPath !== getSessionMetadataPath(m.sessionFile)) {
     return {
       status: "invalid",
       error: `Metadata sessionFile mismatch: expected ${reqFileCanonical}, got ${metaFileCanonical}`,

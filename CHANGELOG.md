@@ -53,6 +53,7 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 ### Fixes & Improvements
 
+- Discover active terminal/Telegram sessions through their validated local bridge metadata even before any Web tab opens them. Merge read-only owner snapshots into the session-list API and running-session SSE, apply live run events immediately, and rescan every five seconds while observed. Reuse authenticated sockets without spawning, prompting, or terminating the external owner; release observers when no requests or subscribers remain.
 - Keep running-session shortcuts visible with long workspace lists. Size the workspace scroll area from the remaining sidebar space instead of its content height, which could shrink the running-session list to zero pixels while its count still showed a live session.
 - Integrate kahme247/ompweb through `7a3f76c` while retaining the fork's wallpaper/glass/pet UI, running-session shortcuts, three running-input actions, first-prompt Rewind and external-owner protection. Keep native structured Ask separate from Telegram's mirrored input protocol; the companion plugin no longer mistakes RPC `askDialog` for a second terminal surface.
 - Multiplex cross-session host tools on the running-session/notification stream, including the full-page Settings view, instead of opening a third persistent stream per chat tab. This prevents two HTTP/1.1 chat tabs from exhausting the browser's six connections and stalling answers or commands.

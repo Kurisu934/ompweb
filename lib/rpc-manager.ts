@@ -6,6 +6,7 @@ import { hasVisibleAssistantContent } from "./assistant-response";
 import { invalidateModelsCache } from "./models-cache";
 import { RpcCommandError, RpcCommandTimeoutError, RpcProcess, type RpcFrame, type RpcTransport } from "./omp/rpc-process";
 import { LocalBridgeClient, readSessionMetadata, checkLegacyTgOwner, acquireSharedWakeLock } from "./omp/local-bridge";
+import { getLocalRunningSessions, subscribeLocalSessionActivity } from "./omp/local-session-activity";
 import { readNativeSettings } from "./omp/settings-config";
 import { getAgentEnvOverrides } from "./omp/agent-env";
 import {
@@ -2199,8 +2200,8 @@ export async function tryAttachLiveSession(
   return undefined;
 }
 
-export function getRunningRpcSessions(): RunningRpcSession[] {
-  const map = new Map<string, string>();
+export function getRunningRpcSessions(localSessions = getLocalRunningSessions()): RunningRpcSession[] {
+  const map = new Map(localSessions.map(({ id, cwd }) => [id, cwd]));
   for (const [sessionId, session] of getRegistry()) {
     if (session.isRunning()) {
       const realId = session.sessionId || sessionId;
@@ -2240,7 +2241,11 @@ function getRunningListeners(): Set<(update: RunningSessionUpdate) => void> {
 export function subscribeRunningSessions(listener: (update: RunningSessionUpdate) => void): () => void {
   const listeners = getRunningListeners();
   listeners.add(listener);
-  return () => { listeners.delete(listener); };
+  const releaseLocal = subscribeLocalSessionActivity(() => notifyRunningChange());
+  return () => {
+    listeners.delete(listener);
+    releaseLocal();
+  };
 }
 
 // ----------------------------------------------------------------------------
