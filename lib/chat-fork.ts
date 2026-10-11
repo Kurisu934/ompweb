@@ -4,27 +4,29 @@
  * omp's `branch` RPC command — what the UI calls "fork" / "New session" —
  * only accepts a **user** message entry. Verified against a live
  * `omp --mode rpc-ui`: branching at an assistant entry answers
- * `success:false, error:"Invalid entry ID for branching"`, while the same
- * command at the user entry of the same turn succeeds and returns the
- * selected prompt text.
+ * `success:false, error:"Invalid entry ID for branching"`. The new session
+ * holds the history *before* that user entry, and the command returns the
+ * entry's prompt text so the client can offer it for editing and re-sending.
  *
- * The UI therefore offers the action on every message but resolves each one to
- * the branch point omp supports: a user message forks at itself, an assistant
- * reply forks at the user prompt that started its turn — so the newest reply in
- * a conversation is forkable like the prompt above it (issue #103). Messages
- * with no earlier user entry have no fork target.
+ * Rewind resolves a user message to itself and an assistant reply to the
+ * prompt that started its turn. The first prompt is valid: its fork has an
+ * empty context. The selected text and images are restored for editing.
  */
 
 export function resolveForkEntryIds(
-  roles: readonly string[],
+  messages: readonly { role: string; branchSummary?: boolean }[],
   entryIds: readonly (string | undefined)[],
 ): (string | undefined)[] {
   let lastUserEntryId: string | undefined;
-  return roles.map((role, index) => {
-    if (role === "user") {
+  return messages.map((message, index) => {
+    if (message.branchSummary) {
+      lastUserEntryId = undefined;
+      return undefined;
+    }
+    if (message.role === "user") {
       lastUserEntryId = entryIds[index];
       return lastUserEntryId;
     }
-    return role === "assistant" ? lastUserEntryId : undefined;
+    return message.role === "assistant" ? lastUserEntryId : undefined;
   });
 }

@@ -27,7 +27,8 @@ import {
 import { resolveSessionPathOr404 } from "@/lib/api-utils";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { sessionPathKey } from "@/lib/paths";
-import { getRpcSession } from "@/lib/rpc-manager";
+import { clearExitedRpcSession, getRpcSession, tryAttachLiveSession } from "@/lib/rpc-manager";
+import { readSessionMetadata, checkLegacyTgOwner } from "@/lib/omp/local-bridge";
 
 /** Stable, client-safe error body for catch-all handlers: details go to the
  *  server log only, never to the browser. */
@@ -234,7 +235,12 @@ export async function GET(
     // callers treat a missing `agent` as "fetch it separately".
     let agent: { running: boolean; state?: unknown } | undefined;
     if (includeState) {
-      const rpc = getRpcSession(id);
+      let rpc = getRpcSession(id);
+      if (!rpc?.isAlive()) {
+        try {
+          rpc = await tryAttachLiveSession(id);
+        } catch {}
+      }
       if (rpc?.isAlive()) {
         try {
           agent = { running: true, state: await rpc.send({ type: "get_state" }) };
@@ -281,8 +287,13 @@ export async function PATCH(
       try {
         await rpc.send({ type: "set_session_name", name: name.trim() });
         renamed = true;
-      } catch {
-        // Fall back to the on-disk title slot below.
+      } catch (err) {
+        if (rpc.isAttached) {
+          return NextResponse.json({
+            error: "Cannot rename session owned by external process when command is unsupported",
+            code: "attached_session_rename_failed",
+          }, { status: 409 });
+        }
       }
     }
     if (!renamed) {
@@ -418,10 +429,31 @@ export async function DELETE(
       }
     } catch { /* skip if dir unreadable */ }
 
-    // Await the child's exit before unlinking: omp flushes session state on
-    // shutdown and would recreate the file if it were still running.
+    // Attached / live external owner guard: deleting the file while external TUI runs would destroy live history.
+    const activeRpc = getRpcSession(id);
+    if (activeRpc?.isAttached) {
+      return NextResponse.json({
+        error: "Cannot delete session actively owned by an external process",
+        code: "attached_session_delete_prohibited",
+      }, { status: 409 });
+    }
+    const ownerCheck = readSessionMetadata(filePath);
+    if (ownerCheck.status === "live") {
+      return NextResponse.json({
+        error: "Cannot delete session actively owned by an external process",
+        code: "attached_session_delete_prohibited",
+      }, { status: 409 });
+    }
+    const legacyCheck = checkLegacyTgOwner(filePath, id);
+    if (legacyCheck.active) {
+      return NextResponse.json({
+        error: "Cannot delete session actively owned by an external process",
+        code: "attached_session_delete_prohibited",
+      }, { status: 409 });
+    }
     await getRpcSession(id)?.destroyAndWait?.();
     deleteSessionFileWithArtifacts(filePath);
+    clearExitedRpcSession(id);
     invalidateSessionPathCache(id);
     invalidateSessionCaches(); // deletion drops the file: full flush is correct
     return NextResponse.json({

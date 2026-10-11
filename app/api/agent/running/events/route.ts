@@ -1,12 +1,17 @@
-import { getRunningRpcSessions, subscribeRunningSessions } from "@/lib/rpc-manager";
+import { getExitedRpcSessions, getRunningRpcSessions, subscribeHostToolCalls, subscribeRunningSessions } from "@/lib/rpc-manager";
+import { isValidNotificationId } from "@/lib/notification-events";
+import { attachNotificationClient } from "@/lib/notification-hub";
 import { subscribeSessionFileChanges } from "@/lib/session-watcher";
 
 export const dynamic = "force-dynamic";
 
 // GET /api/agent/running/events - SSE stream of the set of currently-running
 // session ids. Also carries refresh hints when a live session's file metadata
-// changes, so the sidebar can show a newly-started session immediately.
+// changes, so the sidebar can show a newly-started session immediately, and
+// this tab's notifications and cross-session host tool calls. Reuse one global
+// stream per tab: browsers allow only six HTTP/1.1 connections per host.
 export async function GET(req: Request) {
+  const clientId = new URL(req.url).searchParams.get("clientId");
   // Hoisted so the stream's cancel() (half-open disconnects that never fire
   // the abort signal) can release the heartbeat and the subscriber.
   let streamCleanup: (() => void) | null = null;
@@ -18,6 +23,8 @@ export async function GET(req: Request) {
       let cleaned = false;
       let unsubscribeRunning: (() => void) | null = null;
       let unsubscribeFiles: (() => void) | null = null;
+      let detachNotifications: (() => void) | null = null;
+      let unsubscribeHostTools: (() => void) | null = null;
       let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
       const cleanup = () => {
@@ -36,6 +43,10 @@ export async function GET(req: Request) {
           try { unsubscribeFiles(); } catch {}
           unsubscribeFiles = null;
         }
+        detachNotifications?.();
+        detachNotifications = null;
+        unsubscribeHostTools?.();
+        unsubscribeHostTools = null;
         req.signal?.removeEventListener("abort", cleanup);
         try {
           controller.close();
@@ -63,11 +74,12 @@ export async function GET(req: Request) {
 
       // Subscribe BEFORE taking the initial snapshot so no state change can slip
       // through the gap between snapshot and subscription.
-      unsubscribeRunning = subscribeRunningSessions(({ ids, runningSessions, refreshSessionList }) => {
+      unsubscribeRunning = subscribeRunningSessions(({ ids, runningSessions, exitedSessions, refreshSessionList }) => {
         encode({
           type: "running",
           runningSessionIds: ids,
           runningSessions,
+          exitedSessions,
           ...(refreshSessionList ? { refreshSessionList: true } : {}),
         });
       });
@@ -76,12 +88,18 @@ export async function GET(req: Request) {
         encode({ type: "sessions-changed", sessionIds, refreshSessionList: true });
       });
 
+      if (isValidNotificationId(clientId)) {
+        detachNotifications = attachNotificationClient(clientId, (message) => encode({ type: "notification", ...message }));
+      }
+      unsubscribeHostTools = subscribeHostToolCalls((call) => encode({ type: "host_tool_call", ...call }));
+
       // Initial snapshot so the client renders the correct state immediately.
       const initialRunning = getRunningRpcSessions();
       encode({
         type: "running",
         runningSessionIds: initialRunning.map((s) => s.id),
         runningSessions: initialRunning,
+        exitedSessions: getExitedRpcSessions(),
       });
       // Heartbeat to keep the connection alive through proxies/timeouts.
       heartbeatTimer = setInterval(() => {

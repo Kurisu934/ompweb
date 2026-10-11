@@ -1,7 +1,7 @@
 import { type ChildProcessWithoutNullStreams, spawn } from "child_process";
 import { createInterface } from "readline";
 import { sanitizeProjectCommandEnvironment } from "../project-command-env";
-import { resolveOmpBin } from "./omp-cli";
+import { resolveOmpBin, wrapWindowsScript } from "./omp-cli";
 import { encodeRpcCommand, RpcFrameDecoder, type RpcFrameRecord, type RpcProtocolVersion } from "./rpc-frame";
 
 /**
@@ -26,6 +26,15 @@ export interface RpcResponseFrame {
 }
 
 export type RpcFrame = { type: string; [key: string]: unknown };
+export interface RpcTransport {
+  readonly isAlive: boolean;
+  waitReady(timeoutMs?: number): Promise<RpcFrame>;
+  negotiateProtocol(ready: RpcFrame): Promise<RpcProtocolVersion>;
+  onFrame(listener: (frame: RpcFrame) => void): () => void;
+  sendCommand<T = unknown>(command: { type: string; [key: string]: unknown }, timeoutMs?: number): Promise<T>;
+  sendFrame(frame: { type: string; [key: string]: unknown }): void;
+  dispose(gracePeriodMs?: number): Promise<void>;
+}
 
 export class RpcCommandError extends Error {
   readonly command: string;
@@ -77,7 +86,7 @@ export interface RpcProcessOptions {
 
 const STDERR_TAIL_LIMIT = 8 * 1024;
 
-export class RpcProcess {
+export class RpcProcess implements RpcTransport {
   readonly cwd: string;
   private child: ChildProcessWithoutNullStreams;
   private readonly pending = new Map<string, PendingCommand>();
@@ -110,7 +119,9 @@ export class RpcProcess {
     const childEnv = sanitizeProjectCommandEnvironment({ ...process.env, ...options.env });
     if (options.env?.OMP_PROFILE === undefined) delete childEnv.OMP_PROFILE;
     if (options.env?.PI_PROFILE === undefined) delete childEnv.PI_PROFILE;
-    this.child = this.spawnProcess(bin, args, {
+    childEnv.OMP_WEB_ASK_PROTOCOL = options.env?.OMP_WEB_ASK_PROTOCOL ?? "1";
+    const target = wrapWindowsScript(bin, args);
+    this.child = this.spawnProcess(target.file, target.args, {
       cwd: options.cwd,
       env: childEnv,
       stdio: ["pipe", "pipe", "pipe"],

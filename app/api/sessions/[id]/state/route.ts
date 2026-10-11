@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { getRpcSession, WebRpcError } from "@/lib/rpc-manager";
+import { getExitedRpcSession, getRpcSession, tryAttachLiveSession, WebRpcError } from "@/lib/rpc-manager";
 import { apiErrorResponse, resolveSessionPathOr404 } from "@/lib/api-utils";
 
 export async function GET(
@@ -11,7 +11,16 @@ export async function GET(
     // A live process proves the session exists: omp does not create the session
     // file until the history holds an assistant message, so the path check
     // below would 404 a brand-new running session.
-    const rpc = getRpcSession(id);
+    let rpc = getRpcSession(id);
+    if (!rpc?.isAlive()) {
+      try {
+        rpc = await tryAttachLiveSession(id);
+      } catch (error) {
+        if (error instanceof WebRpcError) {
+          return NextResponse.json({ error: error.message, code: error.code }, { status: 400 });
+        }
+      }
+    }
     if (rpc?.isAlive()) {
       try {
         const state = await rpc.send({ type: "get_state" });
@@ -23,6 +32,9 @@ export async function GET(
         throw error;
       }
     }
+
+    const exited = getExitedRpcSession(id);
+    if (exited) return NextResponse.json({ running: false, exited });
 
     const resolved = await resolveSessionPathOr404(id);
     if ("response" in resolved) return resolved.response;

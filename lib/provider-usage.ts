@@ -21,6 +21,7 @@ type CachedUsage = { expiresAt: number; output: string };
 
 let usageCache: CachedUsage | undefined;
 let usageInFlight: Promise<string> | undefined;
+let usageInFlightForced = false;
 
 function nonEmptyString(value: unknown): string | undefined {
   return typeof value === "string" && value.trim() ? value.trim() : undefined;
@@ -60,10 +61,6 @@ function usageWindow(
   };
 }
 
-function accountLabel(metadata: Record<string, unknown> | undefined): string | undefined {
-  return nonEmptyString(metadata?.email) ?? nonEmptyString(metadata?.accountId);
-}
-
 function hyperCreditBalance(provider: string, limits: unknown[]): ProviderCreditBalance | undefined {
   if (provider !== "charm-hyper") return undefined;
   for (const limit of limits) {
@@ -85,7 +82,6 @@ function hyperCreditBalance(provider: string, limits: unknown[]): ProviderCredit
   }
   return undefined;
 }
-
 type UsageLimit = { id: ProviderUsageWindowId; fraction: number; window: Record<string, unknown> };
 
 type UsageGroup = {
@@ -139,7 +135,9 @@ function normalizeReport(
     selectedGroups.splice(0, selectedGroups.length, selected);
   }
   const metadata = isRecord(rawReport.metadata) ? rawReport.metadata : undefined;
-  const label = accountLabel(metadata);
+  // Email only: unredacted account ids are opaque UUIDs, so those accounts
+  // show as "Account N".
+  const label = nonEmptyString(metadata?.email);
   const plan = nonEmptyString(metadata?.planType);
   const credits = hyperCreditBalance(provider, limits);
   if (selectedGroups.length === 0) {
@@ -185,10 +183,19 @@ export function parseProviderUsageOutput(output: string, query: UsageQuery = {},
   return { generatedAt, reports };
 }
 
-async function fetchProviderUsage(): Promise<string> {
+async function fetchProviderUsage(refresh = false): Promise<string> {
   const bin = resolveOmpBin();
   if (!bin) throw new Error("omp binary not found. Install oh-my-pi or set OMP_WEB_OMP_BIN.");
-  const { stdout } = await execFileAsync(bin, ["usage", "--json", "--redact"], {
+  if (refresh) {
+    await execFileAsync(bin, ["usage", "invalidate"], {
+      timeout: USAGE_TIMEOUT_MS,
+      maxBuffer: USAGE_MAX_BUFFER,
+      windowsHide: true,
+    });
+  }
+  // Unredacted so accounts show their real email; only the parsed label, plan
+  // and windows reach the browser, never the raw metadata.
+  const { stdout } = await execFileAsync(bin, ["usage", "--json"], {
     timeout: USAGE_TIMEOUT_MS,
     maxBuffer: USAGE_MAX_BUFFER,
     windowsHide: true,
@@ -196,10 +203,15 @@ async function fetchProviderUsage(): Promise<string> {
   return stdout;
 }
 
-function getUsageOutput(): Promise<string> {
-  if (usageCache && usageCache.expiresAt > Date.now()) return Promise.resolve(usageCache.output);
-  if (usageInFlight) return usageInFlight;
-  usageInFlight = fetchProviderUsage()
+function getUsageOutput(refresh = false): Promise<string> {
+  if (!refresh && usageCache && usageCache.expiresAt > Date.now()) return Promise.resolve(usageCache.output);
+  if (usageInFlight) {
+    return refresh && !usageInFlightForced
+      ? usageInFlight.then(() => getUsageOutput(true), () => getUsageOutput(true))
+      : usageInFlight;
+  }
+  usageInFlightForced = refresh;
+  usageInFlight = fetchProviderUsage(refresh)
     .then((output) => {
       usageCache = { output, expiresAt: Date.now() + USAGE_CACHE_TTL_MS };
       return output;
@@ -208,6 +220,6 @@ function getUsageOutput(): Promise<string> {
   return usageInFlight;
 }
 
-export async function getProviderUsage(query: UsageQuery = {}): Promise<ProviderUsageSnapshot> {
-  return parseProviderUsageOutput(await getUsageOutput(), query);
+export async function getProviderUsage(query: UsageQuery = {}, refresh = false): Promise<ProviderUsageSnapshot> {
+  return parseProviderUsageOutput(await getUsageOutput(refresh), query);
 }

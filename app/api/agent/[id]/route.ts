@@ -1,10 +1,29 @@
 import { NextResponse } from "next/server";
 import { readSessionHeader } from "@/lib/session-reader";
 import { apiErrorResponse, resolveSessionPathOr404 } from "@/lib/api-utils";
-import { startRpcSession, getRpcSession, resolveSpawnCwdResult, WebRpcError } from "@/lib/rpc-manager";
+import { startRpcSession, getRpcSession, tryAttachLiveSession, resolveSpawnCwdResult, WebRpcError } from "@/lib/rpc-manager";
 import { RpcCommandError } from "@/lib/omp/rpc-process";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { MAX_AGENT_COMMAND_REQUEST_BYTES } from "@/lib/image-attachments";
+
+// Commands that ride whatever child is alive and never spawn or replace one:
+// keystroke predictions, and the side-question reads/cancel omp-web sends in
+// the background (SSE connect, reconcile). Without a live process there is no
+// ghost text, no running side question and nothing to cancel, so the reply is
+// known without omp. Asking (`btw`) and opening the history start omp first.
+const NO_SPAWN_REPLIES: Record<string, unknown> = {
+  predict_word: { suffix: null },
+  predict_word_feedback: null,
+  get_btw_history: { records: [] },
+  btw_cancel: { cancelled: false },
+};
+
+// Live diagnostics of a skill-resolving omp. A saved or exited session has none,
+// and resuming a full child (MCP, LSP) just to answer a read-only inspection or
+// flip one setting is not what the click asked for: with no live wrapper these
+// answer 409 instead of starting omp, and a live idle child is never replaced
+// because the advisor flag differs.
+const LIVE_SESSION_ONLY = new Set(["get_skill_diagnostics", "set_skill_startup_diagnostics"]);
 
 /** omp-web's own failures carry a stable code the client can localize; omp's
  * errors stay opaque English text. */
@@ -47,12 +66,21 @@ export async function POST(
     // flag must replace an idle child to take effect; busy children keep
     // running and pick the flag up at the next natural respawn.
     const existing = getRpcSession(id);
+    const noSpawn = Object.hasOwn(NO_SPAWN_REPLIES, body.type);
+    const liveOnly = LIVE_SESSION_ONLY.has(body.type);
     if (existing?.isAlive()) {
-      if (existing.advisorSpawned === advisor || existing.isRunning()) {
+      if (noSpawn || liveOnly || existing.advisorSpawned === advisor || existing.isRunning() || existing.isAttached) {
         const result = await existing.send(body);
         return NextResponse.json({ success: true, data: result });
       }
       await existing.destroyAndWait();
+    }
+    if (noSpawn) return NextResponse.json({ success: true, data: NO_SPAWN_REPLIES[body.type] });
+    if (liveOnly) {
+      return NextResponse.json(
+        { error: "Skill diagnostics require a running session", code: "skill_diagnostics_unavailable" },
+        { status: 409 },
+      );
     }
 
     const resolved = await resolveSessionPathOr404(id);
@@ -79,7 +107,10 @@ export async function GET(
   const { id } = await params;
 
   try {
-    const session = getRpcSession(id);
+    let session = getRpcSession(id);
+    if (!session || !session.isAlive()) {
+      session = await tryAttachLiveSession(id);
+    }
     if (!session || !session.isAlive()) {
       return NextResponse.json({ running: false });
     }
