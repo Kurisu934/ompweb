@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore, type CSSProperties, type RefObject } from "react";
+import { useEffect, useRef, useState, useSyncExternalStore, type CSSProperties, type RefObject } from "react";
 import { SendHorizontal } from "lucide-react";
 import type { ExtensionUiRequest } from "@/lib/types";
 import type { RpcAskDialogAnswer } from "@/lib/pi-types";
@@ -196,6 +196,7 @@ export function ExtensionDialog({
   const viewportMaxHeight = useViewportMaxHeight();
   const { touchTargets } = useTouchTargets();
 
+
   useEffect(() => {
     // SSE reconnects replay the same request as a fresh object, not a new question.
     if (requestIdRef.current === request.id) return;
@@ -213,13 +214,9 @@ export function ExtensionDialog({
     question.multi || askDraftAt(index).selected.length > 0 || askDraftAt(index).other.trim() !== ""
   );
 
-  const canSubmit = submitting ? false : (
-    request.method === "ask"
-      ? canSubmitNativeAsk
-      : request.method === "select"
-        ? selectedOption !== null
-        : true
-  );
+  const canSubmit = !submitting && (request.method === "ask"
+    ? canSubmitNativeAsk
+    : request.method !== "select" || selectedOption !== null);
 
   const title = request.method === "ask" ? t("chatWindow.askTitle") : request.title;
 
@@ -272,6 +269,7 @@ export function ExtensionDialog({
     });
     return () => window.cancelAnimationFrame(frame);
   }, [attached, panelRef, request.id]);
+
 
   const submitValue = () => {
     if (submitting) return;
@@ -385,30 +383,30 @@ export function ExtensionDialog({
             </div>
           )}
           {request.method === "input" && (
-            <input
-              autoFocus
-              disabled={submitting}
-              aria-label={request.title || request.placeholder || "Input value"}
-              value={value}
-              placeholder={request.placeholder}
-              onChange={(e) => setValue(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter") submitValue();
-              }}
-              style={{
-                width: "100%",
-                padding: "7px 10px",
-                borderRadius: 6,
-                border: "1px solid var(--border)",
-                background: "var(--bg-panel)",
-                color: "var(--text)",
-                outline: "none",
-                fontSize: 12,
-                fontFamily: "inherit",
-                cursor: submitting ? "not-allowed" : "text",
-                opacity: submitting ? 0.65 : 1,
-              }}
-            />
+              <input
+                autoFocus
+                disabled={submitting}
+                aria-label={request.title || request.placeholder || "Input value"}
+                value={value}
+                placeholder={request.placeholder}
+                onChange={(e) => setValue(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") submitValue();
+                }}
+                style={{
+                  width: "100%",
+                  padding: "7px 10px",
+                  borderRadius: 6,
+                  border: "1px solid var(--border)",
+                  background: "var(--bg-panel)",
+                  color: "var(--text)",
+                  outline: "none",
+                  fontSize: 12,
+                  fontFamily: "inherit",
+                  cursor: submitting ? "not-allowed" : "text",
+                  opacity: submitting ? 0.65 : 1,
+                }}
+              />
           )}
           {request.method === "editor" && (
             <textarea

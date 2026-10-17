@@ -27,7 +27,8 @@ import {
 import { resolveSessionPathOr404 } from "@/lib/api-utils";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { sessionPathKey } from "@/lib/paths";
-import { clearExitedRpcSession, getRpcSession } from "@/lib/rpc-manager";
+import { clearExitedRpcSession, getRpcSession, tryAttachLiveSession } from "@/lib/rpc-manager";
+import { readSessionMetadata } from "@/lib/omp/local-bridge";
 
 /** Stable, client-safe error body for catch-all handlers: details go to the
  *  server log only, never to the browser. */
@@ -234,7 +235,12 @@ export async function GET(
     // callers treat a missing `agent` as "fetch it separately".
     let agent: { running: boolean; state?: unknown } | undefined;
     if (includeState) {
-      const rpc = getRpcSession(id);
+      let rpc = getRpcSession(id);
+      if (!rpc?.isAlive()) {
+        try {
+          rpc = await tryAttachLiveSession(id);
+        } catch {}
+      }
       if (rpc?.isAlive()) {
         try {
           agent = { running: true, state: await rpc.send({ type: "get_state" }) };
@@ -281,14 +287,23 @@ export async function PATCH(
       try {
         await rpc.send({ type: "set_session_name", name: name.trim() });
         renamed = true;
-      } catch {
-        // Fall through to the file-based title update below.
+      } catch (err) {
+        if (rpc.isAttached) {
+          return NextResponse.json({
+            error: "Cannot rename session owned by external process when command is unsupported",
+            code: "attached_session_rename_failed",
+          }, { status: 409 });
+        }
       }
     }
     if (!renamed) {
       const resolved = await resolveSessionPathOr404(id);
       if ("response" in resolved) return resolved.response;
       const filePath = resolved.filePath;
+      const owner = readSessionMetadata(filePath);
+      if (owner.status === "live" || owner.status === "invalid") {
+        return NextResponse.json({ error: "Rename this session in its original desktop process", code: "attached_session_rename_failed" }, { status: 409 });
+      }
       setSessionTitle(filePath, name.trim(), "user");
       invalidateSessionCaches(filePath);
       return NextResponse.json({ ok: true });
@@ -310,6 +325,21 @@ export async function DELETE(
     const resolved = await resolveSessionPathOr404(id);
     if ("response" in resolved) return resolved.response;
     const filePath = resolved.filePath;
+    // Attached / live external owner guard: deleting the file while external TUI runs would destroy live history.
+    const activeRpc = getRpcSession(id);
+    if (activeRpc?.isAttached && activeRpc.isAlive()) {
+      return NextResponse.json({
+        error: "Cannot delete session actively owned by an external process",
+        code: "attached_session_delete_prohibited",
+      }, { status: 409 });
+    }
+    const ownerCheck = readSessionMetadata(filePath);
+    if (ownerCheck.status === "live" || ownerCheck.status === "invalid") {
+      return NextResponse.json({
+        error: "Cannot delete session actively owned by an external process",
+        code: "attached_session_delete_prohibited",
+      }, { status: 409 });
+    }
 
     // Read only the bounded header before deleting.
     const deletedHeader = readSessionHeader(filePath);

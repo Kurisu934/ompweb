@@ -7,6 +7,7 @@ import {
 } from "@/lib/session-reader";
 import { resolveSessionPathOr404 } from "@/lib/api-utils";
 import { clearExitedRpcSession, getRpcSession } from "@/lib/rpc-manager";
+import { readSessionMetadata } from "@/lib/omp/local-bridge";
 
 /** POST /api/sessions/[id]/archive — stop the live child, then archive the
  * native OMP JSONL and its sibling artifacts using OMP's gc layout. */
@@ -19,6 +20,14 @@ export async function POST(
     const resolved = await resolveSessionPathOr404(id);
     if ("response" in resolved) return resolved.response;
     const filePath = resolved.filePath;
+    const rpc = getRpcSession(id);
+    const owner = readSessionMetadata(filePath);
+    if ((rpc?.isAttached && rpc.isAlive()) || owner.status === "live" || owner.status === "invalid") {
+      return NextResponse.json(
+        { error: "Stop the original desktop process before archiving its session", code: "attached_session_archive_prohibited" },
+        { status: 409 },
+      );
+    }
     // Parent-session paths are native branch metadata. Moving only a parent
     // would leave active children pointing at a path that no longer exists,
     // flattening their tree in the sidebar. Archive leaves first instead.

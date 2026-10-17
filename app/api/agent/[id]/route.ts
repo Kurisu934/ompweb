@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { readSessionHeader } from "@/lib/session-reader";
 import { apiErrorResponse, resolveSessionPathOr404 } from "@/lib/api-utils";
-import { startRpcSession, getRpcSession, resolveSpawnCwdResult, WebRpcError } from "@/lib/rpc-manager";
+import { startRpcSession, getRpcSession, tryAttachLiveSession, resolveSpawnCwdResult, WebRpcError } from "@/lib/rpc-manager";
 import { RpcCommandError } from "@/lib/omp/rpc-process";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { MAX_AGENT_COMMAND_REQUEST_BYTES } from "@/lib/image-attachments";
@@ -69,7 +69,7 @@ export async function POST(
     const noSpawn = Object.hasOwn(NO_SPAWN_REPLIES, body.type);
     const liveOnly = LIVE_SESSION_ONLY.has(body.type);
     if (existing?.isAlive()) {
-      if (noSpawn || liveOnly || existing.advisorSpawned === advisor || existing.isRunning()) {
+      if (noSpawn || liveOnly || existing.advisorSpawned === advisor || existing.isRunning() || existing.isAttached) {
         const result = await existing.send(body);
         return NextResponse.json({ success: true, data: result });
       }
@@ -108,6 +108,9 @@ export async function GET(
 
   try {
     let session = getRpcSession(id);
+    if (!session || !session.isAlive()) {
+      session = await tryAttachLiveSession(id);
+    }
     if (!session || !session.isAlive()) {
       return NextResponse.json({ running: false });
     }

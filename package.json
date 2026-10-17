@@ -1,6 +1,6 @@
 {
   "name": "@kahme247/ompweb",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "Web UI for the oh-my-pi (omp) coding agent",
   "homepage": "https://github.com/kahme247/ompweb#readme",
   "repository": {
@@ -23,6 +23,7 @@
   },
   "files": [
     "bin",
+    "extensions",
     "lib",
     ".next",
     "!.next/cache",
@@ -37,6 +38,9 @@
     "next.config.ts",
     "package.json"
   ],
+  "omp": {
+    "extensions": ["./extensions/desktop-bridge.ts"]
+  },
   "scripts": {
     "dev": "next dev -H 127.0.0.1 -p 30178",
     "dev:lan": "next dev -H 0.0.0.0 -p 30178",

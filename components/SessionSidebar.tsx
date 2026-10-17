@@ -770,7 +770,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
       // (shared ?session= link, deleted session), so fall through to the
       // retry/exhaustion path below instead of returning forever.
       if (allSessions.length === 0 && !initialLoadedRef.current) return; // wait for sessions to load
-      const target = allSessions.find((s) => s.id === initialSessionId);
+      const target = visibleSessions.find((s) => s.id === initialSessionId);
       if (target) {
         restoreRetryRef.current = 0;
         restoredRef.current = true;
@@ -806,7 +806,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     setSelectedCwd(top.path);
     expandProject(top.path);
     provisionalSelectionRef.current = allSessions.length === 0;
-  }, [allSessions, selectedCwd, initialSessionId, skipInitialProjectSelection, onSelectSession, onInitialRestoreDone, sortedProjects, expandProject, loadSessions]);
+  }, [allSessions, visibleSessions, selectedCwd, initialSessionId, skipInitialProjectSelection, onSelectSession, onInitialRestoreDone, sortedProjects, expandProject, loadSessions]);
 
   // Default expansion: when the user has never stored an expansion choice,
   // expand only the active project.

@@ -1,6 +1,7 @@
 import { closeSync, existsSync, fstatSync, openSync, readSync, statSync, type Stats } from "fs";
 import { normalize as normalizePath } from "path";
 import { getAgentDir } from "./omp/paths";
+import { listLiveSessionMetadata } from "./omp/local-bridge";
 import {
   containsBlobRef,
   invalidateAllSessionScanCaches,
@@ -252,8 +253,17 @@ export async function resolveSessionPath(sessionId: string): Promise<string | nu
 
   // Cache miss: scan all sessions to populate cache, then retry
   await listAllSessions();
-  const resolved = getPathCache().get(sessionId);
-  if (!resolved) return null;
+  let resolved = getPathCache().get(sessionId);
+  if (!resolved) {
+    // A desktop owner can publish/flush a new journal while the list's 30s
+    // snapshot is still fresh. Its private metadata supplies the path; bind it
+    // to the real header before caching it or permitting any session operation.
+    const owner = listLiveSessionMetadata().find((metadata) => metadata.sessionId === sessionId);
+    if (!owner || readSessionHeaderSync(owner.sessionFile)?.id !== sessionId) return null;
+    resolved = owner.sessionFile;
+    cacheSessionPath(sessionId, resolved);
+    invalidateSessionListMeta();
+  }
   if (!existsSync(resolved)) {
     invalidateSessionPathCache(sessionId);
     return null;

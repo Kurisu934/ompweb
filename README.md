@@ -69,8 +69,9 @@ Integrated through [`7a3f76c`](https://github.com/kahme247/ompweb/commit/7a3f76c
 on 2026-10-11: native multi-question Ask, notifications, account management,
 `/btw`, Slow mode, in-run attachments and session recovery. Local wallpapers,
 glass, pets, running-session shortcuts, Send now / Steer / Queue and Rewind
-semantics remain intact. Cross-session host tools share the global event stream so
-two HTTP/1.1 chat tabs do not exhaust all connections and block dialog submissions.
+semantics remain intact. Desktop/Web Ask uses the native dialog, independently
+of Telegram. Cross-session host tools share the global event stream so two
+HTTP/1.1 chat tabs do not exhaust all connections and block dialog submissions.
 Source integration does not rebuild or restart an existing deployment.
 
 ![Upstream voice recording deck integrated with the glass composer](docs/showcase/dictation.png)
@@ -103,6 +104,38 @@ The **Steer** action on a queued follow-up requires an omp runtime with the `pro
 Queue **Delete** and **Edit** additionally require `remove_queued_message`. Deletion is confirmed by OMP before the chip disappears; editing recalls text only after cancellation succeeds. Unsupported runtimes or messages that are no longer pending leave the queue unchanged and display a notice.
 
 The queue panel shows omp's own queue (`queuedMessages` in `get_state` and `queue_update` events, omp 18.4.4 or later), so every device viewing a session sees the same queued messages. **Stop** moves the text of messages still waiting in the queue back into the composer instead of letting the agent run them; a steer the model already picked up through live steering still runs. Older omp runtimes show no queue panel, and Stop cannot take queued messages back.
+
+## Attach a desktop OMP process
+
+Load the standalone extension in the **original terminal OMP process**:
+
+```bash
+omp -e /absolute/path/to/ompweb/extensions/desktop-bridge.ts
+```
+
+For automatic loading, symlink that file into
+`${PI_CODING_AGENT_DIR:-$HOME/.omp/agent}/extensions/omp-web-desktop.ts`
+(or configure it as an OMP extension). Load it only once. In an existing terminal
+session, use OMP's `/reload` after installation; do not resume its journal in a
+second process. The bridge was verified against OMP **18.10.1**.
+
+OMP and Web must share `PI_CODING_AGENT_DIR` (default `~/.omp/agent`). The extension
+publishes private, authenticated `omp-web-desktop/v1` metadata under
+`web-desktop-sessions`; Web discovers active owners even before opening their
+sessions. Input, streaming output and state stay in the original PID and journal.
+Closing Web or restarting its service only disconnects the bridge.
+
+The bridge intercepts the existing **native Ask dialog**; it does not register a
+replacement tool. Local and Web forms share validated, first-answer-wins
+arbitration, dismiss the losing form, replay pending questions on reconnect and
+clean up on cancellation/abort. The native dialog retains its timeout behavior.
+No Telegram plugin, Telegram state, wake lock or Ask-protocol environment flag is
+required; Telegram's separate namespace/protocol is neither read nor modified.
+
+Attached sessions accept conversation input, Steer, Queue and Stop. Run shell or
+slash commands, rename, fork, reload and other unsupported controls in the
+original terminal. Web rejects archive/delete and interrupt-and-replace rather
+than taking ownership of the external process or writing its journal.
 
 ## App installation behind authentication
 
@@ -398,13 +431,15 @@ host (KDE Plasma, and most Wayland/X11 desktops).
 ## Features
 
 - **Interactive Chat**: Real-time streaming conversation with your local `omp` agent — tool calls, thinking levels, token counts, cost, context gauge, queue controls, and interrupt & retry.
-- **Running Sessions**: Jump between active runs from a separate section above workspaces, including runs in collapsed projects. Shortcuts show the workspace path and disappear when the run finishes; the normal project tree remains intact.
+- **Running Sessions**: Jump between active runs from a separate section above workspaces, including runs in collapsed projects and desktop sessions not yet opened in Web. The standalone desktop bridge supplies validated owner metadata; read-only discovery reconciles every five seconds and follows live run events without spawning or prompting the owner. Shortcuts show the workspace path and disappear when the run finishes; the normal project tree remains intact.
 - **Workspace Quick New Session**: Each workspace row has an always-visible **+** button that opens a new-session composer at that workspace's root, even when its session list is collapsed. OMP starts only on the first message. Existing sessions and drafts are preserved; the top New Session action still follows the selected directory/worktree. On mobile, the shortcut closes the drawer and focuses the composer.
-- **Send now, Steer, or Queue**: During a run, use **Send now** to abort it and submit the new message without waiting for natural completion; completed file changes and commands are not undone. **Steer** uses OMP's native delivery timing, while **Queue** waits for the run to finish. Settings → Interface & Behavior → Message during active run selects the highlighted action and desktop Enter behavior without hiding the other buttons.
+- **Send now, Steer, or Queue**: During a run, use **Send now** to abort it and submit the new message without waiting for natural completion; completed file changes and commands are not undone. **Steer** uses OMP's native delivery timing, while **Queue** waits for the run to finish. Settings → Interface & Behavior → Message during active run selects the highlighted action and desktop Enter behavior without hiding the other buttons. Desktop-owned attached sessions cannot interrupt-and-replace: the web reports the limitation and retains the draft. Stop the run first, or choose Steer or Queue.
+- **Shared desktop OMP instance**: The standalone `extensions/desktop-bridge.ts` attaches Web to the original terminal process through its private authenticated socket, without a second writer or any Telegram dependency. Both processes share `PI_CODING_AGENT_DIR`; disconnecting or shutting down Web never terminates the desktop owner. Unsupported controls report an explicit error.
+- **Native Ask in terminal and Web**: The existing native Ask appears as a structured browser form, including choice descriptions, multi-select and custom answers. The first answer wins and closes the other form; reconnects replay pending questions and abort clears both surfaces. No replacement Ask tool or placeholder input protocol is used.
 - **Message Copy**: Copy user messages and completed assistant replies as rendered plain text or original Markdown using the buttons below each message. Thinking, tool output, and message controls are excluded. Oversized messages that use the raw-text viewer copy their full source in either format.
 - **Queue Deletion Confirmation**: Preview and confirm before cancelling queued follow-ups or steered messages in OMP. Requires native `remove_queued_message` support; already-delivered messages cannot be recalled.
 - **Session Management**: Browse past conversations by project, fork sessions, branch within a session, archive/restore, import session files, and deep-link via URL.
-- **Rewind Prompts**: Use **Rewind** below a historical prompt or its reply to fork before that prompt and restore its text and images in the composer. The first prompt starts a branch with no earlier messages. The original conversation and its unsent draft remain intact; workspace files and executed commands are not undone. Stop an active run before rewinding.
+- **Rewind Prompts**: Use **Rewind** below a historical prompt or its reply to fork before that prompt and restore its text and images in the composer. The first prompt starts a branch with no earlier messages. The original conversation and its unsent draft remain intact; workspace files and executed commands are not undone. Stop an active run before rewinding. Session changes on attached desktop owners remain unsupported rather than moving the external owner's session.
 - **Draft Recovery**: Unsent text stays scoped to its conversation or new-session workspace and is restored after Back/Forward navigation or reload in the same tab when browser storage is available (up to 50 drafts). Images and file attachments remain in memory only.
 - **Live Plans & Subagents**: Collapsible panels pinned above the composer track live todo phases and running subagents (status, tool, retries, tokens/cost, nested tasks) with transcript dialogs and history recovery.
 - **Tool Preset Picker**: Choose the toolset for new sessions in the composer — `none` / `default` (`read,bash,edit,write`) / `full` (all tools including subagents). Persists to localStorage.
@@ -586,4 +621,3 @@ npm test            # Run test suite
 
 - Forked from [agegr/pi-web](https://github.com/agegr/pi-web) (MIT) and adapted for [can1357/oh-my-pi](https://github.com/can1357/oh-my-pi).
 - Released under the [MIT License](./LICENSE).
-
