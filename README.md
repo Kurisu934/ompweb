@@ -137,6 +137,39 @@ slash commands, rename, fork, reload and other unsupported controls in the
 original terminal. Web rejects archive/delete and interrupt-and-replace rather
 than taking ownership of the external process or writing its journal.
 
+### Native extension tools (including `telegram_send_file`)
+
+An optional file-only Telegram extension can register `telegram_send_file` with
+OMP's native `registerTool` API. It is an ordinary agent tool, **not** a browser
+host tool: do not add it to `set_host_tools` or send `host_tool_call` frames.
+No Web runtime change, Telegram package, private Telegram socket/state protocol
+or Ask override is needed.
+
+Load the file extension in the process that actually executes the tool: the
+Web-owned `omp --mode rpc-ui` child for a Web-owned session, or the **original
+terminal process** for an attached session. Installing it in Web alone cannot
+add a tool to an already-running desktop owner; use the terminal's `/reload`
+after installation. OMP's active tool selection must allow the registered tool.
+The extension owns its private bot/chat/topic configuration and file upload;
+Web does not need credentials or a new send endpoint. Its input is
+`{ path: string, caption?: string }`, with a local regular-file path resolved
+against that executing session's working directory and an optional plain-text
+caption (at most 1,024 characters). The destination is configured by the
+extension, not selected by a Web request.
+
+Return native `{ content: [{ type: "text", text: "..." }], details?: ... }`
+results, with readable success/error text in `content`, not only in `details`.
+The file tool's success details are
+`{ messageId: number, chatId: string, messageThreadId?: number, fileName: string, bytes: number }`;
+failures use native `isError: true` and credential-free text. Let OMP publish the
+normal `tool_execution_start`, optional `tool_execution_update`,
+`tool_execution_end` and persisted `toolResult` messages with the same
+`toolCallId`; do not emit a Telegram-specific event or synthesize these frames
+inside the extension. Both Web's RPC transport and the desktop bridge forward
+these native events. The generic tool card displays their text/error status,
+and history/reconnect uses the original journal's committed `toolResult`.
+Native Ask arbitration and ownership protections remain unchanged.
+
 ## App installation behind authentication
 
 To install the web app, sign in first and use your browser's installation menu.

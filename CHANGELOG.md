@@ -6,6 +6,8 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 ## Unreleased
 
+- Document the native `telegram_send_file` compatibility contract for Web-owned RPC children and attached original desktop processes: ordinary native tool events/results, process-local extension loading and private target configuration, without a Telegram runtime dependency, private protocol, host-tool routing or Ask changes.
+
 ### Independent desktop bridge — 0.5.2 (2026-10-18)
 
 - Package a standalone desktop extension using private `web-desktop-sessions` metadata and the authenticated `omp-web-desktop/v1` protocol. Web discovers unopened desktop runs and attaches to their original PID/journal; disconnect, idle disposal and Web shutdown never terminate the desktop owner.
