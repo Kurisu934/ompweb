@@ -119,7 +119,6 @@ export class RpcProcess implements RpcTransport {
     const childEnv = sanitizeProjectCommandEnvironment({ ...process.env, ...options.env });
     if (options.env?.OMP_PROFILE === undefined) delete childEnv.OMP_PROFILE;
     if (options.env?.PI_PROFILE === undefined) delete childEnv.PI_PROFILE;
-    childEnv.OMP_WEB_ASK_PROTOCOL = options.env?.OMP_WEB_ASK_PROTOCOL ?? "1";
     const target = wrapWindowsScript(bin, args);
     this.child = this.spawnProcess(target.file, target.args, {
       cwd: options.cwd,

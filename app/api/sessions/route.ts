@@ -2,7 +2,6 @@ import { NextResponse } from "next/server";
 import { createHash } from "crypto";
 import { listAllSessions } from "@/lib/session-reader";
 import { getRunningRpcSessions } from "@/lib/rpc-manager";
-import { readLocalRunningSessions } from "@/lib/omp/local-session-activity";
 
 // The session list mixes on-disk sessions with the live runningSessionIds set,
 // which changes on every agent turn, so it must never be cached by proxies or
@@ -16,8 +15,8 @@ const SESSION_LIST_HEADERS = {
 
 export async function GET(req: Request) {
   try {
-    const [sessions, localSessions] = await Promise.all([listAllSessions(), readLocalRunningSessions()]);
-    const runningSessions = getRunningRpcSessions(localSessions);
+    const sessions = await listAllSessions();
+    const runningSessions = getRunningRpcSessions();
     const runningSessionIds = runningSessions.map((s) => s.id);
     const body = { sessions, runningSessionIds, runningSessions };
     const bodyJson = JSON.stringify(body);

@@ -5,8 +5,6 @@ import { validateAgentImages } from "./image-attachments";
 import { hasVisibleAssistantContent } from "./assistant-response";
 import { invalidateModelsCache } from "./models-cache";
 import { RpcCommandError, RpcCommandTimeoutError, RpcProcess, type RpcFrame, type RpcTransport } from "./omp/rpc-process";
-import { LocalBridgeClient, readSessionMetadata, checkLegacyTgOwner, acquireSharedWakeLock } from "./omp/local-bridge";
-import { getLocalRunningSessions, subscribeLocalSessionActivity } from "./omp/local-session-activity";
 import { readNativeSettings } from "./omp/settings-config";
 import { getAgentEnvOverrides } from "./omp/agent-env";
 import {
@@ -365,7 +363,6 @@ export class AgentSessionWrapper {
    * only (no runtime RPC toggles it), so applying a changed advisor setting
    * means replacing an idle child on the next startRpcSession call. */
   readonly advisorSpawned: boolean;
-  readonly isAttached: boolean;
   /** The cwd recorded in the session file header; null for brand-new sessions
    * or when the header lacks one. Used to detect a spawn fallback so a notice
    * can warn the user the agent is running in a different directory. */
@@ -378,23 +375,16 @@ export class AgentSessionWrapper {
     cwd: string,
     recordedCwd?: string | null,
     advisorSpawned = false,
-    expectedSessionIdOrIsAttached: string | boolean = "",
+    expectedSessionId: string = "",
     /** Test seam: the real value is DISCONNECT_DESTROY_MS (120s), far too long
      *  for a unit test. 0 disables reaping for that wrapper. */
     disconnectDestroyMs: number = DISCONNECT_DESTROY_MS,
-    isAttached = false,
   ) {
     this.proc = proc;
     this.cwd = cwd;
     this.recordedCwd = recordedCwd ?? null;
     this.advisorSpawned = advisorSpawned;
-    if (typeof expectedSessionIdOrIsAttached === "boolean") {
-      this.isAttached = expectedSessionIdOrIsAttached;
-      this._sessionId = "";
-    } else {
-      this._sessionId = expectedSessionIdOrIsAttached;
-      this.isAttached = isAttached;
-    }
+    this._sessionId = expectedSessionId;
     this.disconnectDestroyMs = disconnectDestroyMs;
   }
 
@@ -1413,12 +1403,6 @@ export class AgentSessionWrapper {
    * omp-web's `reload`: extensions, skills, prompts, and tools are rediscovered
    * on boot, matching a fresh CLI launch. */
   private async restart(): Promise<void> {
-    if (this.isAttached) {
-      throw new WebRpcError(
-        "Cannot restart or reload session attached to an external owner process",
-        "attached_session_unsupported",
-      );
-    }
     if (this.restarting) throw new WebRpcError(RESTARTING_MESSAGE, "session_restarting");
     const sessionFile = this._sessionFile;
     const resumable = !!sessionFile && existsSync(sessionFile);
@@ -1513,12 +1497,6 @@ export class AgentSessionWrapper {
 
   private async dispatchCommand(command: Record<string, unknown>): Promise<unknown> {
     const type = command.type as string;
-    if (type === "abort_and_prompt" && this.isAttached) {
-      throw new WebRpcError(
-        "The terminal/Telegram bridge cannot interrupt and replace a run from the web. Stop it in the original client, then send the message.",
-        "attached_interrupt_unavailable",
-      );
-    }
     // Queries and browser capability registration must not keep an otherwise
     // idle child (and its Telegram topic claim) alive indefinitely.
     if (
@@ -1621,9 +1599,6 @@ export class AgentSessionWrapper {
 
       case "remove_queued_message":
       case "promote_queued_message": {
-        if (this.isAttached) {
-          throw new WebRpcError("Queue management is not supported on attached sessions", "attached_session_unsupported");
-        }
         // Queue mutations are synchronous control operations, like get_state.
         // Expiry must not abort unrelated work or replay a possibly applied mutation.
         const result = await this.proc.sendCommand(command as { type: string }, GET_STATE_TIMEOUT_MS);
@@ -1634,9 +1609,6 @@ export class AgentSessionWrapper {
       // atomically, then aborts, and returns the withdrawn messages.
       case "abort":
       case "abort_and_restore_queue": {
-        if (type === "abort_and_restore_queue" && this.isAttached) {
-          throw new WebRpcError("Queue restoration is not supported on attached sessions", "attached_session_unsupported");
-        }
         this.responseObserved = false;
         this.responseRunActive = false;
         const result = await this.withFinalRunningNotification(async () => {
@@ -1672,17 +1644,11 @@ export class AgentSessionWrapper {
       }
 
       case "get_skill_diagnostics": {
-        if (this.isAttached) {
-          throw new WebRpcError("Skill diagnostics are not supported on attached sessions", "attached_session_unsupported");
-        }
         const result = await this.proc.sendCommand<unknown>({ type: "get_skill_diagnostics" }, GET_STATE_TIMEOUT_MS);
         return this.requireSkillDiagnostics(result);
       }
 
       case "set_skill_startup_diagnostics": {
-        if (this.isAttached) {
-          throw new WebRpcError("Skill diagnostics are not supported on attached sessions", "attached_session_unsupported");
-        }
         if (typeof command.enabled !== "boolean") {
           throw new WebRpcError("enabled must be a boolean", "invalid_skill_startup_diagnostics");
         }
@@ -1694,9 +1660,6 @@ export class AgentSessionWrapper {
       }
 
       case "set_model": {
-        if (this.isAttached) {
-          throw new WebRpcError("Changing model is not supported on attached sessions", "attached_session_unsupported");
-        }
         const { provider, modelId } = command as { provider: string; modelId: string };
         const model = await this.proc.sendCommand<OmpModel>({ type: "set_model", provider, modelId });
         invalidateModelsCache();
@@ -1705,9 +1668,6 @@ export class AgentSessionWrapper {
       }
 
       case "set_fast_mode": {
-        if (this.isAttached) {
-          throw new WebRpcError("Fast mode is not supported on attached sessions", "attached_session_unsupported");
-        }
         const enabled = command.enabled === true;
         const result = await this.proc.sendCommand<{ enabled?: boolean; active?: boolean }>({ type: "set_fast_mode", enabled });
         this.fastModeEnabled = result?.enabled ?? enabled;
@@ -1715,18 +1675,12 @@ export class AgentSessionWrapper {
       }
 
       case "set_slow_mode": {
-        if (this.isAttached) {
-          throw new WebRpcError("Slow mode is not supported on attached sessions", "attached_session_unsupported");
-        }
         const enabled = command.enabled === true;
         const result = await this.proc.sendCommand<{ enabled?: boolean }>({ type: "set_slow_mode", enabled });
         return { enabled: result?.enabled ?? enabled };
       }
 
       case "fork": {
-        if (this.isAttached) {
-          throw new WebRpcError("Rewind is not supported on attached sessions", "attached_session_unsupported");
-        }
         // omp's `branch` is pi-web's fork: it creates a branched session file
         // and switches this live process onto it (entryId must be a user
         // message entry, matching the web UI's fork buttons).
@@ -1748,9 +1702,6 @@ export class AgentSessionWrapper {
 
       case "new_session":
       case "switch_session": {
-        if (this.isAttached) {
-          throw new WebRpcError("Session switching is not supported on attached sessions", "attached_session_unsupported");
-        }
         const result = await this.proc.sendCommand<{ cancelled: boolean }>(command as { type: string });
         if (!result.cancelled) {
           const newSessionId = await this.refreshIdentityAfterSessionChange();
@@ -1760,9 +1711,6 @@ export class AgentSessionWrapper {
       }
 
       case "compact": {
-        if (this.isAttached) {
-          throw new WebRpcError("Compaction is not supported on attached sessions", "attached_session_unsupported");
-        }
         try {
           return await this.withFinalRunningNotification(async () => {
             this.compacting = true;
@@ -1786,18 +1734,12 @@ export class AgentSessionWrapper {
       }
 
       case "abort_compaction":
-        if (this.isAttached) {
-          throw new WebRpcError("Compaction is not supported on attached sessions", "attached_session_unsupported");
-        }
         // No dedicated RPC command; a plain abort cancels the in-flight turn
         // including compaction work.
         await this.withFinalRunningNotification(() => this.proc.sendCommand({ type: "abort" }));
         return null;
 
       case "set_session_name": {
-        if (this.isAttached) {
-          throw new WebRpcError("Renaming session is not supported on attached sessions", "attached_session_unsupported");
-        }
         const name = (command.name as string | undefined)?.trim();
         if (!name) throw new Error("Session name cannot be empty");
         await this.proc.sendCommand({ type: "set_session_name", name });
@@ -1812,9 +1754,6 @@ export class AgentSessionWrapper {
       }
 
       case "get_last_assistant_text": {
-        if (this.isAttached) {
-          throw new WebRpcError("Getting last assistant text is not supported on attached sessions", "attached_session_unsupported");
-        }
         const data = await this.proc.sendCommand<{ text: string | null }>({ type: "get_last_assistant_text" });
         return { text: data.text ?? "" };
       }
@@ -1827,12 +1766,6 @@ export class AgentSessionWrapper {
       }
 
       case "reload": {
-        if (this.isAttached) {
-          throw new WebRpcError(
-            "Cannot reload session attached to an external owner process",
-            "attached_session_unsupported",
-          );
-        }
         await this.restart();
         return { success: true };
       }
@@ -1855,9 +1788,6 @@ export class AgentSessionWrapper {
       }
 
       case "bash": {
-        if (this.isAttached) {
-          throw new WebRpcError("Bash commands are not supported on attached sessions", "attached_session_unsupported");
-        }
         // omp's RPC bash command is `{type:"bash", command}` only (rpc-types.ts)
         // — there is no excludeFromContext option anywhere in modes/rpc. Running
         // a `!!` command anyway would put output the user meant to keep private
@@ -1880,9 +1810,6 @@ export class AgentSessionWrapper {
       }
 
       case "set_host_tools": {
-        if (this.isAttached) {
-          throw new WebRpcError("Host tools are not supported on attached sessions", "attached_session_unsupported");
-        }
         const tools = Array.isArray(command.tools) ? command.tools as Array<{ name?: unknown; [key: string]: unknown }> : [];
         const valid = tools.filter((t) => typeof t.name === "string" && t.name);
         this.hostToolNames = new Set(valid.map((t) => t.name as string));
@@ -1891,9 +1818,6 @@ export class AgentSessionWrapper {
       }
 
       case "host_tool_result": {
-        if (this.isAttached) {
-          throw new WebRpcError("Host tool results are not supported on attached sessions", "attached_session_unsupported");
-        }
         if (typeof command.id === "string") this.pendingHostTools.delete(command.id);
         // Host replies retain OMP's correlation ID and have no command response.
         this.proc.sendFrame(command as { type: string; [key: string]: unknown });
@@ -1901,9 +1825,6 @@ export class AgentSessionWrapper {
       }
 
       case "set_host_uri_schemes": {
-        if (this.isAttached) {
-          throw new WebRpcError("Host URI schemes are not supported on attached sessions", "attached_session_unsupported");
-        }
         const schemes = Array.isArray(command.schemes) ? command.schemes as Array<{ scheme?: unknown; writable?: unknown; [key: string]: unknown }> : [];
         this.hostUriSchemes = new Map();
         for (const entry of schemes) {
@@ -1916,9 +1837,6 @@ export class AgentSessionWrapper {
       }
 
       case "host_uri_result": {
-        if (this.isAttached) {
-          throw new WebRpcError("Host URI results are not supported on attached sessions", "attached_session_unsupported");
-        }
         if (typeof command.id === "string") this.pendingHostUris.delete(command.id);
         this.proc.sendFrame(command as { type: string; [key: string]: unknown });
         return null;
@@ -1926,9 +1844,6 @@ export class AgentSessionWrapper {
 
       default: {
         if (PASSTHROUGH_COMMANDS.has(type)) {
-          if (this.isAttached && type !== "get_messages") {
-            throw new WebRpcError(`Command '${type}' is not supported on attached sessions`, "attached_session_unsupported");
-          }
           if (type === "abort_and_prompt") {
             this.responseObserved = false;
             this.responseRunActive = false;
@@ -1940,9 +1855,6 @@ export class AgentSessionWrapper {
           );
           if (type === "set_thinking_level") this.invalidateSessionLists();
           return result ?? null;
-        }
-        if (this.isAttached) {
-          throw new WebRpcError(`Command '${type}' is not supported on attached sessions`, "attached_session_unsupported");
         }
         throw new Error(`Unsupported command: ${type}`);
       }
@@ -2089,119 +2001,9 @@ export function getRpcSession(sessionId: string): AgentSessionWrapper | undefine
   return getRegistry().get(sessionId);
 }
 
-/**
- * Attempt to discover an active owner and attach via local bridge without spawning.
- * Returns the AgentSessionWrapper if attached, or undefined if no live owner.
- * If a live owner has invalid metadata or attach fails, or if a live legacy TG owner exists,
- * throws WebRpcError so the caller can return the explicit error.
- */
-export async function tryAttachLiveSession(
-  sessionId: string,
-  sessionFile?: string,
-): Promise<AgentSessionWrapper | undefined> {
-  const registry = getRegistry();
-  const existing = registry.get(sessionId);
-  if (existing?.isAlive()) {
-    return existing;
-  }
 
-  let filePath = sessionFile;
-  if (!filePath) {
-    filePath = (await resolveSessionPath(sessionId)) ?? undefined;
-  }
-  if (!filePath || !existsSync(filePath)) {
-    return undefined;
-  }
-
-  const ownerCheck = readSessionMetadata(filePath);
-  if (ownerCheck.status === "live") {
-    const meta = ownerCheck.metadata;
-    const locks = getLocks();
-    const inflight = locks.get(sessionId);
-    if (inflight) {
-      const res = await inflight;
-      return res.session;
-    }
-
-    const starting = (async () => {
-      const holder: { wrapper?: AgentSessionWrapper } = {};
-      let client: LocalBridgeClient;
-      try {
-        client = await LocalBridgeClient.connect(meta, 10_000, {
-          onExit: (info) => holder.wrapper?.handleProcessExit(info, client),
-        });
-      } catch (err: unknown) {
-        throw new WebRpcError(
-          `Failed to attach to live session owner (PID ${meta.pid}): ${(err as Error)?.message || err}`,
-          "bridge_attach_failed",
-        );
-      }
-
-      const header = readSessionHeader(filePath!);
-      const { cwd } = resolveSpawnCwdResult(header?.cwd);
-      const created = new AgentSessionWrapper(
-        client,
-        cwd,
-        header?.cwd,
-        false,
-        /* isAttached = */ true,
-      );
-      holder.wrapper = created;
-      created.start();
-      try {
-        await created.waitUntilReady();
-      } catch (err: unknown) {
-        await created.destroyAndWait();
-        throw new WebRpcError(
-          `Live session owner ready failed (PID ${meta.pid}): ${(err as Error)?.message || err}`,
-          "bridge_attach_failed",
-        );
-      }
-
-      const realSessionId = created.sessionId || sessionId;
-      created.onDestroy(() => {
-        for (const [key, wrapper] of registry) if (wrapper === created) registry.delete(key);
-      });
-      created.onIdentityChange((oldId, newId) => {
-        if (registry.get(oldId) === created) registry.delete(oldId);
-        registry.set(newId, created);
-      });
-      registry.set(realSessionId, created);
-      registry.set(sessionId, created);
-      return { session: created, realSessionId };
-    })().finally(() => locks.delete(sessionId));
-
-    locks.set(sessionId, starting);
-    const result = await starting;
-    return result.session;
-  }
-
-  if (ownerCheck.status === "invalid") {
-    throw new WebRpcError(
-      `Live session owner (PID ${ownerCheck.pid}) metadata is invalid: ${ownerCheck.error}`,
-      "invalid_bridge_metadata",
-    );
-  }
-
-  if (ownerCheck.status === "stale") {
-    try {
-      unlinkSync(ownerCheck.path);
-    } catch {}
-  }
-
-  const legacyCheck = checkLegacyTgOwner(filePath, sessionId);
-  if (legacyCheck.active) {
-    throw new WebRpcError(
-      `Session is currently active under Telegram bridge (PID ${legacyCheck.pid}), but lacks local bridge metadata. Please reload/upgrade the Telegram plugin or restart the session to enable web attach.`,
-      "legacy_owner_active",
-    );
-  }
-
-  return undefined;
-}
-
-export function getRunningRpcSessions(localSessions = getLocalRunningSessions()): RunningRpcSession[] {
-  const map = new Map(localSessions.map(({ id, cwd }) => [id, cwd]));
+export function getRunningRpcSessions(): RunningRpcSession[] {
+  const map = new Map<string, string>();
   for (const [sessionId, session] of getRegistry()) {
     if (session.isRunning()) {
       const realId = session.sessionId || sessionId;
@@ -2241,11 +2043,7 @@ function getRunningListeners(): Set<(update: RunningSessionUpdate) => void> {
 export function subscribeRunningSessions(listener: (update: RunningSessionUpdate) => void): () => void {
   const listeners = getRunningListeners();
   listeners.add(listener);
-  const releaseLocal = subscribeLocalSessionActivity(() => notifyRunningChange());
-  return () => {
-    listeners.delete(listener);
-    releaseLocal();
-  };
+  return () => { listeners.delete(listener); };
 }
 
 // ----------------------------------------------------------------------------
@@ -2367,8 +2165,7 @@ export async function startRpcSession(
 
   const existing = registry.get(sessionId);
   if (existing?.isAlive()) {
-    // --advisor toggle must NEVER destroy and spawn an attached session!
-    if (advisor === undefined || existing.advisorSpawned === effectiveAdvisor || existing.isRunning() || existing.isAttached) {
+    if (advisor === undefined || existing.advisorSpawned === effectiveAdvisor || existing.isRunning()) {
       return { session: existing, realSessionId: sessionId };
     }
     await existing.destroyAndWait();
@@ -2394,82 +2191,6 @@ export async function startRpcSession(
   if (inflight) return inflight;
 
   const starting = (async () => {
-    if (sessionFile && existsSync(sessionFile)) {
-      const ownerCheck = readSessionMetadata(sessionFile);
-      if (ownerCheck.status === "live") {
-        const meta = ownerCheck.metadata;
-        const holder: { wrapper?: AgentSessionWrapper } = {};
-        let client: LocalBridgeClient;
-        try {
-          client = await LocalBridgeClient.connect(meta, 10_000, {
-            onExit: (info) => holder.wrapper?.handleProcessExit(info, client),
-          });
-        } catch (err: unknown) {
-          throw new WebRpcError(
-            `Failed to attach to live session owner (PID ${meta.pid}): ${(err as Error)?.message || err}`,
-            "bridge_attach_failed",
-          );
-        }
-        const created = new AgentSessionWrapper(client, cwd, recordedCwd, false, /* isAttached = */ true);
-        holder.wrapper = created;
-        created.start();
-        try {
-          await created.waitUntilReady();
-        } catch (err: unknown) {
-          await created.destroyAndWait();
-          throw new WebRpcError(
-            `Live session owner ready failed (PID ${meta.pid}): ${(err as Error)?.message || err}`,
-            "bridge_attach_failed",
-          );
-        }
-        const realSessionId = created.sessionId || sessionId;
-        created.onDestroy(() => {
-          for (const [key, wrapper] of registry) if (wrapper === created) registry.delete(key);
-        });
-        created.onIdentityChange((oldId, newId) => {
-          if (registry.get(oldId) === created) registry.delete(oldId);
-          registry.set(newId, created);
-        });
-        registry.set(realSessionId, created);
-        registry.set(sessionId, created);
-        return { session: created, realSessionId };
-      }
-
-      if (ownerCheck.status === "invalid") {
-        throw new WebRpcError(
-          `Live session owner (PID ${ownerCheck.pid}) metadata is invalid: ${ownerCheck.error}`,
-          "invalid_bridge_metadata",
-        );
-      }
-
-      if (ownerCheck.status === "stale") {
-        try {
-          unlinkSync(ownerCheck.path);
-        } catch {}
-      }
-
-      const legacyCheck = checkLegacyTgOwner(sessionFile, sessionId);
-      if (legacyCheck.active) {
-        throw new WebRpcError(
-          `Session is currently active under Telegram bridge (PID ${legacyCheck.pid}), but lacks local bridge metadata. Please reload/upgrade the Telegram plugin or restart the session to enable web attach.`,
-          "legacy_owner_active",
-        );
-      }
-    }
-
-    let wakeRelease: (() => void) | undefined;
-    if (sessionFile && existsSync(sessionFile)) {
-      const lockRes = acquireSharedWakeLock(sessionFile);
-      if (!lockRes.ok && lockRes.holder) {
-        throw new WebRpcError(
-          `Session is currently being resumed by another process (PID ${lockRes.holder}). Please retry in a moment.`,
-          "session_wake_in_progress",
-        );
-      }
-      if (lockRes.ok) {
-        wakeRelease = lockRes.release;
-      }
-    }
 
     // The wrapper needs the process and the process's onExit needs the wrapper;
     // the holder breaks that cycle (onExit only fires once the child dies).
@@ -2503,7 +2224,6 @@ export async function startRpcSession(
         await created.send({ type: "new_session" });
       }
     } catch (error) {
-      wakeRelease?.();
       // Await the child's full exit before the `finally` releases the startup
       // lock: a fire-and-forget destroy() would let a retry spawn a second
       // OMP child while the failed one is still flushing/exiting, and
@@ -2513,7 +2233,6 @@ export async function startRpcSession(
     }
     const realSessionId = created.sessionId;
     created.onDestroy(() => {
-      wakeRelease?.();
       // Drop every key (current id, original id, moved-from aliases).
       for (const [key, wrapper] of registry) if (wrapper === created) registry.delete(key);
     });

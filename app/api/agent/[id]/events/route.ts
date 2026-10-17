@@ -1,4 +1,4 @@
-import { getRpcSession, tryAttachLiveSession } from "@/lib/rpc-manager";
+import { getRpcSession } from "@/lib/rpc-manager";
 
 export const dynamic = "force-dynamic";
 
@@ -9,17 +9,9 @@ export async function GET(
 ) {
   const { id } = await params;
 
-  // SSE is observer-only: listing or opening a saved session must not create
-  // another omp process for a terminal-owned session. Explicit commands use
-  // POST /api/agent/[id], which starts the wrapper before this route attaches.
-  let existing = getRpcSession(id);
-  if (!existing?.isAlive()) {
-    try {
-      existing = await tryAttachLiveSession(id);
-    } catch {
-      // Observer stream: if attach fails, falls through to 409
-    }
-  }
+  // SSE is observer-only: explicit commands use POST /api/agent/[id], which
+  // starts the wrapper before this route attaches.
+  const existing = getRpcSession(id);
   const session = existing?.isAlive() ? existing : undefined;
   if (!session) return new Response("Session is not managed by omp-web", { status: 409 });
 

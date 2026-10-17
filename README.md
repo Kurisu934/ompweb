@@ -69,9 +69,8 @@ Integrated through [`7a3f76c`](https://github.com/kahme247/ompweb/commit/7a3f76c
 on 2026-10-11: native multi-question Ask, notifications, account management,
 `/btw`, Slow mode, in-run attachments and session recovery. Local wallpapers,
 glass, pets, running-session shortcuts, Send now / Steer / Queue and Rewind
-semantics remain intact. Native Ask and Telegram mirrors use separate answer
-protocols. Cross-session host tools share the global event stream so two
-HTTP/1.1 chat tabs do not exhaust all connections and block dialog submissions.
+semantics remain intact. Cross-session host tools share the global event stream so
+two HTTP/1.1 chat tabs do not exhaust all connections and block dialog submissions.
 Source integration does not rebuild or restart an existing deployment.
 
 ![Upstream voice recording deck integrated with the glass composer](docs/showcase/dictation.png)
@@ -399,15 +398,13 @@ host (KDE Plasma, and most Wayland/X11 desktops).
 ## Features
 
 - **Interactive Chat**: Real-time streaming conversation with your local `omp` agent — tool calls, thinking levels, token counts, cost, context gauge, queue controls, and interrupt & retry.
-- **Running Sessions**: Jump between active runs from a separate section above workspaces, including runs in collapsed projects and local terminal/Telegram sessions not yet opened in Web. External sessions require valid local bridge metadata; read-only discovery reconciles every five seconds and follows live run events without spawning or prompting the owner. Shortcuts show the workspace path and disappear when the run finishes; the normal project tree remains intact.
+- **Running Sessions**: Jump between active runs from a separate section above workspaces, including runs in collapsed projects. Shortcuts show the workspace path and disappear when the run finishes; the normal project tree remains intact.
 - **Workspace Quick New Session**: Each workspace row has an always-visible **+** button that opens a new-session composer at that workspace's root, even when its session list is collapsed. OMP starts only on the first message. Existing sessions and drafts are preserved; the top New Session action still follows the selected directory/worktree. On mobile, the shortcut closes the drawer and focuses the composer.
-- **Send now, Steer, or Queue**: During a run, use **Send now** to abort it and submit the new message without waiting for natural completion; completed file changes and commands are not undone. **Steer** uses OMP's native delivery timing, while **Queue** waits for the run to finish. Settings → Interface & Behavior → Message during active run selects the highlighted action and desktop Enter behavior without hiding the other buttons. Terminal/Telegram-owned attached sessions cannot interrupt-and-replace through the current bridge: the web reports the limitation and retains the draft rather than silently queuing it.
-- **Shared local OMP instance**: With the locally maintained `omp-telegram` plugin loaded, opening a running terminal session attaches to its private Unix socket instead of spawning a second OMP writer. Both processes must share `PI_CODING_AGENT_DIR` (default `~/.omp/agent`). Closing the browser only detaches; it never kills the terminal owner. Unsupported attached-session operations return an explicit error.
-- **Telegram + Web + terminal questions**: Mirrored questions appear as structured browser forms (single/multiple choice, custom answers, free text). The first answer wins and closes the other surfaces; browser reconnects restore pending questions. Existing OMP processes need a plugin reload/restart after updating. ompweb advertises `OMP_WEB_ASK_PROTOCOL=1` only to its own RPC child processes.
+- **Send now, Steer, or Queue**: During a run, use **Send now** to abort it and submit the new message without waiting for natural completion; completed file changes and commands are not undone. **Steer** uses OMP's native delivery timing, while **Queue** waits for the run to finish. Settings → Interface & Behavior → Message during active run selects the highlighted action and desktop Enter behavior without hiding the other buttons.
 - **Message Copy**: Copy user messages and completed assistant replies as rendered plain text or original Markdown using the buttons below each message. Thinking, tool output, and message controls are excluded. Oversized messages that use the raw-text viewer copy their full source in either format.
 - **Queue Deletion Confirmation**: Preview and confirm before cancelling queued follow-ups or steered messages in OMP. Requires native `remove_queued_message` support; already-delivered messages cannot be recalled.
 - **Session Management**: Browse past conversations by project, fork sessions, branch within a session, archive/restore, import session files, and deep-link via URL.
-- **Rewind Prompts**: Use **Rewind** below a historical prompt or its reply to fork before that prompt and restore its text and images in the composer. The first prompt starts a branch with no earlier messages. The original conversation and its unsent draft remain intact; workspace files and executed commands are not undone. Stop an active run before rewinding. Session changes on attached terminal/Telegram owners remain unsupported rather than moving the external owner's session.
+- **Rewind Prompts**: Use **Rewind** below a historical prompt or its reply to fork before that prompt and restore its text and images in the composer. The first prompt starts a branch with no earlier messages. The original conversation and its unsent draft remain intact; workspace files and executed commands are not undone. Stop an active run before rewinding.
 - **Draft Recovery**: Unsent text stays scoped to its conversation or new-session workspace and is restored after Back/Forward navigation or reload in the same tab when browser storage is available (up to 50 drafts). Images and file attachments remain in memory only.
 - **Live Plans & Subagents**: Collapsible panels pinned above the composer track live todo phases and running subagents (status, tool, retries, tokens/cost, nested tasks) with transcript dialogs and history recovery.
 - **Tool Preset Picker**: Choose the toolset for new sessions in the composer — `none` / `default` (`read,bash,edit,write`) / `full` (all tools including subagents). Persists to localStorage.
@@ -589,3 +586,4 @@ npm test            # Run test suite
 
 - Forked from [agegr/pi-web](https://github.com/agegr/pi-web) (MIT) and adapted for [can1357/oh-my-pi](https://github.com/can1357/oh-my-pi).
 - Released under the [MIT License](./LICENSE).
+

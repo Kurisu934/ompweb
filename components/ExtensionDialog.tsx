@@ -8,16 +8,6 @@ import { useI18n } from "@/lib/i18n";
 import { useModalDialog } from "@/hooks/useModalDialog";
 import { useTouchTargets } from "@/hooks/useTouchTargets";
 import { matchMobileViewport } from "@/hooks/useIsMobile";
-import {
-  parseAskProtocol,
-  serializeAskAnswers,
-  type AskAnswerResult,
-} from "@/lib/omp/ask-protocol";
-import {
-  ExtensionAskForm,
-  isAskQuestionAnswered,
-  type QuestionAnswerState,
-} from "./ExtensionAskForm";
 
 export type ExtensionDialogRequest = Extract<
   ExtensionUiRequest,
@@ -206,29 +196,6 @@ export function ExtensionDialog({
   const viewportMaxHeight = useViewportMaxHeight();
   const { touchTargets } = useTouchTargets();
 
-  const askResult = useMemo(() => {
-    if (request.method !== "input") return { isAsk: false as const };
-    return parseAskProtocol(request.placeholder);
-  }, [request]);
-
-  const [askAnswers, setAskAnswers] = useState<Record<string, QuestionAnswerState>>(() => {
-    if (request.method === "input") {
-      const parsed = parseAskProtocol(request.placeholder);
-      if (parsed.isAsk && parsed.valid) {
-        const initial: Record<string, QuestionAnswerState> = {};
-        for (const q of parsed.payload.questions) {
-          initial[q.id] = {
-            selectedOptions: [],
-            customInput: "",
-            isCustomActive: false,
-          };
-        }
-        return initial;
-      }
-    }
-    return {};
-  });
-
   useEffect(() => {
     // SSE reconnects replay the same request as a fresh object, not a new question.
     if (requestIdRef.current === request.id) return;
@@ -237,24 +204,6 @@ export function ExtensionDialog({
     setValue(request.method === "editor" ? request.prefill ?? "" : "");
     setSelectedOption(null);
     setAskDrafts(initialAskDrafts(request));
-    if (request.method === "input") {
-      const parsed = parseAskProtocol(request.placeholder);
-      if (parsed.isAsk && parsed.valid) {
-        const initial: Record<string, QuestionAnswerState> = {};
-        for (const q of parsed.payload.questions) {
-          initial[q.id] = {
-            selectedOptions: [],
-            customInput: "",
-            isCustomActive: false,
-          };
-        }
-        setAskAnswers(initial);
-      } else {
-        setAskAnswers({});
-      }
-    } else {
-      setAskAnswers({});
-    }
   }, [request]);
 
   const askDraftAt = (index: number) => askDrafts[index] ?? EMPTY_ASK_DRAFT;
@@ -264,18 +213,12 @@ export function ExtensionDialog({
     question.multi || askDraftAt(index).selected.length > 0 || askDraftAt(index).other.trim() !== ""
   );
 
-  const canSubmitTelegramAsk = askResult.isAsk && askResult.valid && askResult.payload.questions.every((q) =>
-    isAskQuestionAnswered(q, askAnswers[q.id])
-  );
-
   const canSubmit = submitting ? false : (
     request.method === "ask"
       ? canSubmitNativeAsk
-      : askResult.isAsk
-        ? canSubmitTelegramAsk
-        : request.method === "select"
-          ? selectedOption !== null
-          : true
+      : request.method === "select"
+        ? selectedOption !== null
+        : true
   );
 
   const title = request.method === "ask" ? t("chatWindow.askTitle") : request.title;
@@ -330,29 +273,6 @@ export function ExtensionDialog({
     return () => window.cancelAnimationFrame(frame);
   }, [attached, panelRef, request.id]);
 
-  const submitAskAnswers = () => {
-    if (!askResult.isAsk || !askResult.valid || !canSubmitTelegramAsk || submitting) return;
-    const results: AskAnswerResult[] = askResult.payload.questions.map((q) => {
-      const state = askAnswers[q.id] ?? {
-        selectedOptions: [],
-        customInput: "",
-        isCustomActive: false,
-      };
-      const hasCustom =
-        (q.options.length === 0 || state.isCustomActive) &&
-        state.customInput.trim().length > 0;
-      return {
-        id: q.id,
-        question: q.question,
-        selectedOptions: q.options.length === 0
-          ? []
-          : (q.multi ? state.selectedOptions : (hasCustom ? [] : state.selectedOptions)),
-        ...(hasCustom ? { customInput: state.customInput.trim() } : {}),
-      };
-    });
-    sendResponse({ value: serializeAskAnswers(results) });
-  };
-
   const submitValue = () => {
     if (submitting) return;
     if (request.method === "confirm") {
@@ -372,8 +292,6 @@ export function ExtensionDialog({
           };
         }),
       });
-    } else if (askResult.isAsk) {
-      if (askResult.valid) submitAskAnswers();
     } else {
       sendResponse({ value });
     }
@@ -467,91 +385,30 @@ export function ExtensionDialog({
             </div>
           )}
           {request.method === "input" && (
-            askResult.isAsk ? (
-              askResult.valid ? (
-                <ExtensionAskForm
-                  questions={askResult.payload.questions}
-                  answers={askAnswers}
-                  onAnswerChange={(questionId, update) => {
-                    setAskAnswers((prev) => ({
-                      ...prev,
-                      [questionId]: {
-                        ...(prev[questionId] ?? {
-                          selectedOptions: [],
-                          customInput: "",
-                          isCustomActive: false,
-                        }),
-                        ...update,
-                      },
-                    }));
-                  }}
-                  onSubmit={submitValue}
-                  attached={attached}
-                  disabled={submitting}
-                />
-              ) : (
-                <div
-                  role="alert"
-                  style={{
-                    padding: "12px 14px",
-                    borderRadius: 8,
-                    border: "1px solid color-mix(in srgb, var(--error, #ef4444) 30%, var(--border))",
-                    background: "color-mix(in srgb, var(--error, #ef4444) 8%, var(--bg-panel))",
-                    display: "flex",
-                    flexDirection: "column",
-                    gap: 6,
-                  }}
-                >
-                  <div style={{ color: "var(--error, #ef4444)", fontSize: 13, fontWeight: 650 }}>
-                    {t("chatWindow.ask.errorTitle")}
-                  </div>
-                  <div style={{ color: "var(--text-muted)", fontSize: 12, lineHeight: 1.5 }}>
-                    {t("chatWindow.ask.errorMessage")}
-                  </div>
-                  <div
-                    style={{
-                      marginTop: 4,
-                      padding: "6px 8px",
-                      borderRadius: 6,
-                      background: "var(--bg)",
-                      border: "1px solid var(--border)",
-                      color: "var(--text-dim)",
-                      fontSize: 11,
-                      fontFamily: "var(--font-mono)",
-                      whiteSpace: "pre-wrap",
-                      wordBreak: "break-all",
-                    }}
-                  >
-                    {askResult.error}
-                  </div>
-                </div>
-              )
-            ) : (
-              <input
-                autoFocus
-                disabled={submitting}
-                aria-label={request.title || request.placeholder || "Input value"}
-                value={value}
-                placeholder={request.placeholder}
-                onChange={(e) => setValue(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") submitValue();
-                }}
-                style={{
-                  width: "100%",
-                  padding: "7px 10px",
-                  borderRadius: 6,
-                  border: "1px solid var(--border)",
-                  background: "var(--bg-panel)",
-                  color: "var(--text)",
-                  outline: "none",
-                  fontSize: 12,
-                  fontFamily: "inherit",
-                  cursor: submitting ? "not-allowed" : "text",
-                  opacity: submitting ? 0.65 : 1,
-                }}
-              />
-            )
+            <input
+              autoFocus
+              disabled={submitting}
+              aria-label={request.title || request.placeholder || "Input value"}
+              value={value}
+              placeholder={request.placeholder}
+              onChange={(e) => setValue(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") submitValue();
+              }}
+              style={{
+                width: "100%",
+                padding: "7px 10px",
+                borderRadius: 6,
+                border: "1px solid var(--border)",
+                background: "var(--bg-panel)",
+                color: "var(--text)",
+                outline: "none",
+                fontSize: 12,
+                fontFamily: "inherit",
+                cursor: submitting ? "not-allowed" : "text",
+                opacity: submitting ? 0.65 : 1,
+              }}
+            />
           )}
           {request.method === "editor" && (
             <textarea
@@ -715,30 +572,7 @@ export function ExtensionDialog({
           >
             {t("chatWindow.cancel")}
           </button>
-          {askResult.isAsk ? (
-            askResult.valid ? (
-              <button
-                onClick={submitValue}
-                disabled={!canSubmit || submitting}
-                style={{
-                  padding: "6px 10px",
-                  minHeight: touchTargets === "accessible" ? 44 : undefined,
-                  borderRadius: 6,
-                  border: `1px solid ${canSubmit && !submitting ? "var(--accent-strong)" : "var(--border)"}`,
-                  background: canSubmit && !submitting ? "var(--accent-strong)" : "var(--bg-subtle)",
-                  color: canSubmit && !submitting ? "var(--on-accent)" : "var(--text-dim)",
-                  cursor: canSubmit && !submitting ? "pointer" : "not-allowed",
-                  opacity: canSubmit && !submitting ? 1 : 0.65,
-                  transition: "background-color var(--dur-fast) var(--ease-out-warm)",
-                }}
-                onMouseEnter={canSubmit && !submitting ? (e) => { e.currentTarget.style.filter = "brightness(1.12)"; } : undefined}
-                onMouseLeave={canSubmit && !submitting ? (e) => { e.currentTarget.style.filter = "none"; } : undefined}
-                title={canSubmit ? undefined : t("chatWindow.ask.requiredHint")}
-              >
-                {t("chatWindow.submit")}
-              </button>
-            ) : null
-          ) : request.method === "confirm" ? (
+          {request.method === "confirm" ? (
             <button
               onClick={submitValue}
               disabled={submitting}
