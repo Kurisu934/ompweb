@@ -16,9 +16,9 @@ import { normalizeToolCalls } from "@/lib/normalize";
 import { encodeFilePathForApi, getFileName, resolveWorkspaceFilePath } from "@/lib/file-paths";
 import { hasVisibleAssistantContent } from "@/lib/assistant-response";
 import type { ThinkingModelMeta } from "@/lib/thinking-levels";
-import { sendAgentCommand, setSessionAdvisorSpawn } from "@/lib/agent-client";
+import { sendAgentCommand, setSessionAdvisorSpawn, isAgentCommandUnknown, AgentCommandError } from "@/lib/agent-client";
 import { parseSkillDiagnosticsSnapshot, type SkillDiagnosticsSnapshot } from "@/lib/skill-diagnostics";
-import { recoverDraft, setDraft, toDraftImages, type ChatDraftImage } from "@/lib/draft-store";
+import { recoverDraft, setDraft, toDraftImages, addUnconfirmedDelivery, type ChatDraftImage } from "@/lib/draft-store";
 import { formatExitedSessionNotice, translate } from "@/lib/i18n";
 import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
 import { toastBtwError, useBtw } from "@/hooks/useBtw";
@@ -2644,10 +2644,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     return snapshot.entryIds;
   }, []);
 
-  const handleSend = useCallback(async (message: string, images?: AttachedImage[]): Promise<boolean> => {
+  const handleSend = useCallback(async (message: string, images?: AttachedImage[]): Promise<boolean | "unknown"> => {
     const trimmedMessage = message.trim();
     if (!trimmedMessage && !images?.length) return false;
-    if (agentRunningRef.current || bashRunningRef.current) return false;
+    if (agentRunningRef.current || bashRunningRef.current || promptDispatchPendingRef.current) return false;
     if (initialHydrationPendingRef.current) return false;
     const isSlashCommandPrompt = !images?.length && trimmedMessage.startsWith("/");
     // omp runs TUI-only commands such as `/guided-goal` nowhere but its own
@@ -2711,8 +2711,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // not a request to stop following the response that this prompt starts.
     userScrollIntentUntilRef.current = 0;
 
+    let sentSessionId: string | null = null;
     try {
-      let sentSessionId: string | null = null;
       // The agent route degrades a prompt into omp's follow-up queue when a
       // `!!` shell command owns the session (another tab or device started it,
       // so this composer never saw a run). No turn starts then, and the
@@ -2800,22 +2800,30 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       }
       return true;
     } catch (e) {
-      if (promptRunIdRef.current !== promptRunId) return false;
+      const targetSid = sentSessionId ?? sessionIdRef.current;
+      const isUnknown = isAgentCommandUnknown(e);
+      if (isUnknown && targetSid) {
+        addUnconfirmedDelivery(targetSid, { text: message, images: toDraftImages(piImages) });
+      }
+      if (promptRunIdRef.current !== promptRunId) return isUnknown ? "unknown" : false;
       promptDispatchPendingRef.current = false;
-      console.error("Failed to send message:", e);
-      // Every failure here (stream connect, startup, set_model, or the prompt
-      // POST itself) means the prompt never started, so roll back the optimistic bubble.
+      console.error("Failed to send message:", e instanceof Error ? e.message : String(e));
+      // Remove the optimistic bubble without treating uncertain delivery as refusal.
       setOptimisticUserMessage(null);
-      addNotice({
-        type: "error",
-        message: e instanceof EventStreamConnectionError
-          ? e.message
-          : translate("agentSession.sendFailed", { detail: e instanceof Error ? e.message : String(e) }),
-      });
-      // Restore the user's text into the input instead of losing it. Mirrors the
-      // shell-command recovery in executeBash; insertIfEmpty avoids clobbering
-      // anything typed since.
-      if (message) opts.chatInputRef?.current?.insertIfEmpty(message);
+      if (isUnknown) {
+        addNotice({
+          type: "warning",
+          message: translate("agentSession.deliveryUnknownWarning"),
+        });
+      } else {
+        addNotice({
+          type: "error",
+          message: e instanceof EventStreamConnectionError
+            ? e.message
+            : translate("agentSession.sendFailed", { detail: e instanceof Error ? e.message : String(e) }),
+        });
+        if (message) opts.chatInputRef?.current?.insertIfEmpty(message);
+      }
       agentRunningRef.current = false;
       catchUp.invalidate();
       eventCoalescer.reset();
@@ -2826,17 +2834,18 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       lastRunErrorRef.current = null;
       slashCommandRunRef.current = false;
       dispatch({ type: "end" });
-      return false;
+      return isUnknown ? "unknown" : false;
     }
   }, [catchUp, eventCoalescer, isNew, newSessionCwd, newSessionModel, session, ensureNewSession, ensureEventsConnected, promoteNewSession, waitForPromptSettlement, addNotice, opts.chatInputRef, refreshSubagentRoster, registerHostTools, registerHostUriSchemes, clearLiveToolResults, clearTerminalReconcileTimer, snapshotRunEntries]);
 
   /** Abort the running agent and send a fresh prompt. If the run finished
    * before dispatch, send normally instead of dropping the input. */
-  const handleInterruptAndReply = useCallback(async (message: string, images?: AttachedImage[]): Promise<boolean> => {
+  const handleInterruptAndReply = useCallback(async (message: string, images?: AttachedImage[]): Promise<boolean | "unknown"> => {
     const trimmedMessage = message.trim();
     if (!trimmedMessage && !images?.length) return false;
     const sid = sessionIdRef.current;
     if (!sid) return false;
+    if (promptDispatchPendingRef.current || interruptReplyPendingRef.current) return false;
     if (!agentRunningRef.current) return handleSend(message, images);
 
     // Same dispatch boundary as handleSend: refuse a body the agent route
@@ -2875,26 +2884,37 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       if (promptRunIdRef.current === promptRunId && sessionIdRef.current === sid) {
         runPreviousEntryIdsRef.current = previousEntryIds;
       }
-      await sendAgentCommand(sid, {
+      const reply = await sendAgentCommand(sid, {
         type: "abort_and_prompt",
         message: trimmedMessage,
         ...(interruptPiImages?.length ? { images: interruptPiImages } : {}),
       });
+      if (isQueuedWhileShellRunning(reply)) {
+        addNotice({ type: "info", message: translate("agentSession.queuedWhileShellRunning") });
+      }
       if (promptRunIdRef.current === promptRunId) promptDispatchPendingRef.current = false;
       if (isSlashCommandPrompt) void waitForPromptSettlement(sid, promptRunId);
       return true;
     } catch (e) {
-      if (promptRunIdRef.current !== promptRunId || sessionIdRef.current !== sid) return false;
+      const isUnknown = isAgentCommandUnknown(e);
+      if (isUnknown && sid) {
+        addUnconfirmedDelivery(sid, { text: trimmedMessage, images: toDraftImages(interruptPiImages) });
+      }
+      if (promptRunIdRef.current !== promptRunId || sessionIdRef.current !== sid) {
+        return isUnknown ? "unknown" : false;
+      }
       promptDispatchPendingRef.current = false;
-      console.error("Failed to interrupt and reply:", e);
+      console.error("Failed to interrupt and reply:", e instanceof Error ? e.message : String(e));
       if (promptRunIdRef.current === promptRunId && sessionIdRef.current === sid) {
         runPreviousEntryIdsRef.current = previousRunEntryIds;
       }
       interruptReplyPendingRef.current = false;
       setOptimisticUserMessage(null);
+      if (isUnknown) {
+        addNotice({ type: "warning", message: translate("agentSession.deliveryUnknownWarning") });
+        return "unknown";
+      }
       addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
-      // Mirror handleSend: the interrupt never started, so hand the text back
-      // instead of losing it with the rolled-back bubble.
       if (trimmedMessage) opts.chatInputRef?.current?.insertIfEmpty(trimmedMessage);
       return false;
     }
@@ -2947,20 +2967,62 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     // over its transport limit). Known window: they exist only in the
     // response until the abort finishes, so a reload during a slow abort
     // loses them.
-    type RestoredQueue = { steering?: Array<{ text?: unknown; images?: unknown[] }>; followUp?: Array<{ text?: unknown; images?: unknown[] }> };
+    type RestoredQueue = {
+      steering?: Array<{ text?: unknown; images?: unknown[] }>;
+      followUp?: Array<{ text?: unknown; images?: unknown[] }>;
+      fallbackPlainAbort?: boolean;
+      withdrawn?: boolean;
+    };
     let restoredQueue: RestoredQueue | null | undefined;
     let unsupported = false;
+    let isAttachedUnsupported = false;
     let failures = 0;
     // A failure after omp already withdrew would lose the texts on the
     // per-entry path (the queue is empty by then). Retrying the same command
     // is safe instead: omp returns whatever is still queued.
     for (let attempt = 0; attempt < 2 && restoredQueue === undefined && !unsupported && (attempt === 0 || sameRun()); attempt++) {
       try {
-        restoredQueue = (await sendAgentCommand<RestoredQueue>(sid, { type: "abort_and_restore_queue" })) ?? null;
+        restoredQueue = (await sendAgentCommand<RestoredQueue>(sid, {
+          type: "abort_and_restore_queue",
+          fallbackToPlainAbort: true,
+        })) ?? null;
       } catch (error) {
-        unsupported = error instanceof Error && error.message.includes("Unknown command");
-        if (!unsupported) failures += 1;
+        const code = error instanceof AgentCommandError ? error.code : undefined;
+        const msg = error instanceof Error ? error.message : String(error);
+        const isUnsupportedCode = code === "attached_session_unsupported" || code === "unsupported";
+        const isUnknownCmd = /unknown command/i.test(msg) || /not supported/i.test(msg);
+        if (isUnsupportedCode || isUnknownCmd) {
+          unsupported = true;
+          isAttachedUnsupported = code === "attached_session_unsupported" || /attached/i.test(msg);
+          break;
+        }
+        failures += 1;
       }
+    }
+    if (restoredQueue?.fallbackPlainAbort || restoredQueue?.withdrawn === false) {
+      if (hookAliveRef.current && sessionIdRef.current === sid) {
+        addNotice({
+          type: "warning",
+          message: translate("agentSession.queueDiscardFailed"),
+        });
+      }
+      return;
+    }
+    if (isAttachedUnsupported) {
+      if (sameRun()) {
+        try {
+          await sendAgentCommand(sid, { type: "abort" });
+        } catch (e) {
+          console.error("Failed to abort:", e instanceof Error ? e.message : String(e));
+        }
+      }
+      if (hookAliveRef.current && sessionIdRef.current === sid) {
+        addNotice({
+          type: "warning",
+          message: translate("agentSession.queueDiscardFailed"),
+        });
+      }
+      return;
     }
     if (!unsupported) {
       const steering = Array.isArray(restoredQueue?.steering) ? restoredQueue.steering : [];
@@ -3594,54 +3656,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // optimistic chat bubble here would duplicate the queue panel and turn into
   // a ghost message if the queue is recalled.
   const toPiImages = (images?: AttachedImage[]) => images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
-  const handleSteer = useCallback(async (message: string, images?: AttachedImage[]) => {
-    const sid = sessionIdRef.current;
-    if (!sid) return false;
-    const piImages = toPiImages(images);
-    try {
-      const reply = await sendAgentCommand(sid, {
-        type: "steer",
-        message,
-        ...(piImages?.length ? { images: piImages } : {}),
-      });
-      // A `!!` shell command owned the session: the agent route put the text
-      // into omp's follow-up queue instead of steering a (nonexistent) turn.
-      if (isQueuedWhileShellRunning(reply)) addNotice({ type: "info", message: translate("agentSession.queuedWhileShellRunning") });
-      return true;
-    } catch (e) {
-      console.error("Failed to steer:", e);
-      addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
-      return false;
-    }
-  }, [addNotice]);
-
-  const handlePromptWithStreamingBehavior = useCallback(async (
-    message: string,
-    behavior: "steer" | "followUp",
-    images?: AttachedImage[],
-  ) => {
-    const sid = sessionIdRef.current;
-    if (!sid) return false;
-    const piImages = toPiImages(images);
-    try {
-      const reply = await sendAgentCommand(sid, {
-        type: "prompt",
-        message,
-        streamingBehavior: behavior,
-        ...(piImages?.length ? { images: piImages } : {}),
-      });
-      // Same degradation as `handleSteer`: queued behind the running shell
-      // command rather than delivered into this run.
-      if (isQueuedWhileShellRunning(reply)) addNotice({ type: "info", message: translate("agentSession.queuedWhileShellRunning") });
-      return true;
-    } catch (e) {
-      console.error("Failed to queue prompt:", e);
-      addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
-      return false;
-    }
-  }, [addNotice]);
-
-  const handleFollowUp = useCallback(async (message: string, images?: AttachedImage[]) => {
+  const handleFollowUp = useCallback(async (message: string, images?: AttachedImage[]): Promise<boolean | "unknown"> => {
     const sid = sessionIdRef.current;
     if (!sid) return false;
     const piImages = toPiImages(images);
@@ -3653,11 +3668,36 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       });
       return true;
     } catch (e) {
-      console.error("Failed to follow up:", e);
-      addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
+      console.error("Failed to follow up:", e instanceof Error ? e.message : String(e));
+      if (isAgentCommandUnknown(e)) {
+        if (sid) addUnconfirmedDelivery(sid, { text: message, images: toDraftImages(piImages) });
+        if (hookAliveRef.current && sessionIdRef.current === sid) {
+          addNotice({ type: "warning", message: translate("agentSession.deliveryUnknownWarning") });
+        }
+        return "unknown";
+      }
+      if (hookAliveRef.current && sessionIdRef.current === sid) {
+        addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
+      }
       return false;
     }
   }, [addNotice]);
+
+  const handleSteer = useCallback(async (message: string, images?: AttachedImage[]): Promise<boolean | "unknown"> => {
+    // User contract: Steer = Send now (abort_and_prompt immediate same owner).
+    return handleInterruptAndReply(message, images);
+  }, [handleInterruptAndReply]);
+
+  const handlePromptWithStreamingBehavior = useCallback(async (
+    message: string,
+    behavior: "steer" | "followUp",
+    images?: AttachedImage[],
+  ): Promise<boolean | "unknown"> => {
+    if (behavior === "steer") {
+      return handleInterruptAndReply(message, images);
+    }
+    return handleFollowUp(message, images);
+  }, [handleInterruptAndReply, handleFollowUp]);
 
   const handleAbortCompaction = useCallback(async () => {
     const sid = sessionIdRef.current;

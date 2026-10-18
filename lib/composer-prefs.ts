@@ -24,7 +24,8 @@ export function getSubmitDuringRunBehavior(): SubmitDuringRunBehavior {
   if (typeof window === "undefined") return DEFAULT_SUBMIT_DURING_RUN_BEHAVIOR;
   try {
     const value = window.localStorage.getItem(SUBMIT_DURING_RUN_KEY);
-    if (value === "interrupt" || value === "steer" || value === "queue") return value;
+    if (value === "steer" || value === "interrupt") return "steer";
+    if (value === "queue") return "queue";
   } catch {
     // storage unavailable — fall through to the default
   }

@@ -1358,8 +1358,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                         setSubmitBehavior(next);
                       }}
                     >
-                      <option value="interrupt" style={nativeOptionStyle}>{t("chatInput.interruptReply")}</option>
-                      <option value="steer" style={nativeOptionStyle}>{t("settingsConfig.steerCurrentRun")}</option>
+                      <option value="steer" style={nativeOptionStyle}>{t("chatInput.steer")}</option>
                       <option value="queue" style={nativeOptionStyle}>{t("settingsConfig.queueFollowUp")}</option>
                     </select>
                   </NativeSetting>

@@ -68,7 +68,7 @@ not a claim of full scene compatibility.
 Integrated through [`7a3f76c`](https://github.com/kahme247/ompweb/commit/7a3f76c)
 on 2026-10-11: native multi-question Ask, notifications, account management,
 `/btw`, Slow mode, in-run attachments and session recovery. Local wallpapers,
-glass, pets, running-session shortcuts, Send now / Steer / Queue and Rewind
+glass, pets, running-session shortcuts, immediate Steer / Queue and Rewind
 semantics remain intact. Desktop/Web Ask uses the native dialog, independently
 of Telegram. Cross-session host tools share the global event stream so two
 HTTP/1.1 chat tabs do not exhaust all connections and block dialog submissions.
@@ -99,11 +99,13 @@ not the ASR model; voice availability varies by device.
 - [omp](https://github.com/can1357/oh-my-pi) installed and available on your `PATH` (or specified via `OMP_WEB_OMP_BIN`)
 - Node.js `>= 22.19.0`
 
-The **Steer** action on a queued follow-up requires an omp runtime with the `promote_queued_message` RPC command (not available in omp 18.1.16). Older runtimes report an error and leave the message queued as a follow-up; ompweb does not send a duplicate steering message.
+**Steer = Send now**: interrupt the current turn and send the new message immediately in the same session using `abort_and_prompt`. Only **Queue** waits for completion. Existing saved Send now/Steer preferences both select this immediate action. Queue items expose **Edit** and **Delete**, not cooperative promotion under the Steer label; use Edit, then explicitly Steer if needed.
 
 Queue **Delete** and **Edit** additionally require `remove_queued_message`. Deletion is confirmed by OMP before the chip disappears; editing recalls text only after cancellation succeeds. Unsupported runtimes or messages that are no longer pending leave the queue unchanged and display a notice.
 
 The queue panel shows omp's own queue (`queuedMessages` in `get_state` and `queue_update` events, omp 18.4.4 or later), so every device viewing a session sees the same queued messages. **Stop** moves the text of messages still waiting in the queue back into the composer instead of letting the agent run them; a steer the model already picked up through live steering still runs. Older omp runtimes show no queue panel, and Stop cannot take queued messages back.
+
+If delivery cannot be confirmed (for example, the HTTP response is lost), each submitted message is retained separately in the composer warning. It is not automatically retried or merged into your next draft. Check the native queue/history before restoring or dismissing it. Restore requires an empty composer. Text survives reload in the same tab when storage is available; images remain in memory, with the unsent-content exit warning.
 
 ## Attach a desktop OMP process
 
@@ -132,10 +134,20 @@ clean up on cancellation/abort. The native dialog retains its timeout behavior.
 No Telegram plugin, Telegram state, wake lock or Ask-protocol environment flag is
 required; Telegram's separate namespace/protocol is neither read nor modified.
 
-Attached sessions accept conversation input, Steer, Queue and Stop. Run shell or
-slash commands, rename, fork, reload and other unsupported controls in the
-original terminal. Web rejects archive/delete and interrupt-and-replace rather
-than taking ownership of the external process or writing its journal.
+Attached sessions accept ordinary input, Queue and Stop. Steer/Send now requires
+atomic interrupt-and-replace support that this desktop bridge does not provide;
+the request is rejected and the draft retained. Stop aborts the turn but cannot
+withdraw the desktop queue, and displays that limitation. Run shell/slash
+commands, rename, fork and reload in the original terminal. Web rejects
+archive/delete rather than taking ownership of the external process.
+
+Before resuming a historical journal, Web checks the native OMP ownership lease
+using the installed runtime's native addon in a bounded Node helper. An active
+owner without attach metadata, or an inspection failure, blocks resume. Canonical
+paths share startup coordination, session-ID moves retain aliases, and Web resume
+reservations stay held for the child lifetime. This is not an atomic handoff:
+OMP claims its native lease on first write, so an external terminal acquiring it
+between preflight and that write can still trigger native fork-on-collision.
 
 ### Native extension tools (including `telegram_send_file`)
 
@@ -466,7 +478,7 @@ host (KDE Plasma, and most Wayland/X11 desktops).
 - **Interactive Chat**: Real-time streaming conversation with your local `omp` agent — tool calls, thinking levels, token counts, cost, context gauge, queue controls, and interrupt & retry.
 - **Running Sessions**: Jump between active runs from a separate section above workspaces, including runs in collapsed projects and desktop sessions not yet opened in Web. The standalone desktop bridge supplies validated owner metadata; read-only discovery reconciles every five seconds and follows live run events without spawning or prompting the owner. Shortcuts show the workspace path and disappear when the run finishes; the normal project tree remains intact.
 - **Workspace Quick New Session**: Each workspace row has an always-visible **+** button that opens a new-session composer at that workspace's root, even when its session list is collapsed. OMP starts only on the first message. Existing sessions and drafts are preserved; the top New Session action still follows the selected directory/worktree. On mobile, the shortcut closes the drawer and focuses the composer.
-- **Send now, Steer, or Queue**: During a run, use **Send now** to abort it and submit the new message without waiting for natural completion; completed file changes and commands are not undone. **Steer** uses OMP's native delivery timing, while **Queue** waits for the run to finish. Settings → Interface & Behavior → Message during active run selects the highlighted action and desktop Enter behavior without hiding the other buttons. Desktop-owned attached sessions cannot interrupt-and-replace: the web reports the limitation and retains the draft. Stop the run first, or choose Steer or Queue.
+- **Steer (Send now) or Queue**: Steer aborts the current turn and immediately submits the new message in the same session; completed actions are not undone. Queue waits for completion. Settings selects the highlighted action and desktop Enter behavior. Desktop attach rejects unsupported interrupt-and-replace and retains the draft; stop first or choose Queue.
 - **Shared desktop OMP instance**: The standalone `extensions/desktop-bridge.ts` attaches Web to the original terminal process through its private authenticated socket, without a second writer or any Telegram dependency. Both processes share `PI_CODING_AGENT_DIR`; disconnecting or shutting down Web never terminates the desktop owner. Unsupported controls report an explicit error.
 - **Native Ask in terminal and Web**: The existing native Ask appears as a structured browser form, including choice descriptions, multi-select and custom answers. The first answer wins and closes the other form; reconnects replay pending questions and abort clears both surfaces. No replacement Ask tool or placeholder input protocol is used.
 - **Message Copy**: Copy user messages and completed assistant replies as rendered plain text or original Markdown using the buttons below each message. Thinking, tool output, and message controls are excluded. Oversized messages that use the raw-text viewer copy their full source in either format.

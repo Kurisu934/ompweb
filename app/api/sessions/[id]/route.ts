@@ -29,6 +29,8 @@ import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-fo
 import { sessionPathKey } from "@/lib/paths";
 import { clearExitedRpcSession, getRpcSession, tryAttachLiveSession } from "@/lib/rpc-manager";
 import { readSessionMetadata } from "@/lib/omp/local-bridge";
+import { inspectNativeSessionLease } from "@/lib/omp/native-lease";
+import { getAgentEnvOverrides } from "@/lib/omp/agent-env";
 
 /** Stable, client-safe error body for catch-all handlers: details go to the
  *  server log only, never to the browser. */
@@ -304,6 +306,18 @@ export async function PATCH(
       if (owner.status === "live" || owner.status === "invalid") {
         return NextResponse.json({ error: "Rename this session in its original desktop process", code: "attached_session_rename_failed" }, { status: 409 });
       }
+      const header = readSessionHeader(filePath);
+      if (!header?.id) {
+        return NextResponse.json({ error: "Cannot read session header for renaming", code: "session_header_invalid" }, { status: 400 });
+      }
+      const targetSessionId = header.id;
+      const leaseCheck = await inspectNativeSessionLease(targetSessionId, undefined, getAgentEnvOverrides());
+      if (leaseCheck.error) {
+        return NextResponse.json({ error: `Cannot safely verify session ownership: ${leaseCheck.error}`, code: "session_lease_inspect_failed" }, { status: 409 });
+      }
+      if (leaseCheck.active) {
+        return NextResponse.json({ error: "Rename this session in its original desktop process", code: "attached_session_rename_failed" }, { status: 409 });
+      }
       setSessionTitle(filePath, name.trim(), "user");
       invalidateSessionCaches(filePath);
       return NextResponse.json({ ok: true });
@@ -343,8 +357,27 @@ export async function DELETE(
 
     // Read only the bounded header before deleting.
     const deletedHeader = readSessionHeader(filePath);
-    const deletedSessionId = deletedHeader?.id ?? id;
-    const parentSession = deletedHeader?.parentSession;
+    if (!deletedHeader?.id) {
+      return NextResponse.json({
+        error: "Cannot read session header for deletion",
+        code: "session_header_invalid",
+      }, { status: 400 });
+    }
+    const deletedSessionId = deletedHeader.id;
+    const parentSession = deletedHeader.parentSession;
+    const leaseCheck = await inspectNativeSessionLease(deletedSessionId, undefined, getAgentEnvOverrides());
+    if (leaseCheck.error) {
+      return NextResponse.json({
+        error: `Cannot safely verify session ownership: ${leaseCheck.error}`,
+        code: "session_lease_inspect_failed",
+      }, { status: 409 });
+    }
+    if (leaseCheck.active) {
+      return NextResponse.json({
+        error: "Cannot delete session actively owned by an external process",
+        code: "attached_session_delete_prohibited",
+      }, { status: 409 });
+    }
 
     // Children reference their parent either by file path or by bare session id
     // (see resolveParentSessionId), so the grandparent has to be written back in

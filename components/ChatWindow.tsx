@@ -516,7 +516,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
     sessionIdRef, messagesEndRef, scrollContainerRef,
     handleSend, handleAbort, handleFork, handleNavigate, handleModelChange, retrySession,
     handleSteer, handleFollowUp, handleInterruptAndReply, handlePromptWithStreamingBehavior, handleAbortCompaction, handleCompact,
-    removeQueuedMessage, promoteQueuedToSteer,
+    removeQueuedMessage,
     handleBuiltinSlashCommand, togglePreCompactionHistory,
     handleThinkingLevelChange, handleFastModeChange, handleSlowModeChange, handleCycleModel, handleCycleThinkingLevel, handleAbortRetry, loadSlashCommands,
     handleToolPresetChange,
@@ -1077,7 +1077,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
       modelCapacity={modelCapacity}
       generationSpeed={generationSpeed}
       onRemoveQueuedMessage={removeQueuedMessage}
-      onPromoteQueuedToSteer={promoteQueuedToSteer}
+
       slashCommands={slashCommands}
       slashCommandsLoading={slashCommandsLoading}
       onLoadSlashCommands={loadSlashCommands}

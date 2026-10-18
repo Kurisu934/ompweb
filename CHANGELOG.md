@@ -8,6 +8,13 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 - Document the native `telegram_send_file` compatibility contract for Web-owned RPC children and attached original desktop processes: ordinary native tool events/results, process-local extension loading and private target configuration, without a Telegram runtime dependency, private protocol, host-tool routing or Ask changes.
 
+### Ownership and queue admission — 0.5.3 (2026-10-19)
+
+- Gate historical resume on the native session ownership lease, fail closed when inspection is unavailable, and protect external-owner mutations without Telegram dependencies. Coordinate canonical-path startup across Web processes, retain moved session aliases, and keep resume reservations for the child lifetime.
+- Preserve each uncertain delivery separately instead of automatically restoring it into later drafts; retain explicit recovery/discard controls and guard same-draft dispatch. Do not deduplicate message text or clear unrelated native queue entries.
+- Unify Steer with Send now (`abort_and_prompt`); only Queue waits. Remove cooperative queue promotion from Steer controls, retaining explicit Edit/Delete. Attached Stop falls back to turn abort with a warning that queued messages were not withdrawn.
+- Native ownership preflight is not atomic lease transfer: an external owner can still acquire OMP's lazy first-write lease after inspection. Desktop attach still rejects unsupported atomic interrupt-and-replace. This source release does not deploy or restart the production service.
+
 ### Independent desktop bridge — 0.5.2 (2026-10-18)
 
 - Package a standalone desktop extension using private `web-desktop-sessions` metadata and the authenticated `omp-web-desktop/v1` protocol. Web discovers unopened desktop runs and attaches to their original PID/journal; disconnect, idle disposal and Web shutdown never terminate the desktop owner.

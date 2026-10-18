@@ -259,7 +259,7 @@ test("renders single queued prompt in compact bar", () => {
   assert.match(html, /First follow-up task/);
   assert.match(html, />(Edit|chatInput\.queuedEdit)</);
   assert.match(html, />(Delete|chatInput\.queuedDelete)</);
-  assert.match(html, />(Steer|chatInput\.queuedSteerAction)</);
+  assert.doesNotMatch(html, />(Steer|chatInput\.queuedSteerAction)</);
 });
 
 test("keeps editing and deletion but hides Steer for a single queued steer", () => {
@@ -267,7 +267,7 @@ test("keeps editing and deletion but hides Steer for a single queued steer", () 
     React.createElement(ChatInput, {
       onSend() {},
       onAbort() {},
-      onPromoteQueuedToSteer() {},
+
       isStreaming: true,
       queuedMessages: {
         followUp: [],

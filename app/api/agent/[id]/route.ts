@@ -65,7 +65,11 @@ export async function POST(
     // no runtime RPC, so a toggle that now differs from the live child's spawn
     // flag must replace an idle child to take effect; busy children keep
     // running and pick the flag up at the next natural respawn.
-    const existing = getRpcSession(id);
+    let existing = getRpcSession(id);
+    if (!existing?.isAlive()) {
+      existing = await tryAttachLiveSession(id);
+    }
+
     const noSpawn = Object.hasOwn(NO_SPAWN_REPLIES, body.type);
     const liveOnly = LIVE_SESSION_ONLY.has(body.type);
     if (existing?.isAlive()) {

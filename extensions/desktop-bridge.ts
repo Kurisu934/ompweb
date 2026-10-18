@@ -236,7 +236,7 @@ class DesktopBridge {
           if (/^\s*[!/]/.test(frame.message)) throw new Error("Desktop attach accepts conversation input only; run shell/slash commands in the original terminal");
           const deliverAs = type === "steer" || frame.streamingBehavior === "steer" ? "steer"
             : type === "follow_up" || frame.streamingBehavior === "followUp" ? "followUp" : undefined;
-          if (!this.context.isIdle() && !deliverAs) throw new Error("Desktop session is busy; choose Steer or Queue, or stop it first");
+          if (!this.context.isIdle() && !deliverAs) throw new Error("Desktop session is busy; choose Queue, or stop it first");
           const images = Array.isArray(frame.images) ? frame.images : [];
           const content = images.length ? [{ type: "text", text: frame.message }, ...images.map((image: Frame) => ({ type: "image", data: image.data, mimeType: image.mimeType }))] : frame.message;
           this.api.sendUserMessage(content, deliverAs ? { deliverAs } : undefined);

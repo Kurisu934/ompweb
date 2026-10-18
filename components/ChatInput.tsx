@@ -15,7 +15,7 @@ import type { SttAfter } from "@/lib/stt";
 import { formatCompactNumber, formatPercent } from "@/lib/format";
 import { ContextDetailPanel } from "./ComposerPanels";
 import { RecordingDeck } from "./RecordingDeck";
-import { clearDraft, getDraft, mergeRecoveredText, recoverDraft, setDraft, subscribeDraftRecovery, type ChatDraftImage } from "@/lib/draft-store";
+import { clearDraft, getDraft, mergeRecoveredText, recoverDraft, setDraft, subscribeDraftRecovery, getUnconfirmedDeliveries, clearUnconfirmedDelivery, clearAllUnconfirmedDeliveries, subscribeUnconfirmedDelivery, type ChatDraftImage, type UnconfirmedDeliveryPayload } from "@/lib/draft-store";
 import { expandWebSlashCommand } from "@/lib/web-slash-commands";
 import type { AttachedImage, AttachedTextFile } from "./ChatInput-draft-attachments";
 import {
@@ -45,7 +45,7 @@ import {
   type ModelOption,
 } from "./ChatInput-model-options";
 import { ModelPickerPanel } from "./ChatInput-model-picker";
-import { ComposerModeStatus, ModelErrorBanner, QueuedActionButton } from "./ChatInput-banners";
+import { ComposerModeStatus, ModelErrorBanner, QueuedActionButton, UnconfirmedDeliveryBanner } from "./ChatInput-banners";
 import { CHAT_COLUMN_MAX_WIDTH } from "@/lib/chat-layout";
 import {
   composeMessageWithTextAttachments,
@@ -136,7 +136,7 @@ function formatUsageLimitLabel(
 
 export type { AttachedImage, AttachedTextFile } from "./ChatInput-draft-attachments";
 export { filterModelOptions } from "./ChatInput-model-options";
-export { ModelErrorBanner } from "./ChatInput-banners";
+export { ModelErrorBanner, UnconfirmedDeliveryBanner } from "./ChatInput-banners";
 
 const TOOL_PRESET_OPTIONS: Array<{ value: ToolPreset; descriptionKey: string }> = [
   { value: "none", descriptionKey: "chatInput.toolPresetNone" },
@@ -147,7 +147,6 @@ const TOOL_PRESET_OPTIONS: Array<{ value: ToolPreset; descriptionKey: string }> 
 const RUN_SUBMIT_ACTIONS = [
   { mode: "steer", labelKey: "chatInput.steer", titleKey: "chatInput.steerNowTitle" },
   { mode: "followup", labelKey: "chatInput.queue", titleKey: "chatInput.queueMessage" },
-  { mode: "interrupt", labelKey: "chatInput.interruptReply", titleKey: "chatInput.interruptReplyTitle" },
 ] as const;
 
 interface Props {
@@ -157,10 +156,10 @@ interface Props {
   onPredictWordFeedback?: PredictWordFeedback;
   onAbort: () => void;
   /** Steer/follow-up callbacks resolve false when omp refused the message. */
-  onSteer?: (message: string, images?: AttachedImage[]) => Promise<boolean>;
-  onFollowUp?: (message: string, images?: AttachedImage[]) => Promise<boolean>;
-  onInterruptAndReply?: (message: string, images?: AttachedImage[]) => Promise<boolean>;
-  onPromptWithStreamingBehavior?: (message: string, behavior: "steer" | "followUp", images?: AttachedImage[]) => Promise<boolean>;
+  onSteer?: (message: string, images?: AttachedImage[]) => Promise<boolean | "unknown">;
+  onFollowUp?: (message: string, images?: AttachedImage[]) => Promise<boolean | "unknown">;
+  onInterruptAndReply?: (message: string, images?: AttachedImage[]) => Promise<boolean | "unknown">;
+  onPromptWithStreamingBehavior?: (message: string, behavior: "steer" | "followUp", images?: AttachedImage[]) => Promise<boolean | "unknown">;
   isStreaming: boolean;
   model?: { provider: string; modelId: string } | null;
   isAutoModelSelection?: boolean;
@@ -216,8 +215,7 @@ interface Props {
   /** Cancel one pending message in omp before removing it from the queue
    *  panel; resolves to its images once omp confirms, else false. */
   onRemoveQueuedMessage?: (text: string, queue: keyof QueuedMessages) => Promise<ChatDraftImage[] | false>;
-  /** Promote the first matching native follow-up into steering. */
-  onPromoteQueuedToSteer?: (text: string) => void | Promise<void>;
+
   slashCommands?: SlashCommandInfo[];
   slashCommandsLoading?: boolean;
   onLoadSlashCommands?: () => Promise<SlashCommandInfo[]> | SlashCommandInfo[];
@@ -343,7 +341,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   modelCapacity,
   generationSpeed,
   onRemoveQueuedMessage,
-  onPromoteQueuedToSteer,
   draftKey = "new:unassigned",
   cwd,
   activeGoal,
@@ -395,6 +392,19 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const [value, setValue] = useState(() => (draftKey ? getDraft(draftKey)?.value ?? "" : ""));
   const [isInterrupting, setIsInterrupting] = useState(false);
   const interruptingRef = useRef(false);
+  const draftGenerationRef = useRef(0);
+  const lastConsumedGenerationRef = useRef(-1);
+  const clearedForDispatchRef = useRef(false);
+  const [unconfirmedDeliveries, setUnconfirmedDeliveries] = useState<UnconfirmedDeliveryPayload[]>(() => (
+    draftKey ? getUnconfirmedDeliveries(draftKey) : []
+  ));
+
+  useEffect(() => {
+    return subscribeUnconfirmedDelivery(() => {
+      setUnconfirmedDeliveries(draftKey ? getUnconfirmedDeliveries(draftKey) : []);
+    });
+  }, [draftKey]);
+
   const [queuedDeleteTarget, setQueuedDeleteTarget] = useState<{
     text: string;
     kind: "follow-up" | "steer";
@@ -418,6 +428,17 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const [attachedTextFiles, setAttachedTextFiles] = useState<AttachedTextFile[]>(() => (
     draftKey ? draftFilesToAttachedFiles(getDraft(draftKey)?.files) : []
   ));
+  const handleRestoreUnconfirmed = useCallback((delivery: UnconfirmedDeliveryPayload) => {
+    if (value.trim().length > 0 || attachedImages.length > 0 || attachedTextFiles.length > 0) {
+      toast.error(t("chatInput.restoreRequiresEmptyComposer"));
+      return;
+    }
+    setValue(delivery.text);
+    if (delivery.images?.length) {
+      setAttachedImages(draftImagesToAttachedImages(delivery.images));
+    }
+    clearUnconfirmedDelivery(delivery.key, delivery.id);
+  }, [value, attachedImages.length, attachedTextFiles.length, t]);
   const [attachError, setAttachError] = useState<string | null>(null);
   const trimmedValue = value.trimStart();
   const bashMode = attachedImages.length === 0 && attachedTextFiles.length === 0 && trimmedValue.startsWith("!");
@@ -741,6 +762,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   }, []);
 
   const clearInput = useCallback(() => {
+    clearedForDispatchRef.current = true;
+    draftGenerationRef.current += 1;
+    valueRef.current = "";
+    attachedImagesRef.current = [];
+    attachedTextFilesRef.current = [];
     setValue("");
     setAtQuery(null);
     setHistoryMenuOpen(false);
@@ -775,16 +801,18 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     setAttachError(null);
     setQueuedDeleteTarget(null);
 
-    if (previousDraftKey) {
+    if (previousDraftKey && !clearedForDispatchRef.current) {
       setDraft(previousDraftKey, {
         value: valueRef.current,
         images: attachedImagesRef.current.map(imageToDraftImage),
         files: attachedTextFilesRef.current.map(textFileToDraftFile),
       });
     }
+    clearedForDispatchRef.current = false;
 
     const draft = draftKey ? getDraft(draftKey) : null;
     draftKeyRef.current = draftKey;
+    setUnconfirmedDeliveries(draftKey ? getUnconfirmedDeliveries(draftKey) : []);
     setValue(draft?.value ?? "");
     setAtQuery(null);
     setHistoryMenuOpen(false);
@@ -876,10 +904,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   }, [onBuiltinCommand, runBuiltinCommand, t]);
 
   const handleSend = useCallback(async (overrideText?: string) => {
-    const raw = overrideText ?? value;
+    if (isStreaming) return;
+    const gen = draftGenerationRef.current;
+    if (lastConsumedGenerationRef.current === gen && overrideText === undefined) return;
+    const raw = overrideText ?? valueRef.current;
     const msg = raw.trim();
     if (!msg && !attachedImagesRef.current.length && !attachedTextFilesRef.current.length) return;
-    if (isStreaming) return;
     onAudioUnlock?.();
     if (sendSideQuestion(msg, overrideText)) return;
     const composedMessage = composeMessageWithTextAttachments(msg, attachedTextFilesRef.current);
@@ -889,15 +919,18 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       if (await runBuiltinCommand(msg, overrideText)) return;
     }
     if (rejectsOversizedPrompt(composedMessage, attachedImagesRef.current)) return;
-    onSend(composedMessage, attachedImagesRef.current.length ? attachedImagesRef.current : undefined);
+    if (overrideText === undefined) lastConsumedGenerationRef.current = gen;
+    const images = attachedImagesRef.current.length ? [...attachedImagesRef.current] : undefined;
+    onSend(composedMessage, images);
     clearInput();
-  }, [value, isStreaming, onBuiltinCommand, onSend, clearInput, onAudioUnlock, rejectsOversizedPrompt, runBuiltinCommand, sendSideQuestion]);
+  }, [isStreaming, onBuiltinCommand, onSend, clearInput, onAudioUnlock, rejectsOversizedPrompt, runBuiltinCommand, sendSideQuestion]);
   const handleInterrupt = useCallback(async (overrideText?: string) => {
     if (!onInterruptAndReply || interruptingRef.current) return;
+    const gen = draftGenerationRef.current;
     const sentValue = overrideText ?? valueRef.current;
     const msg = sentValue.trim();
-    const images = attachedImagesRef.current;
-    const files = attachedTextFilesRef.current;
+    const images = [...attachedImagesRef.current];
+    const files = [...attachedTextFilesRef.current];
     if (!msg && !images.length && !files.length) return;
     let message = composeMessageWithTextAttachments(msg, files);
     if (!images.length && !files.length && msg.startsWith("/")) {
@@ -918,9 +951,16 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     interruptingRef.current = true;
     setIsInterrupting(true);
     try {
-      const accepted = await onInterruptAndReply(message, images.length ? images : undefined);
-      if (accepted && draftKeyRef.current === sentDraftKey && valueRef.current === sentValue
-        && attachedImagesRef.current === images && attachedTextFilesRef.current === files) clearInput();
+      const outcome = await onInterruptAndReply(message, images.length ? images : undefined);
+      // Consume captured draft on true or unknown (without claiming accepted); refusal (false) does not clear input.
+      if ((outcome === true || outcome === "unknown") && draftKeyRef.current === sentDraftKey
+        && draftGenerationRef.current === gen && valueRef.current === sentValue
+        && attachedImagesRef.current.length === images.length
+        && attachedImagesRef.current.every((image, index) => image === images[index])
+        && attachedTextFilesRef.current.length === files.length
+        && attachedTextFilesRef.current.every((file, index) => file === files[index])) {
+        clearInput();
+      }
     } finally {
       interruptingRef.current = false;
       setIsInterrupting(false);
@@ -1339,40 +1379,34 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
   const sendQueued = useCallback((mode: "steer" | "followup", overrideText?: string) => {
     if (interruptingRef.current) return;
-    const raw = overrideText ?? value;
+    const raw = overrideText ?? valueRef.current;
     const msg = raw.trim();
     if (!msg && !attachedImagesRef.current.length && !attachedTextFilesRef.current.length) return;
     if (sendSideQuestion(msg, overrideText)) return;
-    const images = attachedImagesRef.current.length ? attachedImagesRef.current : undefined;
-    // The queue callbacks resolve false when omp refused the message: it goes
-    // back, text and images together, to the draft it was sent from, even if
-    // the user has typed or switched sessions since.
+
+    const images = attachedImagesRef.current.length ? [...attachedImagesRef.current] : undefined;
+    const files = [...attachedTextFilesRef.current];
     const key = draftKeyRef.current;
     const keptImages = images?.map(imageToDraftImage);
-    const recoverOnFailure = (queued: Promise<boolean>, text: string) => {
-      void Promise.resolve(queued).then((ok) => {
-        if (ok === false && key) recoverDraft(key, { text, images: keptImages });
+    const recoverOnFailure = (queued: Promise<boolean | "unknown">, text: string) => {
+      void Promise.resolve(queued).then((outcome) => {
+        if (outcome === false && key) {
+          recoverDraft(key, { text, images: keptImages });
+        }
       });
     };
-    const files = attachedTextFilesRef.current;
-    onAudioUnlock?.();
     const streamingBehavior = mode === "steer" ? "steer" : "followUp";
+    onAudioUnlock?.();
     if (msg.startsWith("/") && onPromptWithStreamingBehavior) {
       const commandName = msg.slice(1).split(/\s+/)[0];
-      // Same gate as the direct path (useAgentSession refuses /advisor while
-      // disabled): queueing must not become a bypass around the toggle.
       if (commandName === "advisor" && !advisorEnabled) {
         toast.error(t("agentSession.advisorDisabled"));
         return;
       }
-      // Web commands must be expanded even when queued: the raw slash text
-      // would otherwise reach omp as a literal message (its /goal //plan are
-      // TUI-only). Action commands (compact/...) keep the raw text so omp's
-      // own ACP handlers can run them.
       const expansion = expandWebSlashCommand(msg);
       if (expansion.kind === "expand") {
         const prompt = composeMessageWithTextAttachments(expansion.prompt, files);
-        if (rejectsOversizedPrompt(prompt, attachedImagesRef.current)) return;
+        if (rejectsOversizedPrompt(prompt, images ?? [])) return;
         recoverOnFailure(onPromptWithStreamingBehavior(prompt, streamingBehavior, images), prompt);
         clearInput();
         return;
@@ -1385,33 +1419,32 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         return;
       }
       const prompt = composeMessageWithTextAttachments(msg, files);
-      if (rejectsOversizedPrompt(prompt, attachedImagesRef.current)) return;
+      if (rejectsOversizedPrompt(prompt, images ?? [])) return;
       recoverOnFailure(onPromptWithStreamingBehavior(prompt, streamingBehavior, images), prompt);
       clearInput();
       return;
     }
     const composedMessage = composeMessageWithTextAttachments(msg, files);
-    if (rejectsOversizedPrompt(composedMessage, attachedImagesRef.current)) return;
+    if (rejectsOversizedPrompt(composedMessage, images ?? [])) return;
     if (mode === "steer" && onSteer) {
       recoverOnFailure(onSteer(composedMessage, images), composedMessage);
     } else if (mode === "followup" && onFollowUp) {
       recoverOnFailure(onFollowUp(composedMessage, images), composedMessage);
     }
     clearInput();
-  }, [value, onPromptWithStreamingBehavior, onSteer, onFollowUp, clearInput, onAudioUnlock, t, advisorEnabled, rejectsOversizedPrompt, sendSideQuestion]);
+  }, [onPromptWithStreamingBehavior, onSteer, onFollowUp, clearInput, onAudioUnlock, t, advisorEnabled, rejectsOversizedPrompt, sendSideQuestion]);
   // The highlighted action and Enter share one preference; every available
   // delivery mode stays explicit. Attachments use the immediate prompt path.
   const dictationCapturing = isRecording || isPaused || isReviewing;
   const hasAttachments = attachedImages.length > 0 || attachedTextFiles.length > 0;
-  const canQueueDuringRun = !hasAttachments && Boolean(onSteer || onFollowUp);
+  const canQueueDuringRun = Boolean(onFollowUp);
   const primaryActionSubmitsDuringRun = isStreaming
     && (Boolean(value.trim()) || dictationCapturing || hasAttachments)
-    && Boolean(onInterruptAndReply || canQueueDuringRun);
+    && Boolean(onInterruptAndReply || onSteer || canQueueDuringRun);
   const submitPreference = getSubmitDuringRunBehavior();
-  const runSubmitMode = hasAttachments || submitPreference === "interrupt"
-    ? "interrupt"
-    : onSteer && (submitPreference === "steer" || !onFollowUp) ? "steer" : "followup";
-
+  const runSubmitMode: "steer" | "followup" = submitPreference === "steer" || submitPreference === "interrupt" || !onFollowUp
+    ? "steer"
+    : "followup";
   // ── Queued follow-up bar ────────────────────────────────────────────────
   // Texts are mirrored locally; mutations wait for native acknowledgement.
   const queuedEntries = [
@@ -1430,17 +1463,13 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
   const handleQueueAction = useCallback(async (
     entry: { kind: "follow-up" | "steer"; text: string },
-    action: "edit" | "delete" | "steer",
+    action: "edit" | "delete",
   ) => {
     if (queueActionPendingRef.current) return;
     queueActionPendingRef.current = true;
     setQueueActionPending(true);
     const key = draftKeyRef.current;
     try {
-      if (action === "steer") {
-        if (entry.kind === "follow-up") await onPromoteQueuedToSteer?.(entry.text);
-        return;
-      }
       const removed = await onRemoveQueuedMessage?.(
         entry.text, entry.kind === "steer" ? "steering" : "followUp",
       );
@@ -1456,7 +1485,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       queueActionPendingRef.current = false;
       setQueueActionPending(false);
     }
-  }, [onRemoveQueuedMessage, onPromoteQueuedToSteer]);
+  }, [onRemoveQueuedMessage]);
 
   const handleItemDelete = useCallback((entry: { kind: "follow-up" | "steer"; text: string }) => {
     setQueuedDeleteTarget({ ...entry, draftKey, queue: queuedMessages });
@@ -1472,10 +1501,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     handleItemDelete(firstQueued);
   }, [firstQueued, handleItemDelete]);
 
-  const handleQueuedSteer = useCallback(() => {
-    if (!firstQueued) return;
-    void handleQueueAction(firstQueued, "steer");
-  }, [firstQueued, handleQueueAction]);
+
 
   const getNextSlashIndex = useCallback((direction: "up" | "down" | "left" | "right") => {
     const lastIndex = filteredSlashCommands.length - 1;
@@ -1673,8 +1699,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         e.preventDefault();
         if (interruptingRef.current) return;
         if (isStreaming && (onInterruptAndReply || onSteer || onFollowUp)) {
-          if (runSubmitMode === "interrupt") void handleInterrupt();
-          else sendQueued(runSubmitMode);
+          if (runSubmitMode === "steer") {
+            if (onInterruptAndReply) void handleInterrupt();
+            else sendQueued("steer");
+          } else {
+            sendQueued("followup");
+          }
         } else {
           handleSend();
         }
@@ -1968,6 +1998,14 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         }}
       />
       <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
+        {unconfirmedDeliveries.length > 0 && draftKey && (
+          <UnconfirmedDeliveryBanner
+            deliveries={unconfirmedDeliveries}
+            onRestore={handleRestoreUnconfirmed}
+            onDismiss={(id) => clearUnconfirmedDelivery(draftKey, id)}
+            onDismissAll={() => clearAllUnconfirmedDeliveries(draftKey)}
+          />
+        )}
         <ModelErrorBanner error={modelError} />
         <ComposerModeStatus goal={activeGoal} plan={activePlan} />
         {/* Retry banner */}
@@ -2539,11 +2577,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 <QueuedActionButton disabled={queueActionPending || !onRemoveQueuedMessage} onClick={handleQueuedDelete} title={t("chatInput.queuedDeleteTitle")}>
                   {t("chatInput.queuedDelete")}
                 </QueuedActionButton>
-                {firstQueued?.kind === "follow-up" && (
-                  <QueuedActionButton disabled={queueActionPending || !onPromoteQueuedToSteer} onClick={handleQueuedSteer} title={t("chatInput.queuedSteerTitle")} accent>
-                    {t("chatInput.queuedSteerAction")}
-                  </QueuedActionButton>
-                )}
               </div>
             ) : (
               <div>
@@ -2681,11 +2714,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                         <QueuedActionButton disabled={queueActionPending || !onRemoveQueuedMessage} onClick={() => handleItemDelete(entry)} title={t("chatInput.queuedDeleteTitle")}>
                           {t("chatInput.queuedDelete")}
                         </QueuedActionButton>
-                        {entry.kind === "follow-up" && (
-                          <QueuedActionButton disabled={queueActionPending || !onPromoteQueuedToSteer} onClick={() => void handleQueueAction(entry, "steer")} title={t("chatInput.queuedSteerTitle")} accent>
-                            {t("chatInput.queuedSteerAction")}
-                          </QueuedActionButton>
-                        )}
                       </div>
                     ))}
                   </div>
@@ -2757,6 +2785,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             ref={textareaRef}
             value={value}
             onChange={(e) => {
+              draftGenerationRef.current += 1;
+              valueRef.current = e.target.value;
               setValue(e.target.value);
               setHistoryMenuOpen(false);
               updateAtQuery(e.target.value, e.target.selectionStart);
@@ -3454,7 +3484,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             {primaryActionSubmitsDuringRun ? (
               <div className="composer-run-actions">
                 {RUN_SUBMIT_ACTIONS.map(({ mode, labelKey, titleKey }) => {
-                  if (mode === "interrupt" ? !onInterruptAndReply : !canQueueDuringRun || !(mode === "steer" ? onSteer : onFollowUp)) return null;
+                  if (mode === "steer" ? (!onInterruptAndReply && !onSteer) : (!canQueueDuringRun || !onFollowUp)) return null;
                   const primary = mode === runSubmitMode;
                   return (
                     <button
@@ -3463,9 +3493,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                       data-run-submit={mode}
                       className={primary ? "composer-primary-action wallpaper-inset" : "wallpaper-inset"}
                       onClick={() => {
-                        if (dictationCapturing) stopAndQueueDictation(mode);
-                        else if (mode === "interrupt") void handleInterrupt();
-                        else sendQueued(mode);
+                        if (dictationCapturing) stopAndQueueDictation(mode === "steer" ? "interrupt" : "followup");
+                        else if (mode === "steer") {
+                          if (onInterruptAndReply) void handleInterrupt();
+                          else sendQueued("steer");
+                        } else sendQueued("followup");
                       }}
                       disabled={isTranscribing || isInterrupting}
                       title={t(titleKey)}

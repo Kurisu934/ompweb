@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { scanSessionInfo, setSessionTitle } from "@/lib/omp/session-files";
 import { deriveSessionTitleFromFirstMessage, sanitizeSessionTitle } from "@/lib/session-title";
-import { getRpcSession, resolveSpawnCwdResult, startRpcSession, WebRpcError } from "@/lib/rpc-manager";
+import { getRpcSession, resolveSpawnCwdResult, startRpcSession, tryAttachLiveSession, WebRpcError } from "@/lib/rpc-manager";
 import { invalidateSessionCaches, readSessionHeader } from "@/lib/session-reader";
 import { resolveSessionPathOr404 } from "@/lib/api-utils";
 
@@ -26,6 +26,11 @@ export async function POST(
     // This runs before the path check because omp does not create the session
     // file until the history holds an assistant message.
     let rpc = getRpcSession(id);
+    if (!rpc?.isAlive?.()) {
+      try {
+        rpc = await tryAttachLiveSession(id);
+      } catch {}
+    }
     if (!rpc?.isAlive?.()) {
       const resolved = await resolveSessionPathOr404(id);
       if ("response" in resolved) return resolved.response;

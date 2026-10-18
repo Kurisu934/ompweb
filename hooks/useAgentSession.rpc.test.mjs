@@ -491,60 +491,7 @@ test("queued cancellation reports omp's answer and leaves the chip to the snapsh
   }
 });
 
-test("Steer promotes through omp once and reports a refusal", async (t) => {
-  for (const outcome of [
-    { name: "promoted", response: { value: { success: true, data: { promoted: true } } }, notices: [] },
-    { name: "not pending", response: { value: { success: true, data: { promoted: false } } }, notices: ["warning"] },
-  ]) {
-    await t.test(outcome.name, async () => {
-      resetWorld();
-      const sid = `promote-${outcome.name.replace(" ", "-")}`;
-      primeSession(sid, [userMsg("u0", "q")]);
-      const { w, es } = await startRun(sid, "run");
-      await act(() => es.emit({ type: "queue_update", steering: [], followUp: ["target", "target"] }));
-      let release;
-      world.holds.push({
-        match: (method, _url, body) => method === "POST" && body?.type === "promote_queued_message",
-        produce: () => new Promise((resolve) => { release = resolve; }),
-      });
-      const callsBefore = world.calls.length;
-      let first;
-      await act(async () => {
-        first = w.latest.promoteQueuedToSteer("target");
-        await w.latest.promoteQueuedToSteer("target");
-      });
-      assert.deepEqual(world.calls.slice(callsBefore).map((c) => c.body), [{ type: "promote_queued_message", message: "target" }],
-        "one promotion, never a separate steer");
-      await act(async () => {
-        release(outcome.response);
-        await first;
-      });
-      assert.deepEqual(w.latest.notices.map((n) => n.type), outcome.notices);
-    });
-  }
-});
 
-test("a promotion answered after navigation does not notify the new session", async () => {
-  resetWorld();
-  primeSession("old-promotion", [userMsg("u0", "old")]);
-  primeSession("new-promotion", [userMsg("u1", "new")]);
-  const { w: old, es } = await startRun("old-promotion", "run");
-  await act(() => es.emit({ type: "queue_update", steering: [], followUp: ["target"] }));
-  let release;
-  world.holds.push({
-    match: (method, _url, body) => method === "POST" && body?.type === "promote_queued_message",
-    produce: () => new Promise((resolve) => { release = resolve; }),
-  });
-  let promotion;
-  await act(async () => { promotion = old.latest.promoteQueuedToSteer("target"); });
-  old.unmount();
-  const current = await mountSession("new-promotion");
-  await act(async () => {
-    release({ status: 400, value: { error: "Native promotion failed" } });
-    await promotion;
-  });
-  assert.deepEqual(current.latest.notices, []);
-});
 
 // Stop must neither lose a queued message nor let omp run it: omp starts a
 // queued steer as soon as an abort lands (#130 saw follow-ups replay after the

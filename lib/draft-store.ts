@@ -49,6 +49,8 @@ declare global {
   var __ompChatDrafts: Map<string, ChatDraft> | undefined;
   var __ompChatDraftListeners: Set<() => void> | undefined;
   var __ompChatDraftRecoveryListeners: Set<(key: string, recovery: DraftRecovery) => void> | undefined;
+  var __ompUnconfirmedDeliveries: Map<string, UnconfirmedDeliveryPayload[]> | undefined;
+  var __ompUnconfirmedListeners: Set<() => void> | undefined;
 }
 
 const MAX_DRAFTS = 50;
@@ -83,7 +85,11 @@ const listeners = (globalThis.__ompChatDraftListeners ??= new Set<() => void>())
 const recoveryListeners = (globalThis.__ompChatDraftRecoveryListeners ??= new Set<(key: string, recovery: DraftRecovery) => void>());
 
 export function hasUnsentDrafts(): boolean {
-  return drafts.size > 0;
+  if (drafts.size > 0) return true;
+  for (const list of unconfirmedDeliveries.values()) {
+    if (list.length > 0) return true;
+  }
+  return false;
 }
 
 export function subscribeDrafts(listener: () => void): () => void {
@@ -166,4 +172,100 @@ export function clearDraft(key: string): void {
   if (deleted) {
     for (const listener of listeners) listener();
   }
+}
+
+export interface UnconfirmedDeliveryPayload {
+  id: string;
+  key: string;
+  text: string;
+  images?: ChatDraftImage[];
+  timestamp: number;
+}
+
+const UNCONFIRMED_STORAGE_PREFIX = "omp-unconfirmed-";
+
+function readStoredUnconfirmedDeliveries(): Map<string, UnconfirmedDeliveryPayload[]> {
+  const stored = new Map<string, UnconfirmedDeliveryPayload[]>();
+  try {
+    if (typeof sessionStorage === "undefined") return stored;
+    for (let i = 0; i < sessionStorage.length; i++) {
+      const storageKey = sessionStorage.key(i);
+      if (!storageKey?.startsWith(UNCONFIRMED_STORAGE_PREFIX)) continue;
+      const key = storageKey.slice(UNCONFIRMED_STORAGE_PREFIX.length);
+      const raw = sessionStorage.getItem(storageKey);
+      if (!raw) continue;
+      try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          stored.set(key, parsed.filter((item): item is UnconfirmedDeliveryPayload => Boolean(item && typeof item === "object" && typeof item.id === "string" && typeof item.text === "string")));
+        }
+      } catch {}
+    }
+  } catch {}
+  return stored;
+}
+
+const unconfirmedDeliveries: Map<string, UnconfirmedDeliveryPayload[]> = (globalThis.__ompUnconfirmedDeliveries ??= readStoredUnconfirmedDeliveries());
+const unconfirmedListeners: Set<() => void> = (globalThis.__ompUnconfirmedListeners ??= new Set());
+
+function persistUnconfirmed(key: string) {
+  try {
+    if (typeof sessionStorage === "undefined") return;
+    const list = unconfirmedDeliveries.get(key);
+    if (!list || list.length === 0) {
+      sessionStorage.removeItem(UNCONFIRMED_STORAGE_PREFIX + key);
+    } else {
+      const textOnly = list.map(({ id, key, text, timestamp }) => ({ id, key, text, timestamp }));
+      sessionStorage.setItem(UNCONFIRMED_STORAGE_PREFIX + key, JSON.stringify(textOnly));
+    }
+  } catch {}
+}
+
+export function getUnconfirmedDeliveries(key: string): UnconfirmedDeliveryPayload[] {
+  const list = unconfirmedDeliveries.get(key);
+  if (!list || list.length === 0) return [];
+  return list.map((item) => ({ ...item, images: item.images ? [...item.images] : undefined }));
+}
+
+let unconfirmedCounter = 0;
+export function addUnconfirmedDelivery(key: string, payload: { text: string; images?: ChatDraftImage[] }): string {
+  if (!key) return "";
+  const id = `unc-${Date.now()}-${++unconfirmedCounter}`;
+  const list = unconfirmedDeliveries.get(key) ?? [];
+  const entry: UnconfirmedDeliveryPayload = {
+    id,
+    key,
+    text: payload.text,
+    images: payload.images ? [...payload.images] : undefined,
+    timestamp: Date.now(),
+  };
+  unconfirmedDeliveries.set(key, [...list, entry]);
+  persistUnconfirmed(key);
+  for (const listener of unconfirmedListeners) listener();
+  for (const listener of listeners) listener();
+  return id;
+}
+
+export function clearUnconfirmedDelivery(key: string, id: string): void {
+  const list = unconfirmedDeliveries.get(key);
+  if (!list) return;
+  const filtered = list.filter((item) => item.id !== id);
+  if (filtered.length === 0) unconfirmedDeliveries.delete(key);
+  else unconfirmedDeliveries.set(key, filtered);
+  persistUnconfirmed(key);
+  for (const listener of unconfirmedListeners) listener();
+  for (const listener of listeners) listener();
+}
+
+export function clearAllUnconfirmedDeliveries(key: string): void {
+  if (unconfirmedDeliveries.delete(key)) {
+    persistUnconfirmed(key);
+    for (const listener of unconfirmedListeners) listener();
+    for (const listener of listeners) listener();
+  }
+}
+
+export function subscribeUnconfirmedDelivery(listener: () => void): () => void {
+  unconfirmedListeners.add(listener);
+  return () => { unconfirmedListeners.delete(listener); };
 }

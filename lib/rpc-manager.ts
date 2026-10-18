@@ -1,5 +1,7 @@
 import { randomUUID } from "crypto";
 import { existsSync, realpathSync } from "fs";
+import { canonicalSessionPath } from "./omp/desktop-protocol";
+import { acquireWebResumeReservation, inspectNativeSessionLease } from "./omp/native-lease";
 import { homedir } from "os";
 import { validateAgentImages } from "./image-attachments";
 import { hasVisibleAssistantContent } from "./assistant-response";
@@ -317,7 +319,7 @@ export class AgentSessionWrapper {
   /** The start handshake (ready + protocol negotiation + get_state) is in flight. */
   private handshaking = false;
   private readonly disconnectDestroyMs: number;
-  private onDestroyCallback: (() => void) | null = null;
+  private destroyListeners = new Set<() => void>();
   private onIdentityChangeCallback: ((oldId: string, newId: string, options?: IdentityChangeOptions) => void) | null = null;
   /** omp reported a `session-persistence` notice: its next identity change is
    * the same conversation moving to a sibling file, not a session switch. */
@@ -1202,7 +1204,7 @@ export class AgentSessionWrapper {
   }
 
   onDestroy(cb: () => void): void {
-    this.onDestroyCallback = cb;
+    this.destroyListeners.add(cb);
   }
 
   /** Called when a session-changing command re-keyed this wrapper (branch/new_session/switch_session). */
@@ -1509,7 +1511,7 @@ export class AgentSessionWrapper {
     const type = command.type as string;
     if (type === "abort_and_prompt" && this.isAttached) {
       throw new WebRpcError(
-        "Desktop attach cannot interrupt and replace a run. Stop it first, then send the message, or choose Steer or Queue.",
+        "Desktop attach cannot interrupt and replace a run. Stop it first, then send the message, or choose Queue.",
         "attached_interrupt_unavailable",
       );
     }
@@ -1628,6 +1630,15 @@ export class AgentSessionWrapper {
       case "abort":
       case "abort_and_restore_queue": {
         if (type === "abort_and_restore_queue" && this.isAttached) {
+          if (command.fallbackToPlainAbort === true) {
+            await this.proc.sendCommand({ type: "abort" });
+            this.promptRunning = false;
+            this.awaitingAgentStart = false;
+            this.awaitingAgentStartDeadline = 0;
+            this.continuationGraceUntil = 0;
+            this.clearLiveSnapshots();
+            return { restored: false, withdrawn: false, fallbackPlainAbort: true };
+          }
           throw new WebRpcError("Queue restoration is not supported on attached sessions", "attached_session_unsupported");
         }
         this.responseObserved = false;
@@ -2017,7 +2028,13 @@ export class AgentSessionWrapper {
     this.hostUriSchemes.clear();
     notifyRunningChange();
     await disposed;
-    this.onDestroyCallback?.();
+    for (const cb of this.destroyListeners) {
+      try {
+        await cb();
+      } catch (e) {
+        console.error("AgentSessionWrapper destroy listener error:", e);
+      }
+    }
   }
 }
 
@@ -2163,8 +2180,8 @@ export async function tryAttachLiveSession(
       created.onDestroy(() => {
         for (const [key, wrapper] of registry) if (wrapper === created) registry.delete(key);
       });
-      created.onIdentityChange((oldId, newId) => {
-        if (registry.get(oldId) === created) registry.delete(oldId);
+      created.onIdentityChange((oldId, newId, options) => {
+        if (!options?.keepOldId && registry.get(oldId) === created) registry.delete(oldId);
         registry.set(newId, created);
       });
       registry.set(realSessionId, created);
@@ -2369,70 +2386,123 @@ export async function startRpcSession(
   // omp >= 18.5 lets only one process own a session file; a second `--resume`
   // child would fork into a new nested session on its first write. Reuse the
   // live wrapper that already reports this file (e.g. after it moved files).
-  if (sessionFile && !existing) {
+  if (sessionFile) {
+    const canonicalTarget = canonicalSessionPath(sessionFile);
     for (const candidate of new Set(registry.values())) {
-      if (candidate.isAlive() && candidate.sessionFile && samePath(candidate.sessionFile, sessionFile)) {
-        registry.set(sessionId, candidate);
-        return { session: candidate, realSessionId: candidate.sessionId };
+      if (candidate.sessionFile && (samePath(candidate.sessionFile, sessionFile) || canonicalSessionPath(candidate.sessionFile) === canonicalTarget)) {
+        if (candidate.destroyPromise) await candidate.destroyPromise;
+        if (candidate.isAlive()) {
+          registry.set(sessionId, candidate);
+          return { session: candidate, realSessionId: candidate.sessionId };
+        }
       }
     }
   }
 
-  const inflight = locks.get(sessionId);
+  const canonicalFileKey = sessionFile ? canonicalSessionPath(sessionFile) : null;
+  const lockKey = canonicalFileKey ?? sessionId;
+  const inflight = locks.get(lockKey) ?? (canonicalFileKey ? locks.get(sessionId) : undefined);
   if (inflight) return inflight;
 
   const starting = (async () => {
+    let reservationRelease: (() => Promise<void>) | undefined;
+    const effectiveEnv = getAgentEnvOverrides();
     if (sessionFile && existsSync(sessionFile)) {
-      const ownerCheck = readSessionMetadata(sessionFile);
-      if (ownerCheck.status === "live") {
-        const meta = ownerCheck.metadata;
-        const holder: { wrapper?: AgentSessionWrapper } = {};
-        let client: LocalBridgeClient;
-        try {
-          client = await LocalBridgeClient.connect(meta, 10_000, {
-            onExit: (info) => holder.wrapper?.handleProcessExit(info, client),
-          });
-        } catch (err: unknown) {
-          throw new WebRpcError(
-            `Failed to attach to live session owner (PID ${meta.pid}): ${(err as Error)?.message || err}`,
-            "bridge_attach_failed",
-          );
-        }
-        const created = new AgentSessionWrapper(client, cwd, recordedCwd, false, sessionId, DISCONNECT_DESTROY_MS, true);
-        holder.wrapper = created;
-        created.start();
-        try {
-          await created.waitUntilReady();
-        } catch (err: unknown) {
-          await created.destroyAndWait();
-          throw new WebRpcError(
-            `Live session owner ready failed (PID ${meta.pid}): ${(err as Error)?.message || err}`,
-            "bridge_attach_failed",
-          );
-        }
-        const realSessionId = created.sessionId || sessionId;
-        created.onDestroy(() => {
-          for (const [key, wrapper] of registry) if (wrapper === created) registry.delete(key);
-        });
-        created.onIdentityChange((oldId, newId) => {
-          if (registry.get(oldId) === created) registry.delete(oldId);
-          registry.set(newId, created);
-        });
-        registry.set(realSessionId, created);
-        registry.set(sessionId, created);
-        return { session: created, realSessionId };
-      }
-
-      if (ownerCheck.status === "invalid") {
+      const reservation = await acquireWebResumeReservation(sessionFile, undefined, effectiveEnv);
+      if (!reservation.ok) {
+        const detail = reservation.error ? `: ${reservation.error}` : "";
         throw new WebRpcError(
-          `Live session owner (PID ${ownerCheck.pid}) metadata is invalid: ${ownerCheck.error}`,
-          "invalid_bridge_metadata",
+          `Session is currently being resumed by another Web process${detail}. Please retry in a moment.`,
+          "session_resume_in_progress",
         );
       }
+      reservationRelease = reservation.release;
 
+      // Re-check candidate reuse after reservation serialization:
+      // another request in this process may have finished creating the wrapper while we waited.
+      const canonicalTarget = canonicalFileKey!;
+      for (const candidate of new Set(registry.values())) {
+        if (candidate.sessionFile && (samePath(candidate.sessionFile, sessionFile) || canonicalSessionPath(candidate.sessionFile) === canonicalTarget)) {
+          if (candidate.isAlive()) {
+            registry.set(sessionId, candidate);
+            return { session: candidate, realSessionId: candidate.sessionId };
+          }
+        }
+      }
     }
 
+    try {
+      if (sessionFile && existsSync(sessionFile)) {
+        const ownerCheck = readSessionMetadata(sessionFile);
+        if (ownerCheck.status === "live") {
+          const meta = ownerCheck.metadata;
+          const holder: { wrapper?: AgentSessionWrapper } = {};
+          let client: LocalBridgeClient;
+          try {
+            client = await LocalBridgeClient.connect(meta, 10_000, {
+              onExit: (info) => holder.wrapper?.handleProcessExit(info, client),
+            });
+          } catch (err: unknown) {
+            throw new WebRpcError(
+              `Failed to attach to live session owner (PID ${meta.pid}): ${(err as Error)?.message || err}`,
+              "bridge_attach_failed",
+            );
+          }
+          const created = new AgentSessionWrapper(client, cwd, recordedCwd, false, sessionId, DISCONNECT_DESTROY_MS, true);
+          holder.wrapper = created;
+          created.start();
+          try {
+            await created.waitUntilReady();
+          } catch (err: unknown) {
+            await created.destroyAndWait();
+            throw new WebRpcError(
+              `Live session owner ready failed (PID ${meta.pid}): ${(err as Error)?.message || err}`,
+              "bridge_attach_failed",
+            );
+          }
+          const realSessionId = created.sessionId || sessionId;
+          created.onDestroy(() => {
+            for (const [key, wrapper] of registry) if (wrapper === created) registry.delete(key);
+          });
+          created.onIdentityChange((oldId, newId, options) => {
+            if (!options?.keepOldId && registry.get(oldId) === created) registry.delete(oldId);
+            registry.set(newId, created);
+          });
+          registry.set(realSessionId, created);
+          registry.set(sessionId, created);
+          return { session: created, realSessionId };
+        }
 
+        if (ownerCheck.status === "invalid") {
+          throw new WebRpcError(
+            `Live session owner (PID ${ownerCheck.pid}) metadata is invalid: ${ownerCheck.error}`,
+            "invalid_bridge_metadata",
+          );
+        }
+
+        // Independent native ownership gate before resume
+        const header = readSessionHeader(sessionFile);
+        if (!header || !header.id || typeof header.id !== "string") {
+          throw new WebRpcError(
+            `Cannot read valid session header from ${sessionFile}`,
+            "invalid_session_file",
+          );
+        }
+        const targetSessionId = header.id;
+        const leaseCheck = await inspectNativeSessionLease(targetSessionId, undefined, effectiveEnv);
+        if (leaseCheck.error) {
+          throw new WebRpcError(
+            `Cannot safely inspect native session ownership lease: ${leaseCheck.error}`,
+            "session_lease_inspect_failed",
+          );
+        }
+        if (leaseCheck.active) {
+          throw new WebRpcError(
+            "Session is actively owned by another native process without desktop attach. Stop the original process or enable desktop attach before resuming.",
+            "session_owner_active",
+          );
+        }
+      }
     // The wrapper needs the process and the process's onExit needs the wrapper;
     // the holder breaks that cycle (onExit only fires once the child dies).
     const holder: { wrapper?: AgentSessionWrapper } = {};
@@ -2473,6 +2543,14 @@ export async function startRpcSession(
       throw error;
     }
     const realSessionId = created.sessionId;
+    // Transfer reservation release to wrapper disposal so the reservation stays held
+    // while the child process is alive (preventing another Web process from resuming
+    // the idle child before native OMP lazily claims the session on first write).
+    if (reservationRelease) {
+      const boundRelease = reservationRelease;
+      reservationRelease = undefined;
+      created.onDestroy(() => { void boundRelease(); });
+    }
     created.onDestroy(() => {
       // Drop every key (current id, original id, moved-from aliases).
       for (const [key, wrapper] of registry) if (wrapper === created) registry.delete(key);
@@ -2486,8 +2564,17 @@ export async function startRpcSession(
     clearExitedRpcSession(sessionId);
     if (realSessionId !== sessionId) clearExitedRpcSession(realSessionId);
     return { session: created, realSessionId };
-  })().finally(() => locks.delete(sessionId));
+  } finally {
+    if (reservationRelease) {
+      await reservationRelease();
+    }
+  }
+})().finally(() => {
+  locks.delete(lockKey);
+  if (canonicalFileKey) locks.delete(sessionId);
+});
 
-  locks.set(sessionId, starting);
+  locks.set(lockKey, starting);
+  if (canonicalFileKey && sessionId !== lockKey) locks.set(sessionId, starting);
   return starting;
 }
