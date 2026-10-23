@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useLayoutEffect, useRef, type RefObject } from "react";
+import { matchesShortcut } from "@/lib/keyboard-shortcuts";
 
 interface DictationShortcutOptions {
   rootRef: RefObject<HTMLElement | null>;
@@ -23,7 +24,7 @@ export function useDictationShortcut(options: DictationShortcutOptions) {
       const root = rootRef.current;
       if (!root || !root.isConnected || !visible(root) || root.closest("[inert], [hidden]")) return false;
       if (document.hidden || event.defaultPrevented || event.isComposing || event.keyCode === 229
-        || isComposingRef.current || event.ctrlKey || event.metaKey || event.shiftKey
+        || isComposingRef.current
         || event.getModifierState("AltGraph")) return false;
       if (Array.from(document.querySelectorAll('[role="dialog"]:not(.toast-card), [role="alertdialog"], [role="menu"], [role="listbox"], dialog[open]')).some(visible)) return false;
       for (const target of [event.target, document.activeElement]) {
@@ -34,8 +35,17 @@ export function useDictationShortcut(options: DictationShortcutOptions) {
       return true;
     };
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Alt" || !eligible(event)) { reset(); return; }
+      if (!eligible(event)) { reset(); return; }
       if (event.repeat) return;
+      if (event.key !== "Alt") {
+        reset();
+        if (matchesShortcut("toggleDictation", event)) {
+          event.preventDefault();
+          latest.current.onToggle();
+        }
+        return;
+      }
+      if (!matchesShortcut("toggleDictation", event)) { reset(); return; }
       // Wait for release: Alt+Tab, Alt+letter and two-Alt chords are not dictation.
       candidate = candidate === null ? event.code || "Alt" : null;
     };
@@ -44,7 +54,7 @@ export function useDictationShortcut(options: DictationShortcutOptions) {
       if (event.key !== "Alt") reset();
     };
     const onKeyUp = (event: KeyboardEvent) => {
-      const activate = event.key === "Alt" && candidate === (event.code || "Alt") && eligible(event);
+      const activate = event.key === "Alt" && candidate === (event.code || "Alt") && eligible(event) && matchesShortcut("toggleDictation", event);
       reset();
       if (!activate) return;
       event.preventDefault();

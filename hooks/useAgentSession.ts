@@ -1,5 +1,6 @@
 "use client";
 
+import { setDraft } from "@/lib/draft-store";
 import { useState, useCallback, useRef, useEffect, useMemo, useReducer } from "react";
 import type {
   AgentMessage,
@@ -28,6 +29,7 @@ import { validateOutgoingPrompt } from "@/lib/image-attachments";
 import { createActiveGoal, parseActiveGoal, type ActiveGoal, type ActivePlan } from "@/lib/web-mode-state";
 import type { HostToolDefinition, HostUriSchemeDefinition, RpcAskDialogAnswer, RpcAvailableSlashCommand, SessionStatsInfo, TodoPhase } from "@/lib/pi-types";
 import { isRecord } from "@/lib/type-guards";
+import type { AccountPins } from "@/lib/account-choices";
 import { subscribeSessionsChanged } from "@/lib/session-change-bus";
 import { createSessionCatchUp, type SessionCatchUp, type SessionLiveFields } from "./useAgentSession-sync";
 import type { SessionLiveSnapshot } from "@/lib/session-sync";
@@ -312,6 +314,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // Advisor is a per-chat toggle (composer Sparkles + /advisor command), not a
   // global setting: each session remembers its own choice in localStorage.
   const [advisorEnabled, setAdvisorEnabled] = useState(false);
+  // Account choice for a chat with no session yet; sent with ensure_session
+  // (lib/account-routing.ts). Live sessions store theirs server-side.
+  const [pendingAccountPins, setPendingAccountPins] = useState<AccountPins>({});
   const activeSubagentCount = subagents.filter((subagent) => subagent.source !== "history" && subagent.status === "started").length;
 
   const eventSourceRef = useRef<EventSource | null>(null);
@@ -459,14 +464,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // stays at the bottom (below the file entry) — it only fills the gap while
   // a brand-new session has no file data yet, and a failed new-session
   // set_model must not mask omp's actual resolved model.
+  const sessionModel = data?.context.model;
   const displayModel = useMemo(
     () =>
       isNew
         ? (newSessionModel ?? newSessionDefaultModel)
         : (currentModelOverride ?? (liveModelMeta
             ? { provider: liveModelMeta.provider, modelId: liveModelMeta.modelId }
-            : data?.context.model ?? pendingModel)),
-    [isNew, newSessionModel, newSessionDefaultModel, currentModelOverride, liveModelMeta, data?.context.model, pendingModel],
+            : sessionModel ?? pendingModel)),
+    [isNew, newSessionModel, newSessionDefaultModel, currentModelOverride, liveModelMeta, sessionModel, pendingModel],
   );
 
   const sessionStats = useMemo(() => {
@@ -528,15 +534,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   // First phase that still has unfinished work; null once everything is done
   // (or no todo list exists), which hides the status-line suffix.
   const currentTodoPhase = useMemo(() => {
-    for (let index = 0; index < todoPhases.length; index++) {
-      const phase = todoPhases[index];
-      const tasks = Array.isArray(phase?.tasks) ? phase.tasks : [];
-      const done = tasks.filter((task) => task.status === "completed").length;
-      if (tasks.some((task) => task.status === "pending" || task.status === "in_progress")) {
-        return { name: phase.name, index: index + 1, phaseCount: todoPhases.length, done, total: tasks.length };
-      }
-    }
-    return null;
+    const index = todoPhases.findIndex((phase) => Array.isArray(phase?.tasks)
+      && phase.tasks.some((task) => task.status === "pending" || task.status === "in_progress"));
+    if (index < 0) return null;
+    const phase = todoPhases[index];
+    const done = phase.tasks.reduce((count, task) => count + Number(task.status === "completed"), 0);
+    return { name: phase.name, index: index + 1, phaseCount: todoPhases.length, done, total: phase.tasks.length };
   }, [todoPhases]);
   // Load the per-session advisor choice on session switch; brand-new chats
   // start disabled until the user toggles the composer icon.
@@ -908,6 +911,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           ...(selectedModel ? { provider: selectedModel.provider, modelId: selectedModel.modelId } : {}),
           ...(thinkingLevel !== "auto" ? { thinkingLevel } : {}),
           ...(advisorEnabled ? { advisor: true } : {}),
+          ...(Object.keys(pendingAccountPins).length > 0 ? { accountPins: pendingAccountPins } : {}),
         }),
       });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -933,7 +937,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       ensuringNewSessionRef.current = null;
     }
-  }, [advisorEnabled, isNew, newSessionCwd, newSessionModel, newSessionDefaultModel, toolPreset, thinkingLevel]);
+  }, [advisorEnabled, isNew, newSessionCwd, newSessionModel, newSessionDefaultModel, toolPreset, thinkingLevel, pendingAccountPins]);
 
   // The system panel may initialize a dormant session, but must not create a
   // prompt or model run just to inspect the resolved system prompt.
@@ -1715,19 +1719,41 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     });
   }, []);
 
-  /** Promote the first queued follow-up to a steering message (client-side
-   *  relabel; the delivery order itself is owned by omp). */
-  const promoteQueuedToSteer = useCallback((text: string) => {
-    if (!text) return;
-    setQueuedMessages((prev) => {
-      const fi = prev.followUp.indexOf(text);
-      if (fi === -1) return prev;
-      return {
-        steering: [...prev.steering, text],
-        followUp: prev.followUp.filter((_, i) => i !== fi),
-      };
-    });
-  }, []);
+  /** Turn a queued follow-up into a steer: pull it out of omp's follow-up
+   *  queue (`remove_queued_message`) and resend it as `steer`, so it lands at
+   *  the next turn boundary instead of after the whole run. Relabelling only
+   *  the mirror would leave omp delivering it as a follow-up. The mirror keeps
+   *  text only, so attachments on the original message are not carried over. */
+  const promoteQueuedToSteer = useCallback(async (text: string) => {
+    const sid = sessionIdRef.current;
+    if (!text || !sid) return;
+    try {
+      const result = await sendAgentCommand<{ removed?: boolean }>(sid, { type: "remove_queued_message", message: text, queue: "followUp" });
+      // Not found: omp already delivered it (or it is gone); delivery clears the mirror.
+      if (!result?.removed) return;
+    } catch (e) {
+      addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
+      return;
+    }
+    queueMutatedAtRef.current = Date.now();
+    try {
+      await sendAgentCommand(sid, { type: "steer", message: text });
+      setQueuedMessages((prev) => {
+        const fi = prev.followUp.indexOf(text);
+        return {
+          steering: [...prev.steering, text],
+          followUp: fi === -1 ? prev.followUp : prev.followUp.filter((_, i) => i !== fi),
+        };
+      });
+    } catch (e) {
+      // The follow-up is already out of omp's queue: put it back rather than lose it.
+      addNotice({ type: "error", message: e instanceof Error ? e.message : String(e) });
+      await sendAgentCommand(sid, { type: "follow_up", message: text }).catch(() => {
+        setQueuedMessages((prev) => ({ ...prev, followUp: prev.followUp.filter((item) => item !== text) }));
+        opts.chatInputRef?.current?.insertIfEmpty(text);
+      });
+    }
+  }, [addNotice, opts.chatInputRef]);
 
   // Mirror queued texts into sessionStorage so a reload can restore them.
   // The dirty gate keeps the initial empty state from wiping a stored queue
@@ -2648,7 +2674,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, []);
 
-  const handleFork = useCallback(async (entryId: string) => {
+  /** omp `branch` at a user message: a new session holding the history before
+   * that message, which this live process switches onto. `draft` pre-fills the
+   * new session's composer (edit-and-resend). */
+  const forkAt = useCallback(async (entryId: string, draft?: string) => {
     if (bashRunningRef.current || agentRunningRef.current) return;
     const sid = sessionIdRef.current;
     if (!sid) return;
@@ -2671,6 +2700,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             // In-memory registry still applies for this page load.
           }
         }
+        // The composer loads its draft by session id when it switches over.
+        if (draft) setDraft(newSessionId, { value: draft, images: [], files: [] });
         onSessionForked?.(newSessionId);
       }
     } catch (e) {
@@ -2679,6 +2710,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setForkingEntryId(null);
     }
   }, [advisorEnabled, onSessionForked]);
+
+  const handleFork = useCallback((entryId: string) => forkAt(entryId), [forkAt]);
+
+  /** Edit a sent message: omp's RPC cannot move the leaf inside a session file,
+   * so this branches off before the message (like omp's own /branch) and puts
+   * the text back in the composer of the new session. */
+  const handleEditFromHere = useCallback((entryId: string, content: string) => forkAt(entryId, content), [forkAt]);
 
   // omp's RPC protocol has no navigate-within-tree command, so branch
   const handleNavigate = useCallback(async (entryId: string): Promise<boolean> => {
@@ -2809,7 +2847,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [addNotice]);
 
-  /** Cycle to the next available model (⌘/Ctrl+Alt+M). */
+  /** Cycle to the next available model. */
   const handleCycleModel = useCallback(async () => {
     const sid = sessionIdRef.current;
     if (!sid) return;
@@ -2826,7 +2864,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [addNotice, refreshLiveModelState]);
 
-  /** Cycle to the next thinking level (⌘/Ctrl+Alt+T). */
+  /** Cycle to the next thinking level. */
   const handleCycleThinkingLevel = useCallback(async () => {
     const sid = sessionIdRef.current;
     if (!sid) return;
@@ -2889,10 +2927,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [isCompacting, loadSession, refreshLiveModelState]);
 
+  const modelCwd = newSessionCwd ?? session?.cwd ?? "";
   const loadModels = useCallback(async (signal?: AbortSignal) => {
     setModelsLoading(true);
     try {
-      const modelCwd = newSessionCwd ?? session?.cwd ?? "";
       const modelsUrl = modelCwd ? `/api/models?cwd=${encodeURIComponent(modelCwd)}` : "/api/models";
       const res = await fetch(modelsUrl, { cache: "no-store", ...(signal ? { signal } : {}) });
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -2917,7 +2955,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     } finally {
       setModelsLoading(false);
     }
-  }, [isNew, newSessionCwd, session?.cwd]);
+  }, [isNew, modelCwd]);
 
   const handleBuiltinSlashCommand = useCallback(async (text: string): Promise<BuiltinSlashCommandResult> => {
     if (!text.startsWith("/")) return { handled: false };
@@ -3462,6 +3500,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     slashCommands, slashCommandsLoading, queuedMessages,
     notices: noticeState.visible, dismissNotice, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
     advisorActive: advisorActiveAt > 0, advisorEnabled, handleAdvisorChange,
+    pendingAccountPins, setPendingAccountPins,
     subagents, subagentEvents, subagentTranscriptVersions, activeSubagentCount, currentTodoPhase, todoPhases,
     activeGoal, activePlan,
     isNew,
@@ -3469,7 +3508,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     sessionIdRef, messagesEndRef, scrollContainerRef,
     pendingScrollToUserRef, initialScrollDoneRef,
     // Actions
-    handleSend, handleAbort, handleFork, handleNavigate, handleModelChange, handleFastModeChange, handleAutoRetryChange, handleInterruptModeChange, handleAutoCompactionChange, handleSteeringModeChange, handleFollowUpModeChange, handleCycleModel, handleCycleThinkingLevel, handleAbortRetry, handleInterruptAndReply,
+    handleSend, handleAbort, handleFork, handleEditFromHere, handleNavigate, handleModelChange, handleFastModeChange, handleAutoRetryChange, handleInterruptModeChange, handleAutoCompactionChange, handleSteeringModeChange, handleFollowUpModeChange, handleCycleModel, handleCycleThinkingLevel, handleAbortRetry, handleInterruptAndReply,
     retrySession: () => { const sid = sessionIdRef.current; if (sid) void loadSession(sid, true, true); },
     handleCompact, handleHandoff, handleSteer, handleFollowUp, handlePromptWithStreamingBehavior, handleAbortCompaction,
     handleBuiltinSlashCommand, togglePreCompactionHistory,

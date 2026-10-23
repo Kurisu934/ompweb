@@ -1,15 +1,16 @@
 "use client";
 
 import { useEffect } from "react";
+import { matchesShortcut } from "@/lib/keyboard-shortcuts";
 
 // ---------------------------------------------------------------------------
 // Module-level registry — ChatWindow registers the abort handler here so that
-// the global Esc listener in AppShell can call it without prop-drilling.
+// the global stop shortcut in AppShell can call it without prop-drilling.
 // ---------------------------------------------------------------------------
 let globalAbortHandler: (() => void) | null = null;
 
 /**
- * Register (or clear) the abort handler for the global Esc shortcut.
+ * Register (or clear) the abort handler for the configured stop shortcut.
  * Call this from ChatWindow whenever agentRunning or handleAbort changes.
  */
 export function registerAbortHandler(handler: (() => void) | null): void {
@@ -21,7 +22,7 @@ export function registerAbortHandler(handler: (() => void) | null): void {
 // ---------------------------------------------------------------------------
 
 interface UseGlobalKeyboardShortcutsOptions {
-  /** Called when Ctrl+Alt+N is pressed. Receives current cwd. */
+  /** Called by the new-session shortcut. Receives current cwd. */
   onNewSession?: (cwd: string) => void;
   /** The currently selected project directory (sidebar cwd). */
   activeCwd?: string | null;
@@ -32,15 +33,8 @@ interface UseGlobalKeyboardShortcutsOptions {
 /**
  * Register global keyboard shortcuts for the application.
  *
- * Shortcuts handled here:
- *   Esc          – stop the running agent (via module-level abort handler)
- *   Ctrl+Alt+N   – create a new session in the active project directory
- *   Ctrl/Cmd+A   – select the active message, transcript, or file contents
- *
- * Note: Esc inside <textarea> or <input> is deliberately NOT handled here.
- * ChatInput manages its own Esc logic (closing slash / @ file menus, stopping
- * the agent when no menu is open) because it needs intimate knowledge of menu
- * state that is local to that component.
+ * Uses the shared configurable bindings. Inputs own their context-specific
+ * actions; dialogs, menus and terminals must never abort the agent behind them.
  */
 export function useGlobalKeyboardShortcuts(
   options: UseGlobalKeyboardShortcutsOptions,
@@ -145,8 +139,7 @@ export function useGlobalKeyboardShortcuts(
     const onCompositionStart = () => { composing = true; };
     const onCompositionEnd = () => { composing = false; };
     const selectAll = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || event.isComposing || event.keyCode === 229 || event.key.toLowerCase() !== "a"
-        || (!event.ctrlKey && !event.metaKey) || event.altKey || event.shiftKey) return;
+      if (!matchesShortcut("selectAll", event)) return;
 
       const target = event.target;
       if (target instanceof Element && (
@@ -200,21 +193,19 @@ export function useGlobalKeyboardShortcuts(
 
   useEffect(() => {
     const handler = (e: KeyboardEvent): void => {
-      // ---- Esc: stop agent ----
-      if (e.key === "Escape") {
+      if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
+      const target = e.target instanceof Element ? e.target : null;
+      if (target?.closest('[role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"], .settings-view, [data-native-context-menu]')) return;
+      if (matchesShortcut("abort", e)) {
         if (!globalAbortHandler) return;
-
-        const tag = (e.target as HTMLElement)?.tagName;
-        // Let textarea/input handle Esc internally (ChatInput menus / stop).
-        if (tag === "TEXTAREA" || tag === "INPUT") return;
+        if (target?.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) return;
 
         e.preventDefault();
         globalAbortHandler();
         return;
       }
 
-      // ---- Ctrl+Alt+N: new session ----
-      if (e.key === "n" && e.ctrlKey && e.altKey) {
+      if (matchesShortcut("newSession", e)) {
         if (!activeCwd || !onNewSession) return;
         e.preventDefault();
         onNewSession(activeCwd);

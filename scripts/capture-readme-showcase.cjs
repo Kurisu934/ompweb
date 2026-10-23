@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-require-imports -- Node-only documentation capture. */
 const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
@@ -135,7 +134,8 @@ async function capture(page, name) {
     await page.getByRole('textbox').filter({ visible: true }).first().waitFor();
     await page.waitForFunction(() => [...document.querySelectorAll('textarea')].some(el => el.value === 'A synthetic transcription for the public demo.'));
     await page.locator('.sidebar-settings-row').click();
-    await page.locator('#settings-tab-wallpapers').click();
+    await page.locator('#settings-tab-appearance').click();
+    await page.locator('#appearance-tab-wallpapers').click();
     await page.locator('.wallpaper-thumbnail img').waitFor();
     await page.waitForTimeout(800);
     await capture(page, 'wallpaper-settings.png');

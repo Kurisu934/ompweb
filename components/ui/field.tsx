@@ -5,9 +5,8 @@
  *
  * Tokens come from app/globals.css (--bg, --bg-panel, --border, --accent,
  * --accent-strong, --accent-hover, --text, --text-muted, --text-dim,
- * --radius-control, --radius-card, --shadow-card, --shadow-pop). No global
- * CSS edits — focus glow + invalid state are implemented inline via React
- * state on focus / blur so we don't need to touch globals.css.
+ * --radius-control, --radius-card, --shadow-card, --shadow-pop). Dropdowns
+ * share Base UI's keyboard/focus behavior and the app's glass popup surface.
  */
 import {
   cloneElement,
@@ -16,13 +15,17 @@ import {
   useEffect,
   useId,
   useRef,
+  useMemo,
   useState,
   type CSSProperties,
+  type ComponentPropsWithoutRef,
   type KeyboardEventHandler,
   type ReactElement,
   type ReactNode,
 } from "react";
-import { AlertCircle, Check as CheckIcon, Eye, EyeOff, Info, TriangleAlert, X } from "lucide-react";
+import { Select as BaseSelect } from "@base-ui/react/select";
+import { Autocomplete as BaseAutocomplete } from "@base-ui/react/autocomplete";
+import { AlertCircle, Check as CheckIcon, ChevronDown, Eye, EyeOff, Info, TriangleAlert, X } from "lucide-react";
 import { Dialog, DialogContent, DialogTitle } from "@/components/ui/primitives";
 
 /* ────────────────────────── Field wrapper ────────────────────────── */
@@ -450,73 +453,110 @@ export function SecretInput({
 
 /* ─── Select ─── */
 
-interface SelectProps {
-  value: string;
-  onChange: (v: string) => void;
-  options: readonly string[];
+interface SelectOption {
+  value: string | number;
+  label: ReactNode;
+  disabled?: boolean;
+  title?: string;
+}
+
+interface SelectProps extends Omit<ComponentPropsWithoutRef<"button">, "value" | "onChange" | "children"> {
+  value: string | number;
+  onChange: (value: string) => void;
+  options: readonly (string | SelectOption)[];
   required?: boolean;
   placeholder?: string;
   invalid?: boolean;
   error?: string | null;
-  disabled?: boolean;
-  id?: string;
 }
 
 export function Select({
-  value,
-  onChange,
-  options,
-  required,
-  placeholder,
-  invalid,
-  error,
-  disabled,
-  id,
+  value, onChange, options, required, placeholder, invalid, error,
+  disabled, id, name, form, className, style, ...triggerProps
 }: SelectProps) {
-  const [focused, setFocused] = useState(false);
-  const isInvalid = Boolean(invalid || error);
+  const items = useMemo(() => {
+    const entries: (SelectOption & { value: string })[] = options.map((option) => typeof option === "string"
+      ? { value: option, label: option }
+      : { ...option, value: String(option.value) });
+    return !required && placeholder !== undefined
+      ? [{ value: "", label: placeholder }, ...entries]
+      : entries;
+  }, [options, required, placeholder]);
   return (
-    <div style={{ position: "relative", display: "flex", alignItems: "center" }}>
-    <select
-      id={id}
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
+    <BaseSelect.Root
+      value={String(value)}
+      onValueChange={(next) => { if (next !== null) onChange(next); }}
+      onOpenChange={(open, details) => {
+        if (!open && details.reason === "escape-key") {
+          details.event.preventDefault();
+          details.event.stopPropagation();
+        }
+      }}
+      items={items}
       disabled={disabled}
-      aria-invalid={isInvalid || undefined}
-      onFocus={() => setFocused(true)}
-      onBlur={() => setFocused(false)}
-      style={{
-        ...inputShellStyle({ invalid: isInvalid }),
-        ...focusGlowStyle(focused, isInvalid),
-        color: value ? "var(--text)" : "var(--text-dim)",
-        appearance: "none",
-        width: "100%",
-        paddingRight: 24,
-        opacity: disabled ? 0.6 : 1,
+      required={required}
+      name={name}
+      form={form}
+    >
+      <BaseSelect.Trigger
+        {...triggerProps}
+        id={id}
+        className={`form-select wallpaper-inset${className ? ` ${className}` : ""}`}
+        style={style}
+        aria-invalid={invalid || error ? true : triggerProps["aria-invalid"]}
+      >
+        <BaseSelect.Value className="form-select-value" />
+        <BaseSelect.Icon className="form-select-icon">
+          <ChevronDown size={14} aria-hidden="true" />
+        </BaseSelect.Icon>
+      </BaseSelect.Trigger>
+      <BaseSelect.Portal>
+        <BaseSelect.Positioner className="form-select-positioner" align="start" sideOffset={4} alignItemWithTrigger={false}>
+          <BaseSelect.Popup className="form-select-popup dropdown-surface">
+            <BaseSelect.List className="form-select-list">
+              {items.map((item) => (
+                <BaseSelect.Item key={item.value} value={item.value} disabled={item.disabled} title={item.title} className="form-select-option">
+                  <BaseSelect.ItemIndicator className="form-select-check"><CheckIcon size={14} aria-hidden="true" /></BaseSelect.ItemIndicator>
+                  <BaseSelect.ItemText>{item.label}</BaseSelect.ItemText>
+                </BaseSelect.Item>
+              ))}
+            </BaseSelect.List>
+          </BaseSelect.Popup>
+        </BaseSelect.Positioner>
+      </BaseSelect.Portal>
+    </BaseSelect.Root>
+  );
+}
+
+/** Free-form input with themed suggestions; values outside the list remain valid. */
+export function Autocomplete({
+  value, onChange, options, className, ...inputProps
+}: Omit<ComponentPropsWithoutRef<"input">, "value" | "onChange" | "list"> & {
+  value: string;
+  onChange: (value: string) => void;
+  options: readonly string[];
+}) {
+  return (
+    <BaseAutocomplete.Root
+      items={options} value={value} onValueChange={onChange} openOnInputClick
+      onOpenChange={(open, details) => {
+        if (!open && details.reason === "escape-key") {
+          details.event.preventDefault();
+          details.event.stopPropagation();
+        }
       }}
     >
-      {!required && <option value="">{placeholder ?? ""}</option>}
-      {options.map((o) => (
-        <option key={o} value={o}>
-          {o}
-        </option>
-      ))}
-    </select>
-    <svg
-      width="10"
-      height="10"
-      viewBox="0 0 24 24"
-      fill="none"
-      stroke="currentColor"
-      strokeWidth="2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-      aria-hidden="true"
-      style={{ position: "absolute", right: 8, color: "var(--text-dim)", pointerEvents: "none" }}
-    >
-      <polyline points="6 9 12 15 18 9" />
-    </svg>
-    </div>
+      <BaseAutocomplete.Input {...inputProps} className={`form-select wallpaper-inset${className ? ` ${className}` : ""}`} />
+      <BaseAutocomplete.Portal>
+        <BaseAutocomplete.Positioner className="form-select-positioner" align="start" sideOffset={4}>
+          <BaseAutocomplete.Popup className="form-select-popup dropdown-surface">
+            <BaseAutocomplete.List className="form-select-list">
+              {(item: string) => <BaseAutocomplete.Item key={item} value={item} className="form-select-option">{item}</BaseAutocomplete.Item>}
+            </BaseAutocomplete.List>
+          </BaseAutocomplete.Popup>
+        </BaseAutocomplete.Positioner>
+      </BaseAutocomplete.Portal>
+    </BaseAutocomplete.Root>
   );
 }
 

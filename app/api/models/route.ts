@@ -54,10 +54,14 @@ function thinkingLevelsFor(model: OmpModel): string[] {
   return ["off", ...(model.thinking?.efforts ?? [])];
 }
 
-// OMP's /fast maps to a priority service tier. These are the provider families
-// OMP currently resolves for that control (ModelControls.setFastMode).
+// OMP's /fast maps to the "priority" service tier. Mirrors omp's rule: a model
+// that lists its own serviceTiers decides; otherwise the provider families omp
+// sends priority to (openai-codex is the ChatGPT subscription login).
+const FAST_MODE_PROVIDERS: Record<string, true> = { anthropic: true, openai: true, "openai-codex": true, google: true, "google-vertex": true };
+
 function supportsFastMode(model: OmpModel): boolean {
-  return model.provider === "anthropic" || model.provider === "openai" || model.provider === "google";
+  if (Array.isArray(model.serviceTiers) && model.serviceTiers.length > 0) return model.serviceTiers.includes("priority");
+  return FAST_MODE_PROVIDERS[model.provider] === true;
 }
 
 async function loadModels(): Promise<ModelsData> {

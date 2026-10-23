@@ -2,14 +2,19 @@
 
 import { memo, useCallback, useRef, useState, type Dispatch, type ReactNode, type RefObject, type SetStateAction } from "react";
 import type { AgentMessage, ExitedRpcSession, ManagedProject, ProjectLaunchConfig, SessionInfo } from "@/lib/types";
+import type { ProjectDropTarget } from "@/lib/project-ordering";
 import { formatExitedSessionNotice, useI18n } from "@/lib/i18n";
 import { comparableProjectPath } from "@/lib/comparable-path";
-import { Check, ChevronDown, ChevronRight, Folder, GitBranch, MoreHorizontal, Plus, Trash2 } from "lucide-react";
+import { Archive, ArrowDown, ArrowUp, Check, ChevronDown, ChevronRight, Copy, ExternalLink, FileText, Folder, GitBranch, Hash, MessageSquare, MessageSquarePlus, MoreHorizontal, Pencil, Pin, PinOff, Plus, SlidersHorizontal, SquareTerminal, Trash2 } from "lucide-react";
 import { Tooltip } from "./ui/primitives";
 import { ConfirmDialog } from "./ui/field";
 import { copyText } from "@/lib/clipboard";
 import { transcriptToMarkdown } from "@/lib/transcript";
 import { toast } from "./ui/toast";
+import { contributeContextMenu } from "@/lib/context-menu";
+import { copyFromContextMenu } from "./ui/context-menu";
+import { requestTerminalAt } from "@/lib/terminal-request";
+import { matchesShortcut } from "@/lib/keyboard-shortcuts";
 import {
   MAX_PROJECT_SESSIONS,
   displayCwd,
@@ -54,10 +59,20 @@ interface ProjectRowProps {
   onRemoveProject: (path: string) => void;
   onEditLaunchConfig: (project: ManagedProject) => void;
   onUpdatePresentation: (path: string, updates: { alias?: string | null; sortOrder?: number | null; launchConfig?: ProjectLaunchConfig | null }) => void;
-  onDragPathChange: (path: string | null) => void;
-  onDropProject: (path: string) => void;
+  onTogglePinned: (path: string) => void;
+  /** A project drag is in progress somewhere in the list. */
+  dragActive: boolean;
+  /** This row is the one being dragged. */
+  isDragSource: boolean;
+  /** Insertion line shown while another project is dragged over this row. */
+  dropPosition: "before" | "after" | null;
+  onDragStartProject: (path: string) => void;
+  onDragEndProject: () => void;
+  onDragOverProject: (path: string, position: "before" | "after" | null) => void;
+  onDropProject: (target: ProjectDropTarget) => void;
   onMoveProject: (path: string, delta: -1 | 1) => void;
-  isDragTarget: boolean;
+  canMoveUp: boolean;
+  canMoveDown: boolean;
   removeBusy: boolean;
   onSelectSession: (s: SessionInfo) => void;
   onRenamed?: () => void;
@@ -92,10 +107,17 @@ function ProjectRow({
   onRemoveProject,
   onEditLaunchConfig,
   onUpdatePresentation,
-  onDragPathChange,
+  onTogglePinned,
+  dragActive,
+  isDragSource,
+  dropPosition,
+  onDragStartProject,
+  onDragEndProject,
+  onDragOverProject,
   onDropProject,
   onMoveProject,
-  isDragTarget,
+  canMoveUp,
+  canMoveDown,
   removeBusy,
   onSelectSession,
   onRenamed,
@@ -141,7 +163,37 @@ function ProjectRow({
     : tree;
 
   return (
-    <section className="sidebar-project" data-active={isActive ? "true" : "false"} style={{ marginBottom: 12 }}>
+    <section
+      className="sidebar-project"
+      data-active={isActive ? "true" : "false"}
+      // The whole block (header + its sessions) is the drop target: pointer
+      // above the header's midpoint inserts before, anywhere lower after.
+      onDragOver={(event) => {
+        if (!dragActive) return;
+        if (isDragSource) {
+          onDragOverProject(project.path, null);
+          return;
+        }
+        event.preventDefault();
+        event.dataTransfer.dropEffect = "move";
+        const header = event.currentTarget.querySelector<HTMLElement>(".sidebar-project-header");
+        const rect = (header ?? event.currentTarget).getBoundingClientRect();
+        onDragOverProject(project.path, event.clientY < rect.top + rect.height / 2 ? "before" : "after");
+      }}
+      onDrop={(event) => {
+        if (!dragActive || isDragSource || !dropPosition) return;
+        event.preventDefault();
+        onDropProject({ path: project.path, position: dropPosition });
+      }}
+      style={{ position: "relative", marginBottom: 12, opacity: isDragSource ? 0.45 : 1, transition: "opacity var(--dur-fast) var(--ease-out-warm)" }}
+    >
+      {dropPosition && (
+        <div
+          aria-hidden="true"
+          className="sidebar-project-drop-line"
+          style={{ position: "absolute", left: 4, right: 4, height: 2, borderRadius: 1, background: "var(--accent)", pointerEvents: "none", zIndex: 1, ...(dropPosition === "before" ? { top: -5 } : { bottom: -7 }) }}
+        />
+      )}
       <ConfirmDialog
         open={confirmRemove}
         onOpenChange={setConfirmRemove}
@@ -160,10 +212,26 @@ function ProjectRow({
       <div
         className="sidebar-project-header"
         draggable={!aliasEditing}
-        onDragStart={(event) => { event.dataTransfer.setData("text/plain", project.path); event.dataTransfer.effectAllowed = "move"; onDragPathChange(project.path); }}
-        onDragOver={(event) => { if (isDragTarget) { event.preventDefault(); event.dataTransfer.dropEffect = "move"; } }}
-        onDrop={(event) => { event.preventDefault(); onDropProject(project.path); }}
-        onDragEnd={() => onDragPathChange(null)}
+        onDragStart={(event) => { event.dataTransfer.setData("text/plain", project.path); event.dataTransfer.effectAllowed = "move"; onDragStartProject(project.path); }}
+        onDragEnd={onDragEndProject}
+        onContextMenu={(event) => {
+          if (aliasEditing) return;
+          contributeContextMenu(event, {
+            id: "project",
+            title: label,
+            items: [
+              { id: "new-chat", label: t("contextMenu.newChatHere"), icon: MessageSquarePlus, onSelect: () => onActivate(project.path) },
+              { id: "pin", label: project.pinned ? t("contextMenu.unpin") : t("contextMenu.pin"), icon: project.pinned ? PinOff : Pin, onSelect: () => onTogglePinned(project.path) },
+              { id: "rename", label: t("contextMenu.renameWorkspace"), icon: Pencil, onSelect: startAliasEdit },
+              { id: "launch-config", label: t("contextMenu.launchConfig"), icon: SlidersHorizontal, onSelect: () => onEditLaunchConfig(project) },
+              { id: "copy-path", label: t("contextMenu.copyPath"), icon: Copy, onSelect: () => copyFromContextMenu(project.path) },
+              { id: "terminal", label: t("contextMenu.openInTerminal"), icon: SquareTerminal, onSelect: () => requestTerminalAt(project.path) },
+              { id: "move-up", label: t("contextMenu.moveUp"), icon: ArrowUp, disabled: !canMoveUp, onSelect: () => void onMoveProject(project.path, -1) },
+              { id: "move-down", label: t("contextMenu.moveDown"), icon: ArrowDown, disabled: !canMoveDown, onSelect: () => void onMoveProject(project.path, 1) },
+              { id: "remove", label: t("contextMenu.removeWorkspace"), icon: Trash2, danger: true, disabled: removeBusy, onSelect: () => setConfirmRemove(true) },
+            ],
+          });
+        }}
         onMouseEnter={() => setHovered(true)}
         onMouseLeave={() => setHovered(false)}
         onKeyDown={(event) => {
@@ -184,7 +252,6 @@ function ProjectRow({
             ? (hovered ? "var(--bg-hover)" : "var(--bg-subtle)")
             : (hovered ? "var(--bg-hover)" : "transparent"),
           transition: SIDEBAR_BUTTON_TRANSITION,
-          ...(isDragTarget ? { outline: "1px solid var(--accent)", outlineOffset: -1 } : {}),
         }}
       >
         {aliasEditing ? (
@@ -365,16 +432,20 @@ function ProjectRow({
             placement="below"
             minWidth={136}
           >
+            <button type="button" role="menuitem" className="sidebar-menu-item" onClick={() => { setActionMenuOpen(false); onTogglePinned(project.path); }} style={{ display: "flex", alignItems: "center", gap: 6, width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>
+              {project.pinned ? <PinOff size={12} strokeWidth={2} aria-hidden="true" /> : <Pin size={12} strokeWidth={2} aria-hidden="true" />}
+              {project.pinned ? t("projects.unpin") : t("projects.pin")}
+            </button>
             <button type="button" role="menuitem" className="sidebar-menu-item" onClick={() => { startAliasEdit(); setActionMenuOpen(false); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>
               {project.alias ? t("projects.editAlias") : t("projects.nameAlias")}
             </button>
             <button type="button" role="menuitem" className="sidebar-menu-item" onClick={() => { onEditLaunchConfig(project); setActionMenuOpen(false); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>
               {project.launchConfig ? t("sessionSidebar.editLaunchConfig") : t("sessionSidebar.configureLaunchConfig")}
             </button>
-            <button type="button" role="menuitem" className="sidebar-menu-item" onClick={() => { setActionMenuOpen(false); void onMoveProject(project.path, -1); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>
+            <button type="button" role="menuitem" className="sidebar-menu-item" disabled={!canMoveUp} onClick={() => { setActionMenuOpen(false); void onMoveProject(project.path, -1); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text)", cursor: canMoveUp ? "pointer" : "default", opacity: canMoveUp ? 1 : 0.45, textAlign: "left", fontSize: 11 }}>
               {t("projects.moveUp")}
             </button>
-            <button type="button" role="menuitem" className="sidebar-menu-item" onClick={() => { setActionMenuOpen(false); void onMoveProject(project.path, 1); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>
+            <button type="button" role="menuitem" className="sidebar-menu-item" disabled={!canMoveDown} onClick={() => { setActionMenuOpen(false); void onMoveProject(project.path, 1); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text)", cursor: canMoveDown ? "pointer" : "default", opacity: canMoveDown ? 1 : 0.45, textAlign: "left", fontSize: 11 }}>
               {t("projects.moveDown")}
             </button>
             <button type="button" role="menuitem" className="sidebar-menu-item" disabled={removeBusy} onClick={() => { setActionMenuOpen(false); setConfirmRemove(true); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--status-error)", cursor: removeBusy ? "default" : "pointer", textAlign: "left", fontSize: 11 }}>
@@ -890,8 +961,7 @@ const SessionItem = memo(function SessionItem({
     ? "color-mix(in srgb, var(--bg-selected) 70%, transparent)"
     : hovered ? "var(--bg-hover)" : "transparent";
 
-  const startRename = useCallback((event: React.MouseEvent) => {
-    event.stopPropagation();
+  const startRename = useCallback(() => {
     setRenameValue(session.name ?? "");
     setRenaming(true);
     setTimeout(() => inputRef.current?.select(), 0);
@@ -972,6 +1042,22 @@ const SessionItem = memo(function SessionItem({
     <div
       className="session-item-row"
  onClick={confirmDelete || renaming ? undefined : onClick}
+      onContextMenu={(event) => {
+        if (renaming) return;
+        contributeContextMenu(event, {
+          id: "session",
+          title,
+          items: [
+            { id: "open", label: t("contextMenu.open"), icon: MessageSquare, onSelect: onClick },
+            { id: "open-new-tab", label: t("contextMenu.openInNewTab"), icon: ExternalLink, onSelect: () => window.open(`?session=${encodeURIComponent(session.id)}`, "_blank", "noopener") },
+            { id: "rename", label: t("contextMenu.rename"), icon: Pencil, onSelect: startRename },
+            { id: "copy-transcript", label: t("contextMenu.copyTranscript"), icon: FileText, disabled: copyingTranscript, onSelect: () => void handleCopyTranscript() },
+            { id: "copy-id", label: t("contextMenu.copySessionId"), icon: Hash, onSelect: () => copyFromContextMenu(session.id) },
+            { id: "archive", label: t("contextMenu.archive"), icon: Archive, disabled: hasChildren || deleting, onSelect: () => void handleArchive() },
+            { id: "delete", label: t("contextMenu.delete"), icon: Trash2, danger: true, disabled: deleting, onSelect: () => setConfirmDelete(true) },
+          ],
+        });
+      }}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
       onKeyDown={(event) => {
@@ -1016,7 +1102,7 @@ const SessionItem = memo(function SessionItem({
       ) : (
         <>
           {depth > 0 && <GitBranch size={11} strokeWidth={2} style={{ flexShrink: 0, color: "var(--text-dim)" }} aria-hidden="true" />}
-          <button ref={contentButtonRef} type="button" className="session-item-button" aria-current={isSelected ? "true" : undefined} onKeyDown={(event) => { if (event.key === "Delete" && !deleting) { event.preventDefault(); setConfirmDelete(true); } }} style={{ display: "flex", alignItems: "center", flex: 1, minWidth: 0 }}>
+          <button ref={contentButtonRef} type="button" className="session-item-button" aria-current={isSelected ? "true" : undefined} onKeyDown={(event) => { if (matchesShortcut("deleteSession", event.nativeEvent) && !deleting) { event.preventDefault(); setConfirmDelete(true); } }} style={{ display: "flex", alignItems: "center", flex: 1, minWidth: 0 }}>
             <span title={title} style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text)", fontSize: 12.5, fontWeight: isSelected ? 600 : 500, lineHeight: 1.35, letterSpacing: "-0.005em" }}>
               {title}
             </span>
@@ -1043,7 +1129,7 @@ const SessionItem = memo(function SessionItem({
                 </button>
                 <SidebarPortalMenu anchor={menuButtonRef} open={actionMenuOpen} onClose={() => setActionMenuOpen(false)} placement="below" minWidth={128}>
  <button type="button" role="menuitem" className="sidebar-menu-item" onClick={(event) => { event.stopPropagation(); setActionMenuOpen(false); void handleArchive(); }} disabled={hasChildren} title={hasChildren ? t("sessionSidebar.archiveLeafOnly") : t("sessionSidebar.archive")} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: hasChildren ? "var(--text-dim)" : "var(--text-muted)", cursor: hasChildren ? "not-allowed" : "pointer", textAlign: "left", fontSize: 11, opacity: hasChildren ? 0.55 : 1 }}>{t("sessionSidebar.archive")}</button>
-                  <button type="button" role="menuitem" className="sidebar-menu-item" onClick={(event) => { startRename(event); setActionMenuOpen(false); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text-muted)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>{t("sessionSidebar.rename")}</button>
+                  <button type="button" role="menuitem" className="sidebar-menu-item" onClick={(event) => { event.stopPropagation(); startRename(); setActionMenuOpen(false); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text-muted)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>{t("sessionSidebar.rename")}</button>
                   <button type="button" role="menuitem" className="sidebar-menu-item" onClick={(event) => { event.stopPropagation(); setActionMenuOpen(false); void handleCopyTranscript(); }} disabled={copyingTranscript} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--text-muted)", cursor: copyingTranscript ? "default" : "pointer", textAlign: "left", fontSize: 11, opacity: copyingTranscript ? 0.55 : 1 }}>{t("sessionSidebar.copyTranscript")}</button>
                   <button type="button" role="menuitem" className="sidebar-menu-item" disabled={deleting} onClick={(event) => { event.stopPropagation(); setActionMenuOpen(false); setConfirmDelete(true); }} style={{ display: "block", width: "100%", padding: "6px 9px", border: "none", borderRadius: 6, background: "transparent", color: "var(--status-error)", cursor: "pointer", textAlign: "left", fontSize: 11 }}>{t("sessionSidebar.delete")}</button>
                 </SidebarPortalMenu>
@@ -1067,8 +1153,59 @@ const SessionItem = memo(function SessionItem({
     </>
   );
 });
+
+/** Small caption above a project section (pinned / others). */
+function ProjectSectionLabel({ label, pinned }: { label: string; pinned?: boolean }) {
+  return (
+    <div
+      className="sidebar-project-section-label"
+      style={{ display: "flex", alignItems: "center", gap: 5, padding: "4px 4px 6px", color: "var(--text-dim)", fontSize: 10.5, fontWeight: 600, letterSpacing: "0.04em" }}
+    >
+      {pinned && <Pin size={11} strokeWidth={2} aria-hidden="true" />}
+      <span>{label}</span>
+    </div>
+  );
+}
+
+/** Drop target shown while dragging when the destination section is empty,
+ *  so a project can be pinned (or unpinned) by drag even with no rows there. */
+function ProjectSectionDropZone({ label, pinned, highlighted, onDragOverZone, onDropZone }: {
+  label: string;
+  pinned: boolean;
+  highlighted: boolean;
+  onDragOverZone: () => void;
+  onDropZone: (target: ProjectDropTarget) => void;
+}) {
+  return (
+    <div
+      className="sidebar-project-drop-zone"
+      onDragOver={(event) => { event.preventDefault(); event.dataTransfer.dropEffect = "move"; onDragOverZone(); }}
+      onDrop={(event) => { event.preventDefault(); onDropZone({ pinned }); }}
+      style={{
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        gap: 6,
+        height: 34,
+        marginBottom: 12,
+        border: `1px dashed ${highlighted ? "var(--accent)" : "var(--border)"}`,
+        borderRadius: "var(--radius-control)",
+        background: highlighted ? "var(--bg-hover)" : "transparent",
+        color: highlighted ? "var(--accent)" : "var(--text-dim)",
+        fontSize: 11,
+        transition: SIDEBAR_BUTTON_TRANSITION,
+      }}
+    >
+      {pinned ? <Pin size={12} strokeWidth={2} aria-hidden="true" /> : <PinOff size={12} strokeWidth={2} aria-hidden="true" />}
+      <span>{label}</span>
+    </div>
+  );
+}
+
 export {
   ProjectRow,
+  ProjectSectionDropZone,
+  ProjectSectionLabel,
   ProjectWorktreeSwitcher,
   SessionItem,
   SessionTreeItem,

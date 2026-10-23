@@ -17,7 +17,7 @@ import { randomUUID } from "crypto";
 import { tmpdir } from "os";
 import { dirname, join, posix, resolve, win32 } from "path";
 import { checkNpmUpdate, detectInstallMethod } from "./npm-update";
-import { checkOmpUpdate } from "./omp/updates";
+import { checkOmpUpdate, type OmpUpdateStatus } from "./omp/updates";
 import { DISABLE_AUTOUPDATE_ENV_VAR, isUpdateDisabled } from "./update-policy";
 
 const LEASE_MS = 30 * 60 * 1000;
@@ -55,8 +55,9 @@ export class SelfUpdateError extends Error {
 
 type Kind = "app" | "omp";
 
-function assertUpdatesEnabled(): void {
-  if (!isUpdateDisabled()) return;
+/** `OMP_WEB_DISABLE_AUTOUPDATE` blocks omp-web's own update; the OMP runtime stays updatable. */
+function assertUpdatesEnabled(kind: Kind): void {
+  if (kind === "omp" || !isUpdateDisabled()) return;
   throw new SelfUpdateError("updates_disabled", `Updates are disabled by ${DISABLE_AUTOUPDATE_ENV_VAR}`, 403);
 }
 
@@ -300,7 +301,7 @@ function detectManager(packageDir: string): { manager: "npm" | "bun"; managerPat
 }
 
 export async function prepareSelfUpdate(kind: Kind = "app"): Promise<PrepareResult> {
-  assertUpdatesEnabled();
+  assertUpdatesEnabled(kind);
   cleanupStaleSelfUpdate(Date.now(), kind);
   ensureSecureRoot(kind, true);
   const leaseFile = leasePath(kind);
@@ -312,7 +313,13 @@ export async function prepareSelfUpdate(kind: Kind = "app"): Promise<PrepareResu
   let currentVersion: string;
   let targetVersion: string;
   if (kind === "omp") {
-    const ompStatus = await checkOmpUpdate(true);
+    let ompStatus: OmpUpdateStatus;
+    try {
+      ompStatus = await checkOmpUpdate(true);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new SelfUpdateError("check_failed", `Could not check for OMP updates: ${reason.slice(-400)}`, 502);
+    }
     if (!ompStatus.updateAvailable || !ompStatus.availableVersion) {
       throw new SelfUpdateError("no_update_available", "No OMP update available", 409);
     }
@@ -363,7 +370,7 @@ export async function prepareSelfUpdate(kind: Kind = "app"): Promise<PrepareResu
 }
 
 export function validateCommitSelfUpdate(attemptId: string, kind: Kind = "app"): "ready" | "replay" {
-  assertUpdatesEnabled();
+  assertUpdatesEnabled(kind);
   const status = readStateJson<StoredStatus>(statusPath(kind));
   if (!status || status.attemptId !== attemptId) throw new SelfUpdateError("attempt_not_found", "Update attempt not found", 404);
   if (status.state === "running") return "replay";
@@ -388,7 +395,7 @@ export async function armSelfUpdateLauncher(attemptId: string, kind: Kind = "app
 }
 
 export function commitSelfUpdate(attemptId: string, kind: Kind = "app"): { accepted: true; attemptId: string } {
-  assertUpdatesEnabled();
+  assertUpdatesEnabled(kind);
   const status = readStateJson<StoredStatus>(statusPath(kind));
   if (!status || status.attemptId !== attemptId) throw new SelfUpdateError("attempt_not_found", "Update attempt not found", 404);
   // write go marker

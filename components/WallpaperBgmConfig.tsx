@@ -5,6 +5,7 @@ import { BGM_ACCEPT, MAX_BGM_BYTES, bgmUrl, type WallpaperBgm } from "@/lib/wall
 import { useWallpaperPreferences } from "@/hooks/useWallpaper";
 import { useI18n } from "@/lib/i18n";
 import { subscribeWallpaperAudio, wallpaperAudioState, serverWallpaperAudioState } from "@/lib/wallpaper-audio";
+import { Select } from "./ui/field";
 
 export function WallpaperBgmConfig() {
   const { t } = useI18n();
@@ -75,11 +76,17 @@ export function WallpaperBgmConfig() {
       <input ref={input} data-bgm-upload type="file" hidden accept={BGM_ACCEPT} onChange={event => { const file = event.target.files?.[0]; event.target.value = ""; if (file) void importFile(file); }} />
     </div>
     <div className="wallpaper-bgm-selection">
-      <select aria-label={t("wallpaperBgm.title")} disabled={busy} value={preferences.bgmId || ""} onChange={event => { update({ bgmId: event.target.value || null, paused: false }); setStatus(""); }}>
-        <option value="">{t("wallpaperBgm.original")}</option>
-        {preferences.bgmId && !selected && <option value={preferences.bgmId}>{t("wallpaperBgm.unavailable")}</option>}
-        {tracks.map(track => <option key={track.id} value={track.id}>{track.title}</option>)}
-      </select>
+      <Select
+        aria-label={t("wallpaperBgm.title")}
+        disabled={busy}
+        value={preferences.bgmId || ""}
+        onChange={(nextValue) => { update({ bgmId: nextValue || null, paused: false }); setStatus(""); }}
+        options={[
+          { value: "", label: t("wallpaperBgm.original") },
+          ...(preferences.bgmId && !selected ? [{ value: preferences.bgmId, label: t("wallpaperBgm.unavailable") }] : []),
+          ...tracks.map(track => ({ value: track.id, label: track.title })),
+        ]}
+      />
       {selected && <span className="wallpaper-bgm-meta">{Math.floor(selected.duration / 60)}:{String(Math.floor(selected.duration % 60)).padStart(2, "0")} · {(selected.bytes / 1024 / 1024).toFixed(1)} MiB</span>}
       <button className="wallpaper-icon" type="button" disabled={busy || !selected} title={t("wallpaperBgm.delete")} aria-label={t("wallpaperBgm.delete")} onClick={() => void remove()}><Trash2 size={16} /></button>
     </div>

@@ -4,7 +4,7 @@ import { decompressBlock } from "lz4js";
 import { WallpaperReader } from "./wallpaper-binary";
 
 export interface TextureFrame { x: number; y: number; width: number; height: number; duration: number; axes?: number[]; }
-export interface DecodedTexture { png: Buffer; video?: Buffer; width: number; height: number; format: number; frames: TextureFrame[]; }
+export interface DecodedTexture { png: Buffer; video?: Buffer; videoMimeType?: string; width: number; height: number; format: number; frames: TextureFrame[]; }
 const MAX_PIXELS = 64 * 1024 * 1024;
 function dimensions(w: number, h: number, maxPixels = MAX_PIXELS) {
   if (w < 1 || h < 1 || w > 16384 || h > 16384 || w * h > maxPixels) throw new Error(`Scene texture exceeds safe dimensions (${w}x${h}, limit ${maxPixels} pixels)`);
@@ -58,7 +58,10 @@ export async function decodeWallpaperTexture(bytes: Buffer): Promise<DecodedText
     if (i === 0) { width = w; height = h; pixels = compressed ? lz4(raw, size) : raw; }
   }
   if (!pixels || iw > width || ih > height) throw new Error("Invalid texture image size");
-  if (pixels.toString("ascii", 4, 8) === "ftyp") return { png: Buffer.alloc(0), video: pixels, width: iw, height: ih, format, frames: [] };
+  const videoMimeType = pixels.toString("ascii", 4, 8) === "ftyp" ? "video/mp4"
+    : pixels.length >= 4 && pixels.readUInt32BE(0) === 0x1a45dfa3
+      ? (pixels.subarray(0, 256).includes(Buffer.from("webm")) ? "video/webm" : "video/x-matroska") : undefined;
+  if (videoMimeType) return { png: Buffer.alloc(0), video: pixels, videoMimeType, width: iw, height: ih, format, frames: [] };
   const frames: TextureFrame[] = [];
   if (r.offset < bytes.length) {
     const magic = r.magic();

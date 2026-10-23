@@ -184,9 +184,15 @@ const password = launchOptions.password;
 const openBrowser = launchOptions.openBrowser;
 if (password) process.env.OMP_WEB_PASSWORD = password;
 const passwordEnabled = typeof password === "string" && password.length > 0;
-
+// Without a password a network bind serves loopback, LAN and VPN clients only.
+const privateNetworkOnly = !passwordEnabled && !isLoopbackHost(hostname);
 
 const nextArgs = ["start", "-p", port, "-H", hostname];
+const serverArgs = [
+  ...(privateNetworkOnly ? ["--require", path.join(__dirname, "private-network-guard.js")] : []),
+  nextBin,
+  ...nextArgs,
+];
 const restartDescriptor = JSON.stringify({
   launcherPath: path.join(pkgDir, "bin", "omp-web.js"),
   hostname: String(hostname),
@@ -419,6 +425,7 @@ function serverEnvironment() {
     OMP_WEB_PORT: port,
     OMP_WEB_HOSTNAME: hostname,
     OMP_WEB_RESTART_DESCRIPTOR: restartDescriptor,
+    ...(privateNetworkOnly ? { OMP_WEB_PRIVATE_NETWORK_ONLY: "1" } : {}),
   };
 }
 
@@ -448,7 +455,7 @@ function trackServer(child) {
 }
 
 function spawnServer() {
-  return trackServer(spawn(process.execPath, [nextBin, ...nextArgs], {
+  return trackServer(spawn(process.execPath, serverArgs, {
     cwd: pkgDir,
     stdio: ["inherit", "pipe", "inherit", "ipc"],
     env: serverEnvironment(),
@@ -531,7 +538,7 @@ async function waitForRestartRequest(control) {
         && Number.isInteger(request.generation)
         && request.generation === currentGeneration + 1) {
         const child = trackServer(spawnRestartGate());
-        if (await acknowledgeAndStartRestart(control, request, child, [nextBin, ...nextArgs])) return;
+        if (await acknowledgeAndStartRestart(control, request, child, serverArgs)) return;
       }
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
@@ -552,11 +559,9 @@ async function main() {
     console.error("Build artifacts not found. Please report this issue.");
     process.exit(1);
   }
-  if (!isLoopbackHost(hostname)) {
-    if (!passwordEnabled) {
-      console.error(`Refusing to listen on ${hostname} without OMP_WEB_PASSWORD (or --password). Set a strong password or bind to 127.0.0.1.`);
-      process.exit(1);
-    }
+  if (privateNetworkOnly) {
+    console.warn(`Warning: ompweb is listening on ${hostname} without a password. Only loopback, private LAN/VPN (10/8, 172.16/12, 192.168/16, IPv6 ULA/link-local) clients opening it by IP address or localhost are served; anyone on those networks controls the agent. Never forward it through a tunnel or reverse proxy on this host.`);
+  } else if (!isLoopbackHost(hostname)) {
     console.warn(`Warning: ompweb is listening on ${hostname} over HTTP. Use HTTPS or a trusted VPN to protect the password and session cookie in transit.`);
   }
 

@@ -1,19 +1,18 @@
 "use client";
-import { Image as ImageIcon, PanelsTopLeft, Square, Blend, Play, Pause, Volume2, VolumeX, AudioLines } from "lucide-react";
+import { PanelsTopLeft, Square, Blend, Play, Pause, Volume2, VolumeX, AudioLines } from "lucide-react";
 import { useSyncExternalStore } from "react";
 import { serverWallpaperAudioState, subscribeWallpaperAudio, wallpaperAudioState, toggleWallpaperAudioCapture } from "@/lib/wallpaper-audio";
 import { toast } from "./ui/toast";
 import { useWallpaperPreferences } from "@/hooks/useWallpaper";
 import { useI18n } from "@/lib/i18n";
 import { Tooltip } from "./ui/primitives";
-export function WallpaperControls({ onOpen }: { onOpen?: () => void }) {
+export function WallpaperControls() {
   const { preferences, update } = useWallpaperPreferences();
   const { locale } = useI18n();
   const zh = locale.startsWith("zh");
   const audio = useSyncExternalStore(subscribeWallpaperAudio, wallpaperAudioState, serverWallpaperAudioState);
   const hasAudio = preferences.kind !== "image" || !!preferences.bgmId;
   return <div className="wallpaper-controls" role="group" aria-label={zh ? "壁纸与玻璃" : "Wallpaper and glass"}>
-    {onOpen && <Tooltip content={zh ? "壁纸" : "Wallpapers"}><button type="button" aria-label={zh ? "壁纸" : "Wallpapers"} onClick={onOpen}><ImageIcon size={16} /></button></Tooltip>}
     {([
       ["default", PanelsTopLeft, zh ? "默认：局部毛玻璃" : "Default: local glass"],
       ["clear", Square, zh ? "全透明玻璃" : "Clear glass"],

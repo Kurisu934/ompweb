@@ -10,6 +10,13 @@ const markdownSanitizeSchema = {
     ...defaultSchema.attributes,
     code: [["className", /^language-./, "math-inline", "math-display"]],
   },
+  // These URLs are routed through the file API by MarkdownBody/FileViewer,
+  // then checked again by their URL transform and the server's authorization.
+  protocols: {
+    ...defaultSchema.protocols,
+    href: [...(defaultSchema.protocols?.href ?? []), "file", "artifact", ..."abcdefghijklmnopqrstuvwxyz"],
+    src: [...(defaultSchema.protocols?.src ?? []), "file", "artifact", ..."abcdefghijklmnopqrstuvwxyz"],
+  },
   strip: [...(defaultSchema.strip || []), "iframe", "object", "style", "form"],
 };
 

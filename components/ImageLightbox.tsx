@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, type ImgHTMLAttributes } from "react";
 import { createPortal } from "react-dom";
 import { useI18n } from "@/lib/i18n";
+import { useImageLoadError } from "@/hooks/useImageLoadError";
 
 const ZOOM_MIN = 0.25;
 const ZOOM_MAX = 8;
@@ -38,9 +39,16 @@ export function ClickableImage({ src, alt, ...imgProps }: ClickableImageProps) {
   }, [src]);
 
   const resolvedSrc = typeof src === "string" ? src : objectUrl ?? "";
+  const { error, onError: diagnoseError, clearError } = useImageLoadError(resolvedSrc);
 
   // Never render a broken clickable thumbnail for a missing source.
   if (!resolvedSrc) return null;
+  if (error) return (
+    <span role="alert" style={{ display: "inline-flex", flexWrap: "wrap", alignItems: "center", gap: 8, padding: 8, color: "var(--status-error)", fontSize: 13 }}>
+      <span>{alt || t("imagePreview.imageTitle")}: {error}</span>
+      <a href={resolvedSrc} download style={{ color: "var(--accent)" }}>{t("fileViewer.downloadFile")}</a>
+    </span>
+  );
 
   return (
     <>
@@ -58,7 +66,10 @@ export function ClickableImage({ src, alt, ...imgProps }: ClickableImageProps) {
         title={alt ? t("imagePreview.openWithAlt", { alt }) : t("imagePreview.open")}
       >
         {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img src={resolvedSrc} alt={alt ?? ""} loading="lazy" {...imgProps} />
+        <img src={resolvedSrc} alt={alt ?? ""} loading="lazy" {...imgProps}
+          onError={(event) => { imgProps.onError?.(event); void diagnoseError(); }}
+          onLoad={(event) => { clearError(); imgProps.onLoad?.(event); }}
+        />
       </button>
       {/*
         Portal to <body>: a linked markdown image (`[![alt](img)](url)`) would

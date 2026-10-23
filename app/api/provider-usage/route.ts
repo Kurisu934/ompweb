@@ -1,5 +1,6 @@
 import { NextResponse } from "next/server";
 import { getProviderUsage } from "@/lib/provider-usage";
+import { loadWebServerSettings } from "@/lib/web-settings";
 
 export const dynamic = "force-dynamic";
 
@@ -27,7 +28,7 @@ export async function GET(request: Request) {
   }
 
   try {
-    return NextResponse.json(await getProviderUsage({ provider, modelId }));
+    return NextResponse.json(await getProviderUsage({ provider, modelId }, loadWebServerSettings().accountAliases));
   } catch {
     return NextResponse.json(
       { error: "Provider usage is currently unavailable", code: "provider_usage_unavailable" },

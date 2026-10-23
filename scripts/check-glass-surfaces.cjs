@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-require-imports -- Isolated browser regression runner. */
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
@@ -286,17 +285,21 @@ async function blurPixels(page, selector) {
         if (viewport.width < 768) await page.locator('button:has(svg.lucide-menu)').click();
         await page.locator('.sidebar-settings-row').click();
         await page.locator('.settings-content h2').waitFor();
-        for (const tab of ['general', 'pets', 'wallpapers', 'safety', 'models', 'providers', 'usage', 'intelligence', 'agents', 'mcp', 'system']) {
+        for (const tab of ['general', 'appearance', 'providers', 'usage', 'agents', 'extensions', 'system']) {
           await page.locator(`#settings-tab-${tab}`).click();
-          await page.waitForTimeout(350);
-          assert.deepEqual(errors, [], `settings ${tab} rendered without errors`);
-          for (const mode of ['default', 'frosted', 'clear']) {
-            await preferences(page, { glass: mode });
-            report.push({ theme, viewport, mode, view: tab, surface: await checkGlass(page, '.settings-view', mode) });
+          for (const subTab of tab === 'appearance' ? ['display', 'wallpapers', 'pets', 'motion'] : tab === 'general' ? ['layout', 'behavior', 'shortcuts'] : tab === 'providers' ? ['connected', 'custom', 'system', 'defaults'] : tab === 'agents' ? ['instructions', 'subagents', 'runtime', 'approvals'] : [null]) {
+            if (subTab) await page.locator(`#${tab}-tab-${subTab}`).click();
+            await page.waitForTimeout(350);
+            const view = subTab ? `${tab}-${subTab}` : tab;
+            assert.deepEqual(errors, [], `settings ${view} rendered without errors`);
+            for (const mode of ['default', 'frosted', 'clear']) {
+              await preferences(page, { glass: mode });
+              report.push({ theme, viewport, mode, view, surface: await checkGlass(page, '.settings-view', mode) });
+            }
+            await preferences(page, { glass: 'default' });
+            if (['general', 'appearance', 'providers', 'extensions'].includes(tab)) await page.locator('.settings-view').screenshot({ path: `${out}/settings-${view}-${theme}-${viewport.width}.png` });
+            assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, `no page overflow: ${view}`);
           }
-          await preferences(page, { glass: 'default' });
-          if (['general', 'providers', 'mcp'].includes(tab)) await page.locator('.settings-view').screenshot({ path: `${out}/settings-${tab}-${theme}-${viewport.width}.png` });
-          assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false, `no page overflow: ${tab}`);
         }
         await preferences(page, { id: null });
         await page.waitForFunction(() => document.documentElement.dataset.wallpaper !== 'on');

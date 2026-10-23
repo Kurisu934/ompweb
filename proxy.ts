@@ -5,6 +5,9 @@ import { isValidWebSession, isWebPasswordEnabled, OMP_WEB_SESSION_COOKIE } from 
 export function proxy(request: NextRequest) {
   // Opaque wallpaper frames use a scoped capability, never the app's cookies.
   if (/^\/api\/wallpapers\/[a-f0-9]{32}\/web-assets\/[a-f0-9]{64}\//.test(request.nextUrl.pathname)) return NextResponse.next();
+  // Scheduled task webhooks: the unguessable token in the path is the
+  // credential (checked by the route), so external callers need no cookie.
+  if (/^\/api\/hooks\/[A-Za-z0-9_-]{43}$/.test(request.nextUrl.pathname)) return NextResponse.next();
   if (request.nextUrl.pathname.startsWith("/api/")) {
     return guardApiRequest(request) ?? NextResponse.next();
   }

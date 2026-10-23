@@ -82,6 +82,28 @@ test("shows Queue instead of Stop for typed text during a run", () => {
   }
 });
 
+test("the run-time submit button steers by default, matching Enter", () => {
+  const draftKey = "chat-input-steer-action-test";
+  setDraft(draftKey, { value: "Use the other API instead", images: [], files: [] });
+  try {
+    const html = renderToStaticMarkup(
+      React.createElement(ChatInput, {
+        onSend() {},
+        onAbort() {},
+        onSteer() {},
+        onFollowUp() {},
+        isStreaming: true,
+        draftKey,
+      }),
+    );
+
+    assert.match(html, />(Steer|chatInput\.steer)</);
+    assert.doesNotMatch(html, />(Queue|chatInput\.queue)</);
+  } finally {
+    clearDraft(draftKey);
+  }
+});
+
 test("renders the upstream model error", () => {
   const html = renderToStaticMarkup(
     React.createElement(ModelErrorBanner, {
@@ -331,7 +353,6 @@ test("renders live status bar attached to the composer top edge when statusText 
   assert.match(html, /role="status"/);
   assert.match(html, /class="composer-status-bar wallpaper-surface"/);
   assert.match(html, /Waiting for model\.\.\./);
-  assert.match(html, /live-status-dot/);
 });
 
 test("omits live status bar when statusText is absent or null", () => {
@@ -365,6 +386,5 @@ test("renders both queued prompts and attached status bar together", () => {
 
   assert.match(html, /Next prompt to run/);
   assert.match(html, /Waiting for model\.\.\./);
-  assert.match(html, /live-status-dot/);
   assert.match(html, /class="composer-status-bar wallpaper-surface"/);
 });

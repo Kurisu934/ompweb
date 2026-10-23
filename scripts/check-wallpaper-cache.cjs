@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-require-imports -- Node-only browser QA runner. */
 const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');

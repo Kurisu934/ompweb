@@ -197,7 +197,7 @@ export function RecordingDeck({
     };
     raf = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(raf);
-  }, [captureRef, captureActive, isPaused, isReviewing, isPlayingPreview, previewCurrentTime, previewDuration]);
+  }, [captureRef, captureActive, isPaused, isReviewing, isPlayingPreview, previewCurrentTime, previewDuration, elapsed]);
 
   return (
     <div

@@ -64,7 +64,7 @@ function bindMatrix(mesh: T.Mesh, mat: T.RawShaderMaterial) {
   };
 }
 
-type ParticleInstance = { x: number; y: number; anchor?: Particle; credits: number[]; started: boolean; emitting: boolean; alive: number };
+type ParticleInstance = { x: number; y: number; anchor?: Particle; credits: number[]; started: boolean; emitting: boolean; alive: number; sequence: number };
 type Particle = { age: number; life: number; x: number; y: number; vx: number; vy: number; size: number; angle: number; spin: number; color: number[]; alpha: number; frame: number; seed: number; owner: ParticleInstance; history?: { x: number; y: number; age: number }[] };
 export class ParticleSystem {
   readonly mesh: T.Mesh;
@@ -87,6 +87,14 @@ export class ParticleSystem {
   private connectedRope: boolean;
   private segments: number;
   controlPoint = new T.Vector2();
+  private sequenceAxis = new T.Vector3();
+  private sequenceVector = new T.Vector3();
+  private controlPointFor(id: unknown) {
+    const point = list(this.definition.config.controlpoint).find(c => c.id === num(id, 0));
+    if (point && (num(point.flags, 0) & 1)) return this.controlPoint;
+    const offset = vec(point?.offset, [0, 0]);
+    return { x: offset[0], y: offset[1] };
+  }
   constructor(private definition: SceneParticles, private info: SceneTexture, texture: T.Texture, createChild: (child: SceneParticles) => ParticleSystem, refraction?: { texture?: T.Texture; format: number; background: T.FramebufferTexture; capture: () => void }) {
     let seed = definition.id || 1;
     this.random = () => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed / 4294967296; };
@@ -155,7 +163,7 @@ color.rgb*=u_Overbright;gl_FragColor=color;}`, { g_ModelViewProjectionMatrix: { 
   private activate(anchor?: Particle, origin = { x: 0, y: 0 }) {
     const event = this.definition.event;
     if (this.instances.length >= (event?.max || 1) || this.random() >= (event?.probability ?? 1)) return;
-    const instance: ParticleInstance = { x: anchor?.x ?? origin.x, y: anchor?.y ?? origin.y, anchor: event?.type === "eventfollow" ? anchor : undefined, credits: this.emitters.map(() => 0), started: false, emitting: true, alive: 0 };
+    const instance: ParticleInstance = { x: anchor?.x ?? origin.x, y: anchor?.y ?? origin.y, anchor: event?.type === "eventfollow" ? anchor : undefined, credits: this.emitters.map(() => 0), started: false, emitting: true, alive: 0, sequence: 0 };
     this.instances.push(instance);
     for (const child of this.children) if (child.definition.event?.type === "static") child.activate(undefined, instance);
   }
@@ -171,6 +179,19 @@ color.rgb*=u_Overbright;gl_FragColor=color;}`, { g_ModelViewProjectionMatrix: { 
     if (emitter.name === "boxrandom") { const max = vec(emitter.max ?? emitter.distancemax, [100, 100]), min = vec(emitter.min, max.map(n => -n)); p.x = origin[0] + this.range(min[0], max[0], 0); p.y = origin[1] + this.range(min[1], max[1], 0); }
     for (const init of this.initializers) {
       switch (init.name) {
+        case "mapsequencearoundcontrolpoint": {
+          const bounds = vec(init.bounds, [0, 1]), count = Math.max(.001, num(init.count, 1));
+          const fraction = init.limitbehavior === "clamp" ? Math.min(1, owner.sequence / count) : (owner.sequence / count) % 1;
+          const angle = (bounds[0] + (bounds[1] - bounds[0]) * fraction) * Math.PI * 2;
+          const axis = vec(init.axis, [0, 0, 1]), point = this.controlPointFor(init.controlpoint);
+          this.sequenceAxis.set(axis[0], axis[1], axis[2]).normalize();
+          this.sequenceVector.set(0, Math.hypot(p.x - origin[0], p.y - origin[1]), 0).applyAxisAngle(this.sequenceAxis, angle);
+          p.x = point.x + origin[0] + this.sequenceVector.x; p.y = point.y + origin[1] + this.sequenceVector.y;
+          const low = vec(init.speedmin, [0, 0, 0]), high = vec(init.speedmax, low);
+          this.sequenceVector.set(this.range(low[0], high[0], 0), this.range(low[1], high[1], 0), this.range(low[2], high[2], 0)).applyAxisAngle(this.sequenceAxis, angle);
+          p.vx += this.sequenceVector.x; p.vy += this.sequenceVector.y;
+          break;
+        }
         case "lifetimerandom": p.life = Math.max(.01, this.range(init.min, init.max, 1)); break;
         case "sizerandom": p.size = this.range(init.min, init.max, 10) * num(this.definition.overrides.size, 1); break;
         case "rotationrandom": p.angle = typeof init.min === "string" || typeof init.max === "string" ? this.range(vec(init.min, [0, 0, 0])[2], vec(init.max, [0, 0, 0])[2], 0) : this.range(init.min, init.max, 0); break;
@@ -203,6 +224,7 @@ color.rgb*=u_Overbright;gl_FragColor=color;}`, { g_ModelViewProjectionMatrix: { 
       p.angle += transform.angle;
     }
     p.x += owner.x; p.y += owner.y;
+    owner.sequence++;
     if (this.rope && !this.connectedRope) p.history = [{ x: p.x, y: p.y, age: 0 }];
     return p;
   }
@@ -243,12 +265,18 @@ color.rgb*=u_Overbright;gl_FragColor=color;}`, { g_ModelViewProjectionMatrix: { 
         }
         if (op.name === "angularmovement") p.spin += vec(op.force, [0, 0, 0])[2] * dt;
         if (op.name === "controlpointattract") {
-          const cp = list(this.definition.config.controlpoint).find(c => c.id === op.controlpoint);
-          const origin = vec(op.origin, [0, 0]);
-          const point = cp && (num(cp.flags, 0) & 1) ? [this.controlPoint.x, this.controlPoint.y] : vec(cp?.offset, [0, 0]);
-          const dx = point[0] + origin[0] - p.x, dy = point[1] + origin[1] - p.y;
+          const origin = vec(op.origin, [0, 0]), point = this.controlPointFor(op.controlpoint);
+          const dx = point.x + origin[0] - p.x, dy = point.y + origin[1] - p.y;
           const distance = Math.hypot(dx, dy), threshold = Math.max(1, num(op.threshold, 32));
           if (distance < threshold && distance > .001) { const force = num(op.scale, 0) * (1 - distance / threshold) * dt / distance; p.vx += dx * force; p.vy += dy * force; }
+        }
+        if (op.name === "vortex") {
+          const point = this.controlPointFor(op.controlpoint), offset = vec(op.origin, [0, 0]);
+          const dx = p.x - point.x - offset[0], dy = p.y - point.y - offset[1], distance = Math.hypot(dx, dy);
+          const inner = Math.max(0, num(op.distanceinner, 0)), outer = Math.max(inner + .001, num(op.distanceouter, 100));
+          const fraction = Math.max(0, Math.min(1, (distance - inner) / (outer - inner)));
+          const force = num(op.speedinner, 0) * (1 - fraction) + num(op.speedouter, 0) * fraction;
+          if (distance > .001) { p.vx -= dy / distance * force * dt; p.vy += dx / distance * force * dt; }
         }
       }
       p.x += (p.vx + nx) * dt; p.y += (p.vy + ny) * dt; p.angle += p.spin * dt;
@@ -413,7 +441,7 @@ export class BrowserSceneRenderer {
     // The crop preview reads this canvas even while playback is paused.
     this.renderer = new T.WebGLRenderer({ canvas, antialias: true, alpha: false, depth: false, powerPreference: "high-performance", preserveDrawingBuffer: true });
     this.renderer.autoClear = true;
-    this.renderer.debug.onShaderError = (gl, _p, vs, fs) => { this.shaderError = `${gl.getShaderInfoLog(vs) || ""}\n${gl.getShaderInfoLog(fs) || ""}`; };
+    this.renderer.debug.onShaderError = (gl, program, vs, fs) => { this.shaderError = `${gl.getProgramInfoLog(program) || ""}\n${gl.getShaderInfoLog(vs) || ""}\n${gl.getShaderInfoLog(fs) || ""}`; };
     this.camera = new T.OrthographicCamera(0, data.width, data.height, 0, -10, 10);
     this.scene.background = new T.Color(data.clearColor[0], data.clearColor[1], data.clearColor[2]);
     if (data.bloom) {
@@ -518,7 +546,7 @@ gl_FragColor=vec4(max(vec3(0.0),2.0*c-gray)*excess,1.0);}`;
     const loadingSignal = result.resourceAbort.signal;
     try {
       await loadSceneResources([...new Map(data.textures.map(info => [info.key, info])).values()], loadingSignal, async info => {
-        if (info.mimeType === "video/mp4") {
+        if (info.mimeType?.startsWith("video/")) {
           const video = document.createElement("video");
           result.videos.push(video);
           video.muted = true; video.loop = true; video.playsInline = true; video.preload = "none";
@@ -817,10 +845,12 @@ if(u_BlendMode==6.0`) : fragment;
       }
       const { layer, mesh } = target;
       if (state.videoPlaying !== undefined) this.videoPlayback.set(layer.texture, state.videoPlaying);
-      if (Object.keys(state.boneWrites || {}).length) {
+      if (Object.keys(state.boneWrites || {}).length || state.boneCommands?.length) {
         const skin = this.skins.find(s => s.id === state.id);
         if (!skin) throw new Error("Missing scripted skeleton");
-        skin.animation.applyLocalTransforms(state.boneWrites!); skin.positions.needsUpdate = true;
+        if (Object.keys(state.boneWrites || {}).length) skin.animation.applyLocalTransforms(state.boneWrites!);
+        if (state.boneCommands?.length) skin.animation.applyPhysicsCommands(state.boneCommands, mesh.matrixWorld);
+        skin.positions.needsUpdate = true;
       }
       mesh.visible = state.visible;
       mesh.renderOrder = order;
@@ -1001,7 +1031,7 @@ if(u_BlendMode==6.0`) : fragment;
       for (const layer of locals) {
         const mesh = this.scriptLayers.get(layer.id)!.mesh, world = worlds.get(layer.id)!;
         const [a, b, c, d, x, y] = world.matrix, depth = world.parallax;
-        const origin = sceneLayerOrigin(this.data, [x, y, 0], depth);
+        const origin = sceneLayerOrigin(this.data, [x, y, 0], depth, world.parallaxOrigin);
         const [dx, dy] = sceneAlignmentOffset(layer.alignment, layer.size);
         const factor = effects.parallax ? effects.amount * effects.mouse * .05 : 0;
         mesh.matrixAutoUpdate = false;

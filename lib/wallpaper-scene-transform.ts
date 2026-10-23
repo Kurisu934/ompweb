@@ -4,14 +4,15 @@ export function sceneLayerOrigin(
   scene: Pick<BrowserScene, "width" | "height" | "cameraEffects">,
   origin: number[],
   depth: number[],
+  parallaxOrigin: number[] = origin,
 ): number[] {
   if (!scene.cameraEffects.parallax) return [...origin];
   const amount = scene.cameraEffects.amount;
-  // WE expands layer anchors around the scene center, without scaling the
-  // layer's geometry. This offset also applies with zero mouse influence.
+  // Expand the owning layer's anchor while preserving inherited child offsets.
+  // This offset also applies with zero mouse influence.
   return [
-    origin[0] + (origin[0] - scene.width / 2) * depth[0] * amount,
-    origin[1] + (origin[1] - scene.height / 2) * depth[1] * amount,
+    origin[0] + (parallaxOrigin[0] - scene.width / 2) * depth[0] * amount,
+    origin[1] + (parallaxOrigin[1] - scene.height / 2) * depth[1] * amount,
     origin[2] ?? 0,
   ];
 }

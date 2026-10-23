@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useRef, useState, useCallback, useEffect, useLayoutEffect, useImperativeHandle, forwardRef, memo, KeyboardEvent } from "react";
-import { ChevronDown, ListChecks, Loader2, Mic, Paperclip, Plus, Shrink, Sparkles, Wrench, X, Zap } from "lucide-react";
+import { ChevronDown, CornerDownRight, ListChecks, Loader2, Mic, Paperclip, Plus, Shrink, Sparkles, Wrench, X, Zap } from "lucide-react";
 import { getSubmitDuringRunBehavior, isWordCompletionEnabled } from "@/lib/composer-prefs";
 import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
 import type { ActiveGoal, ActivePlan } from "@/lib/web-mode-state";
@@ -9,10 +9,15 @@ import { toast } from "@/components/ui/toast";
 import { ConfirmDialog } from "@/components/ui/field";
 import { useDictation } from "@/hooks/useDictation";
 import { useDictationShortcut } from "@/hooks/useDictationShortcut";
+import { matchesShortcut, shortcutAria, shortcutHint } from "@/lib/keyboard-shortcuts";
+import { useShortcuts } from "@/hooks/useShortcuts";
 import type { GenerationSpeedInfo, SessionStatsInfo } from "@/lib/pi-types";
 import { formatCompactNumber, formatPercent } from "@/lib/format";
 import { ContextDetailPanel } from "./ComposerPanels";
 import { RecordingDeck } from "./RecordingDeck";
+import { WhaleTail } from "./WhaleTail";
+import { ScheduledMessagesPanel, ScheduleSendButton } from "./ScheduledSend";
+import type { ScheduledMessage } from "@/lib/scheduled-messages";
 import { clearDraft, getDraft, setDraft } from "@/lib/draft-store";
 import { expandWebSlashCommand } from "@/lib/web-slash-commands";
 import type { AttachedImage, AttachedTextFile } from "./ChatInput-draft-attachments";
@@ -43,6 +48,8 @@ import {
   type ModelOption,
 } from "./ChatInput-model-options";
 import { ModelPickerPanel } from "./ChatInput-model-picker";
+import { AccountPicker } from "./AccountPicker";
+import type { AccountPins } from "@/lib/account-choices";
 import { ComposerModeStatus, ModelErrorBanner, QueuedActionButton } from "./ChatInput-banners";
 import { CHAT_COLUMN_MAX_WIDTH } from "@/lib/chat-layout";
 import {
@@ -101,6 +108,10 @@ interface Props {
   fastModeActive?: boolean;
   fastModeSupported?: boolean;
   onFastModeChange?: (enabled: boolean) => void;
+  /** Session whose account choice the account chip edits; null for a new chat. */
+  accountSessionId?: string | null;
+  pendingAccountPins?: AccountPins;
+  onPendingAccountPinsChange?: (pins: AccountPins) => void;
   onAbortCompaction?: () => void;
   isCompacting?: boolean;
   compactResult?: CompactResultInfo | null;
@@ -133,8 +144,13 @@ interface Props {
   generationSpeed?: GenerationSpeedInfo | null;
   /** Remove one queued message from the queue panel (Edit/Delete/Steer). */
   onRemoveQueuedMessage?: (text: string) => void;
-  /** Relabel the first queued follow-up as a steering message. */
+  /** Turn a queued follow-up into a steer (moves it in omp's queue). */
   onPromoteQueuedToSteer?: (text: string) => void;
+  /** Server-side scheduled messages for this session (absent before the session exists). */
+  scheduledMessages?: ScheduledMessage[];
+  onScheduleMessage?: (message: string, sendAt: number) => Promise<boolean>;
+  onCancelScheduledMessage?: (id: string) => void;
+  onSendScheduledMessageNow?: (id: string) => void;
   slashCommands?: SlashCommandInfo[];
   slashCommandsLoading?: boolean;
   onLoadSlashCommands?: () => Promise<SlashCommandInfo[]> | SlashCommandInfo[];
@@ -152,13 +168,15 @@ interface Props {
   onMinimize?: () => void;
   /** Active status label attached to the composer's top edge (e.g. "Waiting for model..."). */
   statusText?: string | null;
-  /** Open Settings → API Keys & Providers from the model picker footer. */
+  /** Open Settings → Models & Providers from the model picker footer. */
   onOpenProviders?: () => void;
 }
 
 export interface ChatInputHandle {
   focus: () => void;
   insertText: (text: string) => void;
+  /** Append a quoted block at the end of the draft, on its own lines. */
+  insertQuote: (quote: string) => void;
   insertIfEmpty: (text: string) => void;
   prependText: (text: string) => void;
   addFiles: (files: File[]) => void;
@@ -244,6 +262,7 @@ function menuDropStyle(placement: MenuPlacement, maxHeight: number | null): Reac
 
 export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatInput({
   onSend, onPredictWord, onPredictWordFeedback, onAbort, onSteer, onFollowUp, isStreaming, model, isAutoModelSelection, modelNames, modelList, modelError, modelsLoading, onModelChange, fastModeEnabled, fastModeActive, fastModeSupported, onFastModeChange,
+  accountSessionId, pendingAccountPins, onPendingAccountPinsChange,
   onAbortCompaction, isCompacting, compactResult,
   thinkingLevel, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap, modelNameOverride,
   toolPreset, onToolPresetChange,
@@ -261,6 +280,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   generationSpeed,
   onRemoveQueuedMessage,
   onPromoteQueuedToSteer,
+  scheduledMessages,
+  onScheduleMessage,
+  onCancelScheduledMessage,
+  onSendScheduledMessageNow,
   draftKey = "new:unassigned",
   cwd,
   activeGoal,
@@ -307,6 +330,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     [locale],
   );
   const [value, setValue] = useState(() => (draftKey ? getDraft(draftKey)?.value ?? "" : ""));
+  const shortcutBindings = useShortcuts();
   const [queuedDeleteTarget, setQueuedDeleteTarget] = useState<{
     text: string;
     draftKey: string | undefined;
@@ -435,6 +459,21 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       });
     },
     insertText: insertTextAtCursor,
+    insertQuote(quote: string) {
+      const ta = textareaRef.current;
+      const current = (ta ? ta.value : value).replace(/\s+$/, "");
+      const combined = current ? `${current}\n\n${quote}` : quote;
+      setValue(combined);
+      setAtQuery(null);
+      requestAnimationFrame(() => {
+        if (!ta) return;
+        ta.focus();
+        ta.setSelectionRange(combined.length, combined.length);
+        ta.style.height = "auto";
+        ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
+        ta.scrollTop = ta.scrollHeight;
+      });
+    },
     addFiles(files: File[]) {
       processFiles(files);
     },
@@ -502,7 +541,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     } finally {
       pendingImageCountRef.current -= imageFiles.length;
     }
-  }, []);
+  }, [t]);
 
   const processTextFiles = useCallback(async (files: File[]) => {
     const remaining = Math.max(
@@ -560,9 +599,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       pendingTextFileCountRef.current -= textFiles.length;
       pendingTextFileBytesRef.current -= textFiles.reduce((total, file) => total + file.size, 0);
     }
-  }, []);
+  }, [t]);
 
-  const processFiles = useCallback((files: File[]) => {
+  const processFiles = (files: File[]) => {
     if (isStreaming) {
       setAttachError(t("chatInput.attachmentsDisabled"));
       return;
@@ -571,7 +610,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     const otherFiles = files.filter((file) => !file.type.startsWith("image/"));
     void processImageFiles(imageFiles);
     void processTextFiles(otherFiles);
-  }, [isStreaming, processImageFiles, processTextFiles]);
+  };
 
   const removeImage = useCallback((index: number) => {
     setAttachedImages((prev) => {
@@ -802,16 +841,15 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       else startFreshDictation();
     },
   });
-  // While the recording deck replaces the textarea there is no focused input,
-  // so Escape/Enter are handled at window level: Escape cancels/discard, Enter
-  // retries after an error or converts the recording to text.
+  // The recording deck replaces the textarea, so handle its configured
+  // discard/transcribe shortcuts at window level.
   useEffect(() => {
     if (!(isStartingDictation || isRecording || isPaused || isReviewing || isTranscribing || transcribeError)) return;
     const onKeyDown = (e: globalThis.KeyboardEvent) => {
-      if (e.key === "Escape") {
+      if (matchesShortcut("cancelDictation", e)) {
         e.preventDefault();
         cancelDictationAndReset();
-      } else if (e.key === "Enter" && !e.shiftKey && !isTranscribing && !isStartingDictation) {
+      } else if (matchesShortcut("confirmDictation", e) && !isTranscribing && !isStartingDictation) {
         // Let focused deck/toolbar controls keep their own activation;
         // only hijack Enter from the non-interactive page context.
         const target = e.target as HTMLElement | null;
@@ -878,10 +916,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     [slashCommands],
   );
 
-  const filteredSlashCommands = (() => {
+  const filteredSlashCommands = React.useMemo(() => {
     if (slashQuery === null) return [];
     const commands = [...(isStreaming ? [] : builtinSlashCommands), ...externalSlashCommands];
-    return [...commands]
+    return commands
       .filter((command) => {
         const name = command.name.toLowerCase();
         const description = command.description?.toLowerCase() ?? "";
@@ -895,7 +933,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         return SLASH_SOURCE_ORDER[a.source] - SLASH_SOURCE_ORDER[b.source]
           || modelCollator.compare(a.name, b.name);
       });
-  })();
+  }, [slashQuery, isStreaming, builtinSlashCommands, externalSlashCommands, dormantSkillNames, modelCollator]);
 
   const groupedSlashCommands = (() => {
     const groups = new Map<SlashCommandSource, { source: SlashCommandSource; items: { command: SlashCommandPaletteItem; index: number }[] }>();
@@ -1178,6 +1216,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     && attachedImages.length === 0
     && attachedTextFiles.length === 0
     && Boolean(onFollowUp);
+  // The Settings choice (steer by default) applies to the button as it does to
+  // Enter; on phones the button is the only way to submit during a run.
+  const primaryRunMode: "steer" | "followup" = getSubmitDuringRunBehavior() === "steer" && onSteer ? "steer" : "followup";
 
   // ── Queued follow-up bar ────────────────────────────────────────────────
   // omp reports only a queued count over RPC; the texts are tracked in a
@@ -1278,8 +1319,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       : Math.max(0, slashActiveIndex - 1);
   }, [filteredSlashCommands.length, slashActiveIndex]);
 
-  const handleKeyDown = useCallback(
-    (e: KeyboardEvent<HTMLTextAreaElement>) => {
+  const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
       const nativeEvent = e.nativeEvent;
       const recentlyComposed = Date.now() - lastCompositionEndAtRef.current < COMPOSITION_END_ENTER_GRACE_MS;
       const isComposing =
@@ -1287,11 +1327,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         nativeEvent.isComposing ||
         nativeEvent.keyCode === 229;
 
-      if (e.key === "Enter" && !e.shiftKey && (isComposing || recentlyComposed)) {
-        if (recentlyComposed) e.preventDefault();
+      if (isComposing) return;
+      if (recentlyComposed && matchesShortcut("sendMessage", nativeEvent)) {
+        e.preventDefault();
         return;
       }
-      if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "m") {
+      if (!isComposing && matchesShortcut("startDictation", e.nativeEvent)) {
         e.preventDefault();
         startFreshDictation();
         return;
@@ -1379,11 +1420,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         }
       }
 
-      // Tab (or → at the end of the line) accepts the ghost word, like omp's editor.
+      // Accept the ghost word only at the caret for which it was predicted.
       const ghost = wordPrediction.peek();
       if (
-        ghost && ghost.text === value && !isComposing && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey &&
-        (e.key === "Tab" || e.key === "ArrowRight") &&
+        ghost && ghost.text === value && !isComposing &&
+        matchesShortcut("acceptCompletion", e.nativeEvent) &&
         e.currentTarget.selectionStart === ghost.cursor && e.currentTarget.selectionEnd === ghost.cursor
       ) {
         e.preventDefault();
@@ -1402,7 +1443,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         return;
       }
 
-      if (e.key === "ArrowUp" && !isComposing && !isStreaming && inputHistory.length > 0 && value.trim().length === 0) {
+      if (matchesShortcut("inputHistory", e.nativeEvent) && !isComposing && !isStreaming && inputHistory.length > 0 && value.trim().length === 0) {
         e.preventDefault();
         setSlashMenuOpen(false);
         setAtMenuOpen(false);
@@ -1411,15 +1452,15 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         return;
       }
 
-      // Esc stops the agent when no slash/@/history menu or IME composition is active.
-      if (e.key === "Escape" && !isComposing && isStreaming && onAbort) {
+      // The stop binding is shared with the page-level handler; menus take priority.
+      if (matchesShortcut("abort", e.nativeEvent) && !isComposing && isStreaming && onAbort) {
         e.preventDefault();
         onAbort();
         return;
       }
 
-      // Esc minimizes the composer when idle, empty, and no menus open.
-      if (e.key === "Escape" && !isComposing && !isStreaming && onMinimize && value.trim().length === 0) {
+      // Minimize only when idle, empty, and no menus open.
+      if (matchesShortcut("minimizeComposer", e.nativeEvent) && !isComposing && !isStreaming && onMinimize && value.trim().length === 0) {
         e.preventDefault();
         onMinimize();
         return;
@@ -1427,31 +1468,27 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
       // Soft keyboards rarely offer Shift+Enter; on the mobile breakpoint Enter
       // inserts a newline and the Send button submits.
-      if (e.key === "Enter" && !e.shiftKey && !isMobile) {
+      if (matchesShortcut("sendMessage", e.nativeEvent) && !isComposing && !isMobile) {
         e.preventDefault();
         if (isStreaming && (onSteer || onFollowUp)) {
-          // Submit-during-run behavior comes from Settings (Steer current run
-          // by default, or Queue follow-up); no in-composer selector.
-          const behavior = getSubmitDuringRunBehavior();
-          if (behavior === "steer" && onSteer) sendQueued("steer");
-          else sendQueued("followup");
+          // Submit-during-run behavior comes from Settings (Steer by default,
+          // or Queue follow-up), shared with the primary button.
+          sendQueued(primaryRunMode);
         } else {
           handleSend();
         }
       }
-    },
-    [isMobile, isStreaming, onSteer, onFollowUp, onAbort, onMinimize, slashMenuOpen, slashQuery, filteredSlashCommands, slashActiveIndex, applySlashCommand, sendQueued, handleSend, getNextSlashIndex, atMenuOpen, atQuery, atMatches, atActiveIndex, applyAtCompletion, historyMenuOpen, inputHistory, historyActiveIndex, applyHistoryInput, value, startFreshDictation, wordPrediction]
-  );
+  };
 
 
-  const handlePaste = useCallback((e: React.ClipboardEvent) => {
+  const handlePaste = (e: React.ClipboardEvent) => {
     const items = Array.from(e.clipboardData?.items ?? []);
     const imageItems = items.filter((item) => item.type.startsWith("image/"));
     if (!imageItems.length) return;
     e.preventDefault();
     const files = imageItems.map((item) => item.getAsFile()).filter((f): f is File => f !== null);
     processFiles(files);
-  }, [processFiles]);
+  };
 
   useEffect(() => {
     if (slashQuery === null) {
@@ -2203,6 +2240,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               </div>
             );
           })()}
+        {scheduledMessages && onCancelScheduledMessage && onSendScheduledMessageNow && (
+          <ScheduledMessagesPanel messages={scheduledMessages} onCancel={onCancelScheduledMessage} onSendNow={onSendScheduledMessageNow} />
+        )}
         {/* Queued prompts panel / bar — attached to composer's top edge.
             When 1 item: compact single row. When multiple items: compact row with expand toggle, or full list when expanded. */}
         {queuedCount > 0 && (
@@ -2429,10 +2469,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               color: "var(--text-muted)",
             }}
           >
-            <span
-              aria-hidden
-              className="live-status-dot live-pulse inline-block h-2 w-2 shrink-0 rounded-full bg-accent"
-            />
+            <WhaleTail active width={16} style={{ color: "var(--accent)" }} />
             <span>{statusText}</span>
           </div>
         )}
@@ -2926,6 +2963,16 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               </button>
             )}
 
+            {model && pendingAccountPins && onPendingAccountPinsChange && (
+              <AccountPicker
+                sessionId={accountSessionId ?? null}
+                provider={model.provider}
+                modelId={model.modelId}
+                pendingPins={pendingAccountPins}
+                onPendingPinsChange={onPendingAccountPinsChange}
+              />
+            )}
+
             <div className="composer-toolbar-spacer" style={{ marginLeft: "auto" }} />
 
             {/* Advisor activity — thunder while the advisor model reviews this run */}
@@ -3068,6 +3115,18 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               </div>
             )}
 
+            {onScheduleMessage && (
+              <ScheduleSendButton
+                model={model}
+                disabled={!value.trim() || attachedImages.length > 0 || attachedTextFiles.length > 0}
+                disabledReason={attachedImages.length > 0 || attachedTextFiles.length > 0 ? t("scheduledSend.textOnly") : t("scheduledSend.typeFirst")}
+                onSchedule={async (sendAt) => {
+                  const ok = await onScheduleMessage(value.trim(), sendAt);
+                  if (ok) clearInput();
+                  return ok;
+                }}
+              />
+            )}
             {/* Dictation */}
             {isStartingDictation || isRecording || isPaused || isReviewing || isTranscribing || transcribeError ? (
               <button
@@ -3092,8 +3151,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               <button
                 type="button"
                 onClick={startFreshDictation}
-                title={`${t("chatInput.startDictation")} (Alt)`}
-                aria-keyshortcuts="Alt"
+                title={shortcutHint(t("chatInput.startDictation"), "toggleDictation", shortcutBindings)}
+                aria-keyshortcuts={shortcutAria("toggleDictation", shortcutBindings)}
                 aria-label={t("chatInput.startDictation")}
                 style={{
                   display: "flex", alignItems: "center", justifyContent: "center",
@@ -3117,15 +3176,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 type="button"
                 className="composer-primary-action wallpaper-inset"
                 onClick={() => {
-                  if (dictationCapturing) {
-                    const behavior = getSubmitDuringRunBehavior();
-                    stopAndQueueDictation(behavior === "steer" && onSteer ? "steer" : "followup");
-                  } else {
-                    sendQueued("followup");
-                  }
+                  if (dictationCapturing) stopAndQueueDictation(primaryRunMode);
+                  else sendQueued(primaryRunMode);
                 }}
                 disabled={isTranscribing}
-                title={t("chatInput.queueMessage")}
+                title={primaryRunMode === "steer" ? t("chatInput.steerNowTitle") : t("chatInput.queueMessage")}
                 style={{
                   display: "flex", alignItems: "center", gap: 6,
                   background: "var(--accent-strong)",
@@ -3138,8 +3193,8 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                   transition: "background var(--dur-fast) var(--ease-out-warm)",
                 }}
               >
-                <ListChecks size={13} strokeWidth={2} aria-hidden="true" />
-                {t("chatInput.queue")}
+                {primaryRunMode === "steer" ? <CornerDownRight size={13} strokeWidth={2} aria-hidden="true" /> : <ListChecks size={13} strokeWidth={2} aria-hidden="true" />}
+                {primaryRunMode === "steer" ? t("chatInput.steer") : t("chatInput.queue")}
               </button>
             ) : isStreaming ? (
               <button

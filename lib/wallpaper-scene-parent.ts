@@ -1,7 +1,7 @@
 import type { SceneLayer } from "./wallpaper-scene-types";
 
 type LayerTransform = Pick<SceneLayer, "id" | "origin" | "angle" | "scale" | "visible" | "parent" | "attachment" | "parallax" | "parallaxInherited">;
-export interface SceneWorldTransform { matrix: number[]; visible: boolean; parallax: number[] }
+export interface SceneWorldTransform { matrix: number[]; visible: boolean; parallax: number[]; parallaxOrigin: number[] }
 
 export const sceneAlignments = ["center", "centre", "top", "bottom", "left", "right", "topleft", "topright", "bottomleft", "bottomright"];
 export function sceneAlignmentOffset(alignment: string | undefined, size: number[]) {
@@ -23,6 +23,7 @@ export function sceneWorldTransforms(layers: LayerTransform[], attachment?: (par
     const c = Math.cos(layer.angle), s = Math.sin(layer.angle);
     let matrix = [c * layer.scale[0], s * layer.scale[0], -s * layer.scale[1], c * layer.scale[1], layer.origin[0], layer.origin[1]];
     let visible = layer.visible !== false, parallax = layer.parallax;
+    let parallaxOrigin: number[] | undefined;
     if (layer.parent !== undefined) {
       const parent = byId.get(layer.parent); if (!parent) throw new Error(`Missing scene parent: ${layer.parent}`);
       if (layer.attachment && attachment) {
@@ -32,11 +33,13 @@ export function sceneWorldTransforms(layers: LayerTransform[], attachment?: (par
       }
       const world = visit(parent), [a, b, c, d, x, y] = world.matrix, [e, f, g, h, u, v] = matrix;
       matrix = [a * e + c * f, b * e + d * f, a * g + c * h, b * g + d * h, a * u + c * v + x, b * u + d * v + y];
-      visible &&= world.visible; if (layer.parallaxInherited) parallax = world.parallax;
+      visible &&= world.visible;
+      if (layer.parallaxInherited) { parallax = world.parallax; parallaxOrigin = world.parallaxOrigin; }
     }
     if (matrix.some(n => !Number.isFinite(n) || Math.abs(n) > 1e9)) throw new Error("Scene parent transform exceeds bounds");
     visiting.delete(layer.id);
-    const value = { matrix, visible, parallax }; result.set(layer.id, value); return value;
+    // Inherited depth shares the parent's parallax anchor, keeping local offsets rigid.
+    const value = { matrix, visible, parallax, parallaxOrigin: parallaxOrigin ?? [matrix[4], matrix[5], 0] }; result.set(layer.id, value); return value;
   }
   for (const layer of layers) visit(layer);
   return result;

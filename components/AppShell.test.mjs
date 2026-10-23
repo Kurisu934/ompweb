@@ -2,11 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readFile } from "node:fs/promises";
 
-test("generation speed inherits topbar glass instead of a solid chip", async () => {
-  const source = await readFile(new URL("./AppShell.tsx", import.meta.url), "utf8");
-  assert.match(source, /aria-label=\{speedTitle\}\s+className="shell-metric-pill shell-pill-extra wallpaper-inset"/);
-});
-
 test("closed sidebar and file drawers do not block global shortcuts as phantom dialogs", async () => {
   const shell = await readFile(new URL("./AppShell.tsx", import.meta.url), "utf8");
   const panel = await readFile(new URL("./RightPanel.tsx", import.meta.url), "utf8");

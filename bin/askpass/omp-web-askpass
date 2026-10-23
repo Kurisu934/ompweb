@@ -1,0 +1,6 @@
+#!/bin/sh
+# SUDO_ASKPASS program for agent shells started by omp-web: asks the open
+# omp-web tab for the password and prints it for sudo. omp-web verifies that
+# this runs directly under sudo before it shows the dialog.
+unset NODE_OPTIONS
+exec "$OMP_WEB_ASKPASS_NODE" "$OMP_WEB_ASKPASS_CLIENT" "$1"

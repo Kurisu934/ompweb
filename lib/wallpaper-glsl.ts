@@ -1,15 +1,20 @@
 import tokenize from "glsl-tokenizer/string";
 import { lowerSceneNumericExpressions } from "./wallpaper-glsl-numeric";
 
-// Fragment varyings are read-only in GLSL, while WE's HLSL shaders may mutate
-// their per-fragment copies, including from helper functions.
-export function browserFragmentGlsl(source: string) {
+// HLSL allows mutable fragment inputs and narrower consumer vectors. Keep the
+// linked varying type, then use a private, correctly sized per-fragment copy.
+export function browserFragmentGlsl(source: string, vertex = "") {
   const tokens = tokenize(source);
   const significant = tokens.filter(t => !["whitespace", "line-comment", "block-comment", "preprocessor", "eof"].includes(t.type));
+  const outputs = tokenize(vertex).filter(t => !["whitespace", "line-comment", "block-comment", "preprocessor", "eof"].includes(t.type));
+  const widths = new Map<string, number>();
+  outputs.forEach((t, i) => { if (t.data === "varying" && /^vec[234]$/.test(outputs[i + 1]?.data) && outputs[i + 3]?.data === ";") widths.set(outputs[i + 2].data, Number(outputs[i + 1].data[3])); });
   const copies: string[] = [];
   for (let i = 0; i < significant.length; i++) {
     if (significant[i].data !== "varying" || significant[i + 2]?.type !== "ident" || significant[i + 3]?.data !== ";") continue;
     const declaration = significant[i + 2], name = declaration.data, type = significant[i + 1].data;
+    const width = type === "float" ? 1 : /^vec[234]$/.test(type) ? Number(type[3]) : 0;
+    const narrow = width > 0 && (widths.get(name) || 0) > width;
     const written = significant.some((t, j) => {
       if (t.data !== name || t === declaration) return false;
       let end = j + 1;
@@ -17,12 +22,13 @@ export function browserFragmentGlsl(source: string) {
       if (significant[end]?.data === "[") { while (end < significant.length && significant[end].data !== "]") end++; end++; }
       return ["=", "+=", "-=", "*=", "/=", "++", "--"].includes(significant[end]?.data);
     });
-    if (!written) continue;
+    if (!written && !narrow) continue;
     let copy = `we_mutable_${name}`;
     while (significant.some(t => t.data === copy)) copy += "_";
     for (const t of tokens) if (t.type === "ident" && t.data === name && t !== declaration) t.data = copy;
     significant[i + 3].data += `\n${type} ${copy};`;
-    copies.push(`${copy}=${name};`);
+    if (narrow) significant[i + 1].data = `vec${widths.get(name)}`;
+    copies.push(`${copy}=${name}${narrow ? "." + "xyzw".slice(0, width) : ""};`);
   }
   if (!copies.length) return source;
   return tokens.filter(t => t.type !== "eof").map(t => t.data).join("").replace(/void\s+main\s*\(\s*(?:void\s*)?\)\s*\{/, match => match + copies.join(""));

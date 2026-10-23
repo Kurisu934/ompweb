@@ -67,16 +67,6 @@ test("useDictation surfaces timeout as an error instead of swallowing it", async
   assert.match(source, /err\.name === "AbortError"\) return;/);
 });
 
-test("ChatInput replaces the composer with the deck and routes dictation keys at window level", async () => {
-  const source = await readFile(new URL("../components/ChatInput.tsx", import.meta.url), "utf8");
-
-  // The deck covers every dictation state (recording, paused, transcribing, error)
-  assert.match(source, /isRecording \|\| isPaused \|\| (?:isReviewing \|\| )?isTranscribing \|\| transcribeError \? \(/);
-
-  // Window-level listener because the textarea is unmounted while the deck shows
-  assert.match(source, /window\.addEventListener\("keydown", onKeyDown\)/);
-  assert.match(source, /if \(e\.key === "Escape"\) \{\s*\n\s*e\.preventDefault\(\);\s*\n\s*cancelDictationAndReset\(\);/);
-});
 
 test("ChatInput supports transcribe-only and transcribe-and-send endings", async () => {
   const source = await readFile(new URL("../components/ChatInput.tsx", import.meta.url), "utf8");

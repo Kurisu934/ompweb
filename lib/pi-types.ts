@@ -2,6 +2,8 @@
 // Bun-only, so these types are hand-maintained against
 // oh-my-pi/packages/coding-agent/src/modes/rpc/rpc-types.ts (protocol v1).
 
+import type { GenerationSpeedSample } from "./generation-speed";
+
 export interface ContextUsage {
   percent: number | null;
   contextWindow: number;
@@ -143,8 +145,12 @@ export interface BashResultInfo {
 }
 
 export interface GenerationSpeedInfo {
+  /** omp's live get_state.tokensPerSecond while a run is active. */
   current: number | null;
+  /** Mean of the last GENERATION_SPEED_AVERAGE_WINDOW samples. */
   average: number | null;
+  /** Completed requests in session order (lib/generation-speed.ts). */
+  samples: GenerationSpeedSample[];
 }
 
 export interface SessionStatsInfo {

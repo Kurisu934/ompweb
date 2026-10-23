@@ -1,5 +1,6 @@
 import { homedir } from "os";
 import { RpcProcess } from "./rpc-process";
+import { startControlRpc } from "./rpc-control";
 
 /**
  * Shared short-lived `omp` utility process for global registry/auth queries
@@ -43,6 +44,8 @@ export interface OmpModel {
   contextWindow?: number | null;
   maxTokens?: number | null;
   cost?: { input?: number; output?: number; cacheRead?: number; cacheWrite?: number };
+  /** Service tiers the model declares (omp: "priority" backs /fast). */
+  serviceTiers?: string[];
 }
 
 /** Entry of the get_login_providers response (modes/rpc/rpc-types.ts). */
@@ -108,20 +111,14 @@ function scheduleIdleKill(state: UtilityRpcState): void {
 }
 
 async function startProcess(state: UtilityRpcState): Promise<RpcProcess> {
-  const proc = new RpcProcess({
+  let proc: RpcProcess | null = null;
+  proc = await startControlRpc({
     cwd: homedir(),
     extraArgs: UTILITY_EXTRA_ARGS,
     onExit: () => {
       if (state.proc === proc) state.proc = null;
     },
-  });
-  try {
-    const ready = await proc.waitReady(READY_TIMEOUT_MS);
-    await proc.negotiateProtocol(ready);
-  } catch (error) {
-    void proc.dispose();
-    throw error;
-  }
+  }, READY_TIMEOUT_MS);
   return proc;
 }
 
@@ -165,11 +162,11 @@ export async function runIsolatedUtilityCommand<T = unknown>(
   command: { type: string; [key: string]: unknown },
   options: { env?: Record<string, string>; cwd?: string; timeoutMs?: number; signal?: AbortSignal } = {},
 ): Promise<T> {
-  const proc = new RpcProcess({
+  const proc = await startControlRpc({
     cwd: options.cwd ?? homedir(),
     extraArgs: UTILITY_EXTRA_ARGS,
     env: options.env,
-  });
+  }, READY_TIMEOUT_MS, options.signal);
   const signal = options.signal;
   const onAbort = () => { void proc.dispose(); };
   if (signal) {
@@ -177,8 +174,6 @@ export async function runIsolatedUtilityCommand<T = unknown>(
     else signal.addEventListener("abort", onAbort, { once: true });
   }
   try {
-    const ready = await proc.waitReady(READY_TIMEOUT_MS);
-    await proc.negotiateProtocol(ready);
     return await proc.sendCommand<T>(command, options.timeoutMs ?? DEFAULT_COMMAND_TIMEOUT_MS);
   } catch (error) {
     if (signal?.aborted) {

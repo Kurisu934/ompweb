@@ -28,18 +28,24 @@ export function resourceName(name: string) {
 }
 
 // PKGV directory layout: https://github.com/notscuffed/repkg (format reference).
-export function readWallpaperPackage(bytes: Buffer) {
+export function readWallpaperPackageDirectory(bytes: Buffer, totalBytes = bytes.length) {
   const r = new WallpaperReader(bytes);
   const header = /^PKGV(\d{4})$/.exec(r.string());
-  if (!header || Number(header[1]) < 1 || Number(header[1]) > 23) throw new Error("Unsupported scene package version");
+  if (!header || Number(header[1]) < 1 || Number(header[1]) > 24) throw new Error("Unsupported scene package version");
   const count = r.uint();
   if (count > 20000) throw new Error("Too many scene resources");
   const entries = Array.from({ length: count }, () => ({ name: resourceName(r.string()), offset: r.uint(), size: r.uint() }));
   const base = r.offset;
-  const result = new Map<string, Buffer>();
+  const result = new Map<string, { offset: number; size: number }>();
   for (const e of entries) {
-    if (e.offset + e.size > bytes.length - base || result.has(e.name)) throw new Error("Invalid scene package directory");
-    result.set(e.name, bytes.subarray(base + e.offset, base + e.offset + e.size));
+    if (e.offset + e.size > totalBytes - base || result.has(e.name)) throw new Error("Invalid scene package directory");
+    result.set(e.name, { offset: base + e.offset, size: e.size });
   }
+  return result;
+}
+
+export function readWallpaperPackage(bytes: Buffer) {
+  const result = new Map<string, Buffer>();
+  for (const [name, entry] of readWallpaperPackageDirectory(bytes)) result.set(name, bytes.subarray(entry.offset, entry.offset + entry.size));
   return result;
 }

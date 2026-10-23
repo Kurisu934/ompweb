@@ -55,6 +55,41 @@ export async function register(): Promise<void> {
     }
   })();
 
+  // Stop runaway agent/terminal commands before the system runs out of
+  // memory (Settings live in omp-web-settings.json; Linux only).
+  try {
+    const { startMemoryGuard } = await import("@/lib/memory-guard");
+    startMemoryGuard();
+  } catch (error) {
+    console.warn(`[omp-web] memory guard failed to start: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  // Offer the scheduled_tasks tool to every omp child (registered on a
+  // globalThis registry the session wrapper reads at spawn).
+  try {
+    await import("@/lib/agent-task-tool");
+  } catch (error) {
+    console.warn(`[omp-web] scheduled_tasks tool could not be registered: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  // Re-arm messages scheduled for later; any that came due while omp-web was
+  // down are sent now.
+  try {
+    const { ensureScheduledMessagesArmed } = await import("@/lib/scheduled-messages");
+    ensureScheduledMessagesArmed();
+  } catch (error) {
+    console.warn(`[omp-web] scheduled messages could not be armed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
+  // Same for standalone scheduled tasks: one catch-up run for any that came
+  // due while omp-web was down.
+  try {
+    const { ensureScheduledTasksArmed } = await import("@/lib/scheduled-tasks");
+    ensureScheduledTasksArmed();
+  } catch (error) {
+    console.warn(`[omp-web] scheduled tasks could not be armed: ${error instanceof Error ? error.message : String(error)}`);
+  }
+
   // Crash/stall journal: a long-running server that dies or wedges while the
   // user is away leaves no trace in a terminal that no longer exists (CLI runs
   // are killed with their terminal; pages then show endless loading until the

@@ -1,0 +1,5 @@
+# omp settings that omp-web turns on by default. Passed as a --config overlay
+# only for keys the user has not set (lib/omp/web-defaults.ts), so a value in
+# ~/.omp/agent/config.yml or <project>/.omp/config.yml always wins.
+generate_image:
+  enabled: true

@@ -1,17 +1,22 @@
 "use client";
 
 import { memo, useState, useId, useRef, useEffect, useLayoutEffect, useMemo, useCallback, type ComponentProps } from "react";
-import { Copy, Check, GitFork, CornerUpLeft, ChevronRight, ChevronDown, Brain, EyeOff, CircleAlert, CircleSlash, LoaderCircle, FileText, Search, FileEdit, Terminal, CheckSquare, Bot, Code2, Globe, MessagesSquare, Wrench, Volume2, Square } from "lucide-react";
-import { MarkdownBody } from "./MarkdownBody";
-import { MessageCopyActions } from "./MessageCopyActions";
+import { Copy, Check, GitFork, CornerUpLeft, ChevronRight, ChevronDown, EyeOff, CircleAlert, CircleSlash, LoaderCircle, FileText, Search, FileEdit, Terminal, CheckSquare, Bot, Code2, Globe, MessagesSquare, Wrench, Volume2, Square } from "lucide-react";
+import { FileSessionContext, MarkdownBody } from "./MarkdownBody";
+import { MessageCopyActions, messagePlainText } from "./MessageCopyActions";
+import { contributeContextMenu, type ContextMenuItem } from "@/lib/context-menu";
+import { copyFromContextMenu } from "./ui/context-menu";
 import { useSpeechContext } from "@/hooks/useSpeechSynthesis";
 import { ClickableImage } from "./ImageLightbox";
 import { translate, useI18n, type Locale } from "@/lib/i18n";
 import { parseCompactionSummary } from "@/lib/compaction-summary";
 import { isEmptyThinkingBlock } from "@/lib/message-display";
+import { resolveToolFilePath } from "@/lib/file-links";
 import { Tooltip, Collapsible, CollapsibleTrigger } from "./ui/primitives";
+import { WhaleTail } from "./WhaleTail";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
 import { formatCompactNumber } from "@/lib/format";
+import { generationSpeedTier } from "@/lib/generation-speed";
 import { TaskResultPanel } from "./MessageView-task-panel";
 import { HubResultPanel } from "./MessageView-hub-panel";
 import { isMessageOverflowing } from "@/lib/message-overflow";
@@ -198,9 +203,8 @@ interface Props {
   forkEntryId?: string;
   onFork?: (entryId: string) => void;
   forking?: boolean;
-  onNavigate?: (entryId: string) => boolean | Promise<boolean>;
-  prevAssistantEntryId?: string;
-  onEditContent?: (content: string) => void;
+  /** User messages: edit and resend (branch off before this message). */
+  onEditFromHere?: (entryId: string, content: string) => void;
   showTimestamp?: boolean;
   prevTimestamp?: number;
   sessionId?: string;
@@ -236,9 +240,9 @@ function haveSameRelevantToolResults(
   return true;
 }
 
-export const MessageView = memo(function MessageView({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, entryId, forkEntryId, onFork, forking, onNavigate, prevAssistantEntryId, onEditContent, showTimestamp, prevTimestamp, sessionId, toolCallsDefaultCollapsed = true, liveTokensPerSecond }: Props) {
+function MessageContent({ message, isStreaming, toolResults, modelNames, cwd, onOpenFile, entryId, forkEntryId, onFork, forking, onEditFromHere, showTimestamp, prevTimestamp, sessionId, toolCallsDefaultCollapsed = true, liveTokensPerSecond }: Props) {
   if (message.role === "user") {
-    return <UserMessageView message={message as UserMessage} cwd={cwd} onOpenFile={onOpenFile} entryId={entryId} onFork={onFork} forking={forking} onNavigate={onNavigate} prevAssistantEntryId={prevAssistantEntryId} onEditContent={onEditContent} />;
+    return <UserMessageView message={message as UserMessage} cwd={cwd} onOpenFile={onOpenFile} entryId={entryId} onFork={onFork} forking={forking} onEditFromHere={onEditFromHere} />;
   }
   if (message.role === "assistant") {
     return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} cwd={cwd} onOpenFile={onOpenFile} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} sessionId={sessionId} entryId={entryId} forkEntryId={forkEntryId} onFork={onFork} forking={forking} toolCallsDefaultCollapsed={toolCallsDefaultCollapsed} liveTokensPerSecond={liveTokensPerSecond} />;
@@ -264,6 +268,10 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
     return <BashExecutionView message={message as BashExecutionMessage} sessionId={sessionId} />;
   }
   return null;
+}
+
+export const MessageView = memo(function MessageView(props: Props) {
+  return <FileSessionContext value={props.sessionId}><MessageContent {...props} /></FileSessionContext>;
 }, (prev, next) => {
   return prev.message === next.message
     && prev.isStreaming === next.isStreaming
@@ -275,9 +283,7 @@ export const MessageView = memo(function MessageView({ message, isStreaming, too
     && prev.forkEntryId === next.forkEntryId
     && prev.onFork === next.onFork
     && prev.forking === next.forking
-    && prev.onNavigate === next.onNavigate
-    && prev.prevAssistantEntryId === next.prevAssistantEntryId
-    && prev.onEditContent === next.onEditContent
+    && prev.onEditFromHere === next.onEditFromHere
     && prev.showTimestamp === next.showTimestamp
     && prev.prevTimestamp === next.prevTimestamp
     && prev.sessionId === next.sessionId
@@ -338,15 +344,14 @@ function ForkSessionButton({ entryId, onFork, forking }: {
     </Tooltip>
   );
 }
-function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, onNavigate, prevAssistantEntryId, onEditContent }: {  message: UserMessage;
+function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, onEditFromHere }: {  message: UserMessage;
   cwd?: string;
   onOpenFile?: (filePath: string) => void;
   entryId?: string;
   onFork?: (entryId: string) => void;
   forking?: boolean;
-  onNavigate?: (entryId: string) => boolean | Promise<boolean>;
-  prevAssistantEntryId?: string;
-  onEditContent?: (content: string) => void;
+  /** Edit and resend: branch off before this message with its text in the composer. */
+  onEditFromHere?: (entryId: string, content: string) => void;
 }) {
   const { t, locale } = useI18n();
   const bodyRef = useRef<HTMLDivElement>(null);
@@ -382,11 +387,27 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
 
   const time = formatTime(message.timestamp, locale);
   const canFork = !!entryId && !!onFork;
-  const canNavigate = !!prevAssistantEntryId && !!onNavigate;
+  const canEdit = !!entryId && !!onEditFromHere;
 
   return (
     <div
       style={{ marginBottom: 18, display: "flex", flexDirection: "column", alignItems: "flex-end", paddingRight: 6 }}
+      onContextMenu={(event) => {
+        const items: ContextMenuItem[] = [];
+        if (content.trim()) {
+          items.push(
+            { id: "copy-text", label: t("contextMenu.copyText"), icon: Copy, onSelect: () => copyFromContextMenu(messagePlainText([content], bodyRef.current)) },
+            { id: "copy-markdown", label: t("contextMenu.copyMarkdown"), icon: FileText, onSelect: () => copyFromContextMenu(content) },
+          );
+        }
+        if (canEdit) {
+          items.push({ id: "edit-from-here", label: t("contextMenu.editFromHere"), icon: CornerUpLeft, disabled: forking, onSelect: () => onEditFromHere!(entryId!, content) });
+        }
+        if (canFork) {
+          items.push({ id: "fork", label: t("contextMenu.forkFromHere"), icon: GitFork, disabled: forking, onSelect: () => onFork!(entryId!) });
+        }
+        contributeContextMenu(event, { id: "user-message", items });
+      }}
     >
       <div className="wallpaper-user" style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", maxWidth: "85%", minWidth: 0 }}>
         <div
@@ -456,16 +477,17 @@ function UserMessageView({ message, cwd, onOpenFile, entryId, onFork, forking, o
             gap: 6, marginTop: 3, width: "100%",
           }}>
           <MessageCopyActions texts={[content]} bodyRef={bodyRef} />
-          {(canFork || canNavigate) && (
+          {(canFork || canEdit) && (
             <div
               style={{
                 display: "flex", flexWrap: "wrap", justifyContent: "flex-end", gap: 3,
               }}
             >
-              {canNavigate && (
+              {canEdit && (
                 <Tooltip content={t("messageView.editFromHereTitle")}>
                   <button
-                    onClick={async () => { if (!(await onNavigate!(prevAssistantEntryId!))) return; onEditContent?.(content); }}
+                    onClick={() => onEditFromHere!(entryId!, content)}
+                    disabled={forking}
                     aria-label={t("messageView.editFromHereTitle")}
                     style={{
                       display: "flex", alignItems: "center", gap: 4,
@@ -564,6 +586,9 @@ function AssistantMessageView({
     .map((block, originalIndex) => ({ block, originalIndex }))
     .filter(({ block }) => !isEmptyThinkingBlock(block, { isStreaming }));
   const blocks = blockItems.map(({ block }) => block);
+  // Only the trailing thinking block of a streaming message is still thinking.
+  const lastBlockItem = blockItems.at(-1);
+  const liveThinkingIndex = isStreaming && lastBlockItem?.block.type === "thinking" ? lastBlockItem.originalIndex : -1;
   const hasActivityBlocks = blocks.some((block) => block.type === "thinking" || block.type === "toolCall");
   const errorMessage = message.errorMessage?.trim() || null;
   const isInterrupted = isInterruptedMessage(errorMessage, message.stopReason);
@@ -652,6 +677,22 @@ function AssistantMessageView({
       className="chat-message wallpaper-assistant"
       data-live={isStreaming ? "true" : undefined}
       style={{ marginBottom: 6 }}
+      onContextMenu={(event) => {
+        const items: ContextMenuItem[] = [];
+        if (texts.some((text) => text.trim())) {
+          items.push(
+            { id: "copy-text", label: t("contextMenu.copyText"), icon: Copy, onSelect: () => copyFromContextMenu(messagePlainText(texts, bodyRef.current)) },
+            { id: "copy-markdown", label: t("contextMenu.copyMarkdown"), icon: FileText, onSelect: () => copyFromContextMenu(texts.join("\n\n")) },
+          );
+        }
+        if (!isStreaming && ttsSupported && speakableText.trim()) {
+          items.push({ id: "read-aloud", label: isThisSpeaking ? t("contextMenu.stopReading") : t("contextMenu.readAloud"), icon: isThisSpeaking ? Square : Volume2, onSelect: () => ttsToggle(messageSpeechId, speakableText) });
+        }
+        if (canFork) {
+          items.push({ id: "fork", label: t("contextMenu.forkFromHere"), icon: GitFork, disabled: forking, onSelect: () => onFork!(forkEntryId!) });
+        }
+        contributeContextMenu(event, { id: "assistant-message", items });
+      }}
     >
       {/* Model label */}
       <div
@@ -689,7 +730,7 @@ function AssistantMessageView({
                     // Speed tiers use the semantic status tokens as TEXT color
                     // (theme-adaptive, AA-verified) over a subtle tint — the
                     // old hardcoded palette failed AA for white-on-fill.
-                    const tier = liveTokensPerSecond >= 50 ? "success" : liveTokensPerSecond >= 30 ? "renamed" : liveTokensPerSecond >= 15 ? "warning" : "error";
+                    const tier = generationSpeedTier(liveTokensPerSecond);
                     const tone = `var(--status-${tier})`;
                     return (
                       <span style={{ marginLeft: 6, padding: "1px 6px", borderRadius: 4, background: `color-mix(in srgb, ${tone} 14%, var(--bg-panel))`, color: tone, fontSize: 11, fontWeight: 400 }}>
@@ -721,6 +762,7 @@ function AssistantMessageView({
                 sessionId={sessionId}
                 entryId={entryId}
                 blockIndex={originalIndex}
+                thinkingActive={originalIndex === liveThinkingIndex}
                 toolCallsDefaultCollapsed={toolCallsDefaultCollapsed}
               />
             );
@@ -732,6 +774,7 @@ function AssistantMessageView({
               toolResults={toolResults}
               isStreaming={isStreaming}
               toolCallDurations={toolCallDurations}
+              cwd={cwd}
               onOpenFile={onOpenFile}
               toolCallsDefaultCollapsed={toolCallsDefaultCollapsed}
             />
@@ -811,18 +854,18 @@ function AssistantMessageView({
   );
 }
 
-function BlockView({ block, toolResults, isStreaming, streamingDuration, toolCallDurations, cwd, onOpenFile, sessionId, entryId, blockIndex, toolCallsDefaultCollapsed }: { block: AssistantContentBlock; toolResults?: Map<string, ToolResultMessage>; isStreaming?: boolean; streamingDuration?: number; toolCallDurations?: Map<string, number>; cwd?: string; onOpenFile?: (filePath: string) => void; sessionId?: string; entryId?: string; blockIndex: number; toolCallsDefaultCollapsed: boolean }) {
+function BlockView({ block, toolResults, isStreaming, streamingDuration, toolCallDurations, cwd, onOpenFile, sessionId, entryId, blockIndex, thinkingActive = false, toolCallsDefaultCollapsed }: { block: AssistantContentBlock; toolResults?: Map<string, ToolResultMessage>; isStreaming?: boolean; streamingDuration?: number; toolCallDurations?: Map<string, number>; cwd?: string; onOpenFile?: (filePath: string) => void; sessionId?: string; entryId?: string; blockIndex: number; thinkingActive?: boolean; toolCallsDefaultCollapsed: boolean }) {
   if (block.type === "text") {
     return <TextBlock block={block as TextContent} isStreaming={isStreaming} cwd={cwd} onOpenFile={onOpenFile} />;
   }
   if (block.type === "thinking") {
-    return <ThinkingBlock block={block as ThinkingContent} duration={streamingDuration} sessionId={sessionId} entryId={entryId} blockIndex={blockIndex} />;
+    return <ThinkingBlock block={block as ThinkingContent} duration={streamingDuration} active={thinkingActive} sessionId={sessionId} entryId={entryId} blockIndex={blockIndex} />;
   }
   if (block.type === "toolCall") {
     const tc = block as ToolCallContent;
     const result = toolResults?.get(tc.toolCallId);
     const duration = toolCallDurations?.get(tc.toolCallId);
-    return <ToolCallBlock block={tc} result={result} duration={duration} isStreaming={isStreaming} defaultCollapsed={toolCallsDefaultCollapsed} onOpenFile={onOpenFile} />;
+    return <ToolCallBlock block={tc} result={result} duration={duration} isStreaming={isStreaming} defaultCollapsed={toolCallsDefaultCollapsed} cwd={cwd} onOpenFile={onOpenFile} />;
   }
   return null;
 }
@@ -841,9 +884,11 @@ const TextBlock = memo(function TextBlock({ block, isStreaming, cwd, onOpenFile 
   && prev.onOpenFile === next.onOpenFile
 ));
 
-const ThinkingBlock = memo(function ThinkingBlock({ block, duration, sessionId, entryId, blockIndex }: {
+const ThinkingBlock = memo(function ThinkingBlock({ block, duration, active, sessionId, entryId, blockIndex }: {
   block: ThinkingContent;
   duration?: number;
+  /** Still receiving thinking tokens: the whale tail sways. */
+  active: boolean;
   sessionId?: string;
   entryId?: string;
   blockIndex: number;
@@ -874,8 +919,8 @@ const ThinkingBlock = memo(function ThinkingBlock({ block, duration, sessionId, 
     <div className="activity-row" data-activity-operation="true">
       <Collapsible open={expanded} onOpenChange={handleOpenChange}>
         <CollapsibleTrigger className="activity-row-trigger">
-          <span className="activity-row-indicator" aria-hidden>
-            <Brain size={12} strokeWidth={1.8} />
+          <span className="activity-row-indicator activity-row-indicator-whale" aria-hidden>
+            <WhaleTail active={active} width={14} />
           </span>
           <span className="activity-row-tool">{t("messageView.thinking")}</span>
           <span className="activity-row-preview" />
@@ -910,6 +955,7 @@ const ThinkingBlock = memo(function ThinkingBlock({ block, duration, sessionId, 
   prev.block.thinking === next.block.thinking
   && prev.block.deferred === next.block.deferred
   && prev.duration === next.duration
+  && prev.active === next.active
   && prev.sessionId === next.sessionId
   && prev.entryId === next.entryId
   && prev.blockIndex === next.blockIndex
@@ -934,6 +980,7 @@ const ToolCallBlock = memo(function ToolCallBlock({
   isStreaming,
   defaultCollapsed = true,
   inGroup = false,
+  cwd,
   onOpenFile,
 }: {
   block: ToolCallContent;
@@ -1004,8 +1051,8 @@ const ToolCallBlock = memo(function ToolCallBlock({
       ? hubJobs.map((job) => job.label).join(" · ")
       : null;
 
-  const cleanFilePath = semantic.isFile && typeof block.input === "object" && block.input && "path" in block.input
-    ? String((block.input as Record<string, unknown>).path).split(":")[0]
+  const cleanFilePath = semantic.isFile && typeof block.input?.path === "string"
+    ? resolveToolFilePath(block.input.path, cwd)
     : null;
 
   return (
@@ -1147,6 +1194,7 @@ const ToolCallBlock = memo(function ToolCallBlock({
   && prev.duration === next.duration
   && prev.defaultCollapsed === next.defaultCollapsed
   && prev.inGroup === next.inGroup
+  && prev.cwd === next.cwd
   && prev.onOpenFile === next.onOpenFile
 ));
 
@@ -1155,6 +1203,7 @@ const ToolCallGroupBlock = memo(function ToolCallGroupBlock({
   toolResults,
   isStreaming,
   toolCallDurations,
+  cwd,
   onOpenFile,
   toolCallsDefaultCollapsed,
 }: {
@@ -1162,6 +1211,7 @@ const ToolCallGroupBlock = memo(function ToolCallGroupBlock({
   toolResults?: Map<string, ToolResultMessage>;
   isStreaming?: boolean;
   toolCallDurations?: Map<string, number>;
+  cwd?: string;
   onOpenFile?: (filePath: string) => void;
   toolCallsDefaultCollapsed: boolean;
 }) {
@@ -1242,6 +1292,7 @@ const ToolCallGroupBlock = memo(function ToolCallGroupBlock({
                   isStreaming={isStreaming}
                   defaultCollapsed={true}
                   inGroup={true}
+                  cwd={cwd}
                   onOpenFile={onOpenFile}
                 />
               );
@@ -1259,6 +1310,7 @@ const ToolCallGroupBlock = memo(function ToolCallGroupBlock({
     && inputsShallowEqual(item.block.input, next.items[i]?.block.input)
   ))
   && prev.onOpenFile === next.onOpenFile
+  && prev.cwd === next.cwd
   && (!prev.toolResults || !next.toolResults || prev.items.every((item) => prev.toolResults?.get(item.block.toolCallId) === next.toolResults?.get(item.block.toolCallId)))
 ));
 
@@ -1563,7 +1615,7 @@ function HiddenExtensionView({ message, cwd, onOpenFile }: { message: CustomMess
 
 function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessage; cwd?: string; onOpenFile?: (filePath: string) => void }) {
   const { t, locale } = useI18n();
-  const [contentExpanded, setContentExpanded] = useState(true);
+  const [contentExpanded, setContentExpanded] = useState(message.customType !== "async-result");
   const [detailsExpanded, setDetailsExpanded] = useState(false);
   const { copied, copy: copyContent } = useCopyFeedback();
   const text = getMessageText(message.content);
@@ -1599,8 +1651,15 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
           background: "var(--bg)",
         }}
       >
-        <div
+        <button
+          type="button"
+          aria-expanded={contentExpanded}
+          onClick={() => setContentExpanded((expanded) => !expanded)}
           style={{
+            width: "100%",
+            border: "none",
+            textAlign: "left",
+            cursor: "pointer",
             userSelect: "none",
             display: "flex",
             alignItems: "center",
@@ -1616,7 +1675,18 @@ function CustomMessageView({ message, cwd, onOpenFile }: { message: CustomMessag
             {isIrc && message.customType === "irc:incoming" ? `← ${title}` : title}
           </span>
           {time && <span style={{ marginLeft: "auto", color: "var(--text-dim)", fontSize: 10 }}>{time}</span>}
-        </div>
+          <ChevronDown
+            size={12}
+            strokeWidth={1.8}
+            aria-hidden
+            style={{
+              marginLeft: time ? undefined : "auto",
+              flexShrink: 0,
+              transform: contentExpanded ? "none" : "rotate(-90deg)",
+              transition: "transform var(--dur-fast) var(--ease-out-warm)",
+            }}
+          />
+        </button>
 
         {contentExpanded ? (
           <div style={{ padding: "6px 9px" }}>

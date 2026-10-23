@@ -30,8 +30,9 @@ Password:
   $env:OMP_WEB_PASSWORD="secret"; ompweb   # PowerShell
   set OMP_WEB_PASSWORD=secret&& ompweb     # CMD
 
-Security: use HTTPS via a trusted reverse proxy or VPN when binding to a
-non-loopback hostname, so the password and session cookie stay private.`);
+Security: without a password, a non-loopback bind serves only loopback and
+private LAN/VPN clients that open it by IP address. Use a password and HTTPS
+via a trusted reverse proxy or VPN for anything wider.`);
 }
 
 function parseLaunchOptions(args = process.argv.slice(2), env = process.env) {

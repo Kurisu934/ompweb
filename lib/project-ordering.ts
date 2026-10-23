@@ -13,15 +13,18 @@ import { workspaceKeyOf } from "./workspace-memory";
 // would make project rows jump around constantly. Registration order is
 // stable — it only changes when the user explicitly adds a project.
 // Session-discovered projects (no addedAt) follow the registered ones in
-// path order, which is also stable.
+// path order, which is also stable. Pinned projects always form a leading
+// section; every rule above applies within each section.
 // ============================================================================
 
-/** Sort projects by most-recently-added (addedAt desc), then by path for a
- *  deterministic order. Projects without addedAt (session-discovered) always
- *  sort below registered ones. The order never depends on session activity,
- *  so project rows stay put while sessions refresh. */
+/** Sort projects pinned-first, then by manual sortOrder, then most-recently-
+ *  added (addedAt desc), then by path for a deterministic order. Projects
+ *  without addedAt (session-discovered) always sort below registered ones.
+ *  The order never depends on session activity, so project rows stay put
+ *  while sessions refresh. */
 export function sortManagedProjects(projects: ManagedProject[]): ManagedProject[] {
   return [...projects].sort((a, b) => {
+    if (Boolean(a.pinned) !== Boolean(b.pinned)) return a.pinned ? -1 : 1;
     const aManual = a.sortOrder !== undefined;
     const bManual = b.sortOrder !== undefined;
     if (aManual !== bManual) return aManual ? -1 : 1;
@@ -35,6 +38,52 @@ export function sortManagedProjects(projects: ManagedProject[]): ManagedProject[
     }
     return a.path.localeCompare(b.path);
   });
+}
+
+/** Where a dragged project lands: next to another row, or appended to a
+ *  section (pinning appends to the end of the pinned section, unpinning puts
+ *  the project at the top of the unpinned one). */
+export type ProjectDropTarget =
+  | { path: string; position: "before" | "after" }
+  | { pinned: boolean };
+
+/** Move one project within a pinned-first ordered list. The moved project
+ *  adopts its destination's section (dropping next to a pinned row pins it).
+ *  Returns the full new order, or null when nothing would change. */
+export function moveManagedProject(
+  ordered: ManagedProject[],
+  sourcePath: string,
+  target: ProjectDropTarget,
+): ManagedProject[] | null {
+  const from = ordered.findIndex((project) => project.path === sourcePath);
+  if (from < 0) return null;
+  const source = ordered[from]!;
+  const rest = ordered.filter((_, index) => index !== from);
+  let index: number;
+  let pinned: boolean;
+  if ("path" in target) {
+    if (target.path === sourcePath) return null;
+    const targetIndex = rest.findIndex((project) => project.path === target.path);
+    if (targetIndex < 0) return null;
+    pinned = Boolean(rest[targetIndex]!.pinned);
+    index = target.position === "before" ? targetIndex : targetIndex + 1;
+  } else {
+    pinned = target.pinned;
+    index = rest.filter((project) => project.pinned).length;
+  }
+  const moved: ManagedProject = { ...source, pinned: pinned || undefined };
+  rest.splice(index, 0, moved);
+  const unchanged = Boolean(source.pinned) === pinned && rest.every((project, i) => project.path === ordered[i]!.path);
+  return unchanged ? null : rest;
+}
+
+/** Keyboard/menu reorder: swap with the neighbor in the same section.
+ *  Returns null at a section boundary (moving never changes pinned state). */
+export function shiftManagedProject(ordered: ManagedProject[], path: string, delta: -1 | 1): ManagedProject[] | null {
+  const index = ordered.findIndex((project) => project.path === path);
+  const neighbor = index < 0 ? undefined : ordered[index + delta];
+  if (!neighbor || Boolean(neighbor.pinned) !== Boolean(ordered[index]!.pinned)) return null;
+  return moveManagedProject(ordered, path, { path: neighbor.path, position: delta < 0 ? "before" : "after" });
 }
 
 /** Running/unread/exit session counts per project, for the activity indicators

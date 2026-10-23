@@ -1,4 +1,5 @@
 "use client";
+import { matchesShortcut } from "@/lib/keyboard-shortcuts";
 
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
@@ -63,7 +64,7 @@ export const CommandPalette = memo(function CommandPalette({ onSelectSession, on
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+      if (matchesShortcut("commandPalette", event)) {
         event.preventDefault();
         setOpen((value) => !value);
       }

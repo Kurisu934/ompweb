@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-require-imports -- Node-only browser QA runner. */
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const assert = require('node:assert/strict');
 const fs = require('node:fs/promises');
@@ -76,7 +75,8 @@ async function audit(page) {
       }
       await page.getByRole('button', { name: '设置', exact: true }).click();
       const mode = page.getByRole('combobox', { name: '文字配色模式' });
-      await mode.selectOption('fixed');
+      await mode.click();
+      await page.getByRole('option', { name: '固定颜色', exact: true }).click();
       const hex = page.getByRole('textbox', { name: '文字颜色 HEX' });
       await hex.fill('#c7c4dc'); await hex.press('Enter'); await pause(page);
       a = await audit(page);
@@ -92,13 +92,15 @@ async function audit(page) {
       await page.reload({ waitUntil: 'networkidle' }); await pause(page);
       assert.equal(await ink(page), '#757575', 'custom color persists across reloads');
       await page.getByRole('button', { name: '设置', exact: true }).click();
-      await mode.selectOption('auto'); await pause(page);
+      await mode.click();
+      await page.getByRole('option', { name: '自动黑白', exact: true }).click(); await pause(page);
       a = await audit(page);
       assert.ok(['#000000', '#ffffff'].includes(a.color));
       assert.deepEqual(a.colors, [rgb(a.color)]);
       assert.ok(a.ratios.every(r => r >= 4.5));
       assert.equal(a.overflow, false);
-      await mode.selectOption('material'); await pause(page);
+      await mode.click();
+      await page.getByRole('option', { name: 'Material 配色', exact: true }).click(); await pause(page);
       a = await audit(page);
       assert.equal(a.color, initial);
       assert.ok(a.ratios.every(r => r >= 4.5));

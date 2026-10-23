@@ -247,6 +247,9 @@ Environment=${environmentLine([["PATH", pathDirs.join(path.delimiter)]])}
 EnvironmentFile=${escapeUnitPath(envPath)}
 Restart=on-failure
 RestartSec=3
+# An agent command killed by the kernel OOM killer must not stop the whole
+# service (systemd's default OOMPolicy=stop would).
+OOMPolicy=continue
 
 [Install]
 WantedBy=default.target

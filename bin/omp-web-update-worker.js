@@ -118,15 +118,21 @@ async function stopOriginalProcesses() {
 async function runManagerGate() {
   updateStatus({ stage: "installing" });
   if (kind === "omp") {
-    // Run omp update
+    // omp replaces its binary by rename, so running sessions keep the old one.
     const bin = process.env.OMP_WEB_OMP_BIN || "omp";
-    // Try resolve via packageDir/../?
-    await new Promise((resolve) => {
-      const child = cp.spawn(bin, ["update"], { timeout: 5 * 60 * 1000, windowsHide: true, env: { ...process.env, FORCE_COLOR: "0", NO_COLOR: "1" } });
-      child.on("close", () => resolve());
-      child.on("error", () => resolve());
-      setTimeout(() => { try { child.kill("SIGKILL"); } catch {} resolve(); }, 5 * 60 * 1000 + 1000);
+    const result = cp.spawnSync(bin, ["update"], {
+      timeout: 5 * 60 * 1000,
+      windowsHide: true,
+      encoding: "utf8",
+      maxBuffer: 4 * 1024 * 1024,
+      env: { ...process.env, FORCE_COLOR: "0", NO_COLOR: "1" },
+      shell: process.platform === "win32",
     });
+    if (result.error || result.status !== 0) {
+      const output = `${result.stderr || ""}\n${result.stdout || ""}`.trim().slice(-400);
+      const detail = output || (result.error ? String(result.error.message || result.error.code || "") : "");
+      throw new Error(`omp update failed (exit ${result.status ?? "none"})${detail ? `: ${detail}` : ""}`);
+    }
     return;
   }
   // App update via npm/bun

@@ -18,7 +18,3 @@ export const sameMemoFields = (a: MemoFields, b: MemoFields) => a.title === b.ti
 export const sortMemos = (memos: Memo[]) => [...memos].sort((a, b) => Number(b.pinned) - Number(a.pinned) || b.updatedAt.localeCompare(a.updatedAt) || a.id.localeCompare(b.id));
 export const MEMOS_OPEN_EVENT = "omp-web:open-memos";
 export function openMemos() { window.dispatchEvent(new Event(MEMOS_OPEN_EVENT)); }
-export function isMemoShortcut(event: Pick<KeyboardEvent, "key" | "repeat" | "isComposing" | "keyCode" | "ctrlKey" | "altKey" | "shiftKey" | "metaKey" | "defaultPrevented">) {
-  return event.key === "Insert" && !event.repeat && !event.isComposing && event.keyCode !== 229 && !event.defaultPrevented
-    && !event.ctrlKey && !event.altKey && !event.shiftKey && !event.metaKey;
-}

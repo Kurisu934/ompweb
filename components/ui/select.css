@@ -1,0 +1,43 @@
+.form-select {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+  min-height: var(--control-height, 32px);
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--bg);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+  outline: none;
+}
+.form-select-value { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.form-select-icon { display: flex; flex-shrink: 0; margin-left: auto; color: var(--text-muted); }
+.form-select:focus-visible, .form-select[data-popup-open] { border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 28%, transparent); }
+.form-select[aria-invalid="true"] { border-color: var(--status-error); }
+.form-select:disabled { opacity: 0.6; cursor: not-allowed; }
+.form-select-positioner { z-index: 1100; outline: none; max-width: var(--available-width); }
+.form-select-popup {
+  min-width: var(--anchor-width);
+  max-width: min(640px, var(--available-width));
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--bg-panel);
+  color: var(--text);
+  box-shadow: var(--shadow-pop);
+  overflow: hidden;
+  outline: none;
+}
+.form-select-list { max-height: min(320px, var(--available-height)); overflow-y: auto; overscroll-behavior: contain; padding: 4px; outline: none; }
+.form-select-option { position: relative; display: flex; align-items: center; min-height: 32px; padding: 6px 10px 6px 30px; border-radius: var(--radius-control); font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; white-space: normal; cursor: pointer; outline: none; user-select: none; }
+.form-select-option[data-selected] { background: var(--bg-selected); }
+.form-select-option[data-highlighted] { background: var(--bg-hover); }
+.form-select-option[data-disabled] { opacity: 0.5; cursor: not-allowed; }
+.form-select-check { position: absolute; left: 8px; display: flex; }
+@media (pointer: coarse) { .form-select, .form-select-option { min-height: 44px; } }

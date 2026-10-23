@@ -14,7 +14,7 @@ const id = '11111111111111111111111111111111', imported = '222222222222222222222
     await page.route('**/api/wallpapers/*/media*', r => r.fulfill({ body: video, contentType: 'video/mp4' }));
     await page.route('**/api/wallpapers/upload?*', r => r.fulfill({ json: { id: imported, kind: 'video' } }));
     await page.goto(base);
-    await page.getByRole('button', { name: /^(壁纸|Wallpapers)$/ }).click();
+    await page.getByRole('button', { name: /Wallpaper settings|壁纸设置/ }).click();
     await page.getByRole('button', { name: 'QA video', exact: true }).click();
     await page.waitForFunction(() => document.querySelector('.wallpaper-backdrop video')?.currentTime > .1);
     assert.equal(await page.evaluate(() => JSON.parse(localStorage.getItem('omp-web:wallpaper')).paused), false);

@@ -23,6 +23,7 @@ test("custom and compaction messages expose glass surfaces without losing their 
     role: "custom", customType: "async-result", display: true, content, details: { jobs: 2 },
   } }));
   assert.ok(view.container.querySelector(".message-custom.wallpaper-surface"));
+  fireEvent.click(view.getByRole("button", { name: "2 background jobs have completed. Job bg_15: done." }));
   fireEvent.click(view.getByRole("button", { name: "Show details" }));
   assert.equal(view.container.querySelector("pre").textContent, content);
   assert.deepEqual(JSON.parse(view.container.querySelector(".message-custom > pre").textContent), { jobs: 2 });
@@ -500,18 +501,32 @@ test("advisor custom messages use the localized advisor label", () => {
   assert.doesNotMatch(html, /customType/);
 });
 
-test("async-result notices keep their exact line layout and drop the wrapper tag", () => {
-  const html = renderToStaticMarkup(React.createElement(MessageView, {
-    message: {
-      role: "custom",
-      customType: "async-result",
-      content: "<system-notice>\nBackground job bg_1 has completed. Resume your work using the result below.\n/root/repo\n---\nWall time: 0.16 seconds\n</system-notice>",
-      display: true,
-    },
-  }));
-  assert.match(html, /<pre style="[^"]*white-space:pre;[^"]*">Background job bg_1 has completed\. Resume your work using the result below\.\n\/root\/repo\n---\nWall time: 0\.16 seconds<\/pre>/);
-  assert.doesNotMatch(html, /word-break/);
-  assert.doesNotMatch(html, /system-notice|<h2/);
+test("async-result previews expand to the full verbatim output and preserve expansion across updates", () => {
+  const output = "Background job bg_1 has completed.\n/root/repo\n---\n    indented output\n".repeat(5);
+  const message = {
+    role: "custom", customType: "async-result", display: true,
+    content: `<system-notice>\n${output}</system-notice>`,
+  };
+  const view = render(React.createElement(MessageView, { message }));
+  assert.equal(view.container.querySelector("pre"), null);
+  const preview = view.getByRole("button", { name: /^Background job bg_1/ });
+  assert.ok(preview.textContent.includes("Background job bg_1"));
+  assert.ok(preview.textContent.length < output.length);
+  fireEvent.click(preview);
+  assert.equal(view.container.querySelector("pre").textContent, output.trim());
+  assert.equal(view.container.querySelector("h2"), null);
+  view.rerender(React.createElement(MessageView, { message: {
+    ...message, content: `<system-notice>\n${output}Final result\n</system-notice>`,
+  } }));
+  assert.equal(view.container.querySelector("pre").textContent, `${output}Final result`);
+  const toggle = view.getByRole("button", { name: "async-result" });
+  assert.equal(toggle.getAttribute("aria-expanded"), "true");
+  fireEvent.click(toggle);
+  assert.equal(toggle.getAttribute("aria-expanded"), "false");
+  assert.equal(view.container.querySelector("pre"), null);
+  fireEvent.click(toggle);
+  assert.equal(toggle.getAttribute("aria-expanded"), "true");
+  assert.equal(view.container.querySelector("pre").textContent, `${output}Final result`);
 });
 
 test("late LSP diagnostic notices keep their exact line layout and drop the wrapper tag", () => {
@@ -812,4 +827,31 @@ test("user messages still fork at their own entry", async (t) => {
   await act(async () => { fireEvent.click(view.getByRole("button", { name: FORK_LABEL })); });
   assert.deepEqual(forked, ["user-7"]);
   view.unmount();
+});
+
+test("activity file links resolve against the current session workspace in single and grouped rows", () => {
+  for (const grouped of [false, true]) {
+    const opened = [];
+    const props = {
+      message: {
+        role: "assistant",
+        content: [
+          { type: "toolCall", toolCallId: "source", toolName: "read", input: { path: "lib/wallpaper-mesh.ts:35-220" } },
+          ...(grouped ? [{ type: "toolCall", toolCallId: "internal", toolName: "read", input: { path: "xd://lsp" } }] : []),
+        ],
+      },
+      cwd: "/projects/first",
+      toolCallsDefaultCollapsed: false,
+      onOpenFile: path => opened.push(path),
+    };
+    const view = render(React.createElement(MessageView, props));
+    const links = () => view.container.querySelectorAll(".activity-file-link");
+    fireEvent.click(links()[0]);
+    assert.deepEqual(opened, ["/projects/first/lib/wallpaper-mesh.ts"]);
+    assert.equal(links().length, 1);
+    view.rerender(React.createElement(MessageView, { ...props, cwd: "/projects/second" }));
+    fireEvent.keyDown(links()[0], { key: "Enter" });
+    assert.deepEqual(opened, ["/projects/first/lib/wallpaper-mesh.ts", "/projects/second/lib/wallpaper-mesh.ts"]);
+    view.unmount();
+  }
 });

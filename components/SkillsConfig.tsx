@@ -943,7 +943,7 @@ export function SkillsConfig({
             ×
           </button>
         </div>)}
-        {!embedded && onSelectTab && <SettingsTabs active="skills" onSelect={onSelectTab} />}
+        {!embedded && onSelectTab && <SettingsTabs active="extensions" onSelect={onSelectTab} />}
 
         {/* Body */}
         <div style={{ flex: 1, display: "flex", flexDirection: isMobile ? "column" : "row", overflow: "hidden" }}>

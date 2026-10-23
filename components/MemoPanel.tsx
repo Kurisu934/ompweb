@@ -5,16 +5,34 @@ import { Dialog, DialogContent, DialogTitle, Tooltip } from "./ui/primitives";
 import { MarkdownBody } from "./MarkdownBody";
 import { useMemos } from "@/hooks/useMemos";
 import { useI18n } from "@/lib/i18n";
-import { isMemoShortcut, MAX_MEMO_CONTENT, MAX_MEMO_TITLE, MEMOS_OPEN_EVENT, sortMemos } from "@/lib/memos";
+import { MAX_MEMO_CONTENT, MAX_MEMO_TITLE, MEMOS_OPEN_EVENT, sortMemos } from "@/lib/memos";
+import { matchesShortcut } from "@/lib/keyboard-shortcuts";
 import "./memos.css";
+
+const MODE_STORAGE_KEY = "omp-web:memo-mode";
+
+function loadPreview(id: string): boolean {
+  if (typeof window === "undefined") return false;
+  try { return window.localStorage.getItem(`${MODE_STORAGE_KEY}:${id}`) === "preview"; }
+  catch { return false; }
+}
 
 export function MemoPanel() {
   const { t, locale } = useI18n();
   const [open, setOpen] = useState(false), [search, setSearch] = useState("");
-  const [preview, setPreview] = useState(false), [mobileList, setMobileList] = useState(true), [confirmDelete, setConfirmDelete] = useState(false);
+  const [previewById, setPreviewById] = useState<Record<string, boolean>>({});
+  const [mobileList, setMobileList] = useState(true), [confirmDelete, setConfirmDelete] = useState(false);
   const lastFocus = useRef<HTMLElement | null>(null);
   const isOpen = useRef(false);
   const notes = useMemos(open);
+  const memoId = notes.draft?.id;
+  const preview = memoId ? (previewById[memoId] ?? loadPreview(memoId)) : false;
+  function setPreview(next: boolean) {
+    if (!memoId) return;
+    setPreviewById(current => ({ ...current, [memoId]: next }));
+    try { window.localStorage.setItem(`${MODE_STORAGE_KEY}:${memoId}`, next ? "preview" : "edit"); }
+    catch { /* Keep each memo's selection usable when browser storage is unavailable. */ }
+  }
   const { flush } = notes;
   const close = useCallback(() => { isOpen.current = false; void flush(); setOpen(false); setConfirmDelete(false); }, [flush]);
   useEffect(() => {
@@ -24,9 +42,8 @@ export function MemoPanel() {
     };
     const keydown = (event: KeyboardEvent) => {
       if (event.isComposing || event.keyCode === 229) return;
-      if (isMemoShortcut(event)) {
-        // Preserve Insert combinations (including Shift+Insert paste), IME and
-        // other modal workflows; plain Insert also works from the chat editor.
+      if (matchesShortcut("toggleMemos", event)) {
+        // Preserve IME and other modal workflows; also works from the chat editor.
         if (!isOpen.current && document.querySelector('[role="dialog"]:not(.memo-dialog):not(.toast-card), [role="alertdialog"]')) return;
         event.preventDefault(); event.stopImmediatePropagation();
         if (isOpen.current) close(); else show();
@@ -70,11 +87,11 @@ export function MemoPanel() {
         <aside className="memo-sidebar" aria-label={t("memos.list")}>
           <div className="memo-list-toolbar">
             <label className="memo-search"><Search size={15} /><input type="search" aria-label={t("memos.search")} placeholder={t("memos.search")} value={search} onChange={e => setSearch(e.target.value)} /></label>
-            {button(t("memos.new"), <Plus size={18} />, () => { setSearch(""); setPreview(false); setConfirmDelete(false); void notes.create().then(() => setMobileList(false)); }, disabled)}
+            {button(t("memos.new"), <Plus size={18} />, () => { setSearch(""); setConfirmDelete(false); void notes.create().then(() => setMobileList(false)); }, disabled)}
             {button(t("memos.refresh"), <RefreshCw size={15} />, () => void notes.refresh(), disabled)}
           </div>
           <div className="memo-list" aria-busy={notes.loading}>
-            {notes.loading && !notes.memos.length ? <p className="memo-empty">{t("memos.loading")}</p> : list.length ? list.map(m => <button className="memo-list-item" type="button" key={m.id} disabled={disabled} aria-current={notes.draft?.id === m.id ? "true" : undefined} onClick={() => { setConfirmDelete(false); setPreview(false); void notes.select(m).then(() => setMobileList(false)); }}>
+            {notes.loading && !notes.memos.length ? <p className="memo-empty">{t("memos.loading")}</p> : list.length ? list.map(m => <button className="memo-list-item" type="button" key={m.id} disabled={disabled} aria-current={notes.draft?.id === m.id ? "true" : undefined} onClick={() => { setConfirmDelete(false); void notes.select(m).then(() => setMobileList(false)); }}>
               <span className="memo-list-title">{m.pinned && <Pin size={12} />}<strong>{m.title.trim() || t("memos.untitled")}</strong></span>
               <span className="memo-snippet">{m.content.replace(/\s+/g, " ").slice(0, 110) || t("memos.emptyNote")}</span>
               <time dateTime={m.updatedAt}>{new Date(m.updatedAt).toLocaleDateString(locale, { month: "short", day: "numeric" })}</time>

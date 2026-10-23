@@ -3,6 +3,7 @@ import { apiErrorResponse } from "@/lib/api-utils";
 import { getContentDisposition } from "@/lib/content-disposition";
 import fs from "fs";
 import path from "path";
+import { isUtf8 } from "buffer";
 import {
   getAllowedFileRoots,
   isExistingFilePathAllowed,
@@ -29,6 +30,7 @@ import {
   validateUploadFileNames,
 } from "@/lib/file-upload";
 import { parseFormDataWithinLimit, parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
+import { FileMutationError, createFileEntry, deleteFileEntry, readEditableFile, renameFileEntry, saveTextFile } from "@/lib/file-mutations";
 
 const IGNORED_NAMES = new Set([
   "node_modules", ".git", ".next", "dist", "build", "__pycache__",
@@ -38,7 +40,7 @@ const IGNORED_NAMES = new Set([
 
 const IGNORED_SUFFIXES = [".pyc"];
 
-const FILE_REQUEST_TYPES = ["list", "read", "download", "meta", "preview", "watch"] as const;
+const FILE_REQUEST_TYPES = ["list", "read", "download", "meta", "preview", "watch", "edit"] as const;
 type FileRequestType = typeof FILE_REQUEST_TYPES[number];
 const FILE_REQUEST_TYPE_SET = new Set<string>(FILE_REQUEST_TYPES);
 const MAX_UPLOAD_FILE_BYTES = 25 * 1024 * 1024;
@@ -408,6 +410,57 @@ ${bodyHtml}
 </body>
 </html>`;
 }
+function mutationErrorResponse(error: unknown): NextResponse {
+  if (error instanceof FileMutationError) {
+    return NextResponse.json({ error: error.message, code: error.code }, { status: error.status });
+  }
+  const code = (error as NodeJS.ErrnoException)?.code;
+  if (code === "ENOENT") return NextResponse.json({ error: "File or directory not found", code: "file_not_found" }, { status: 404 });
+  if (code === "EEXIST" || code === "ENOTEMPTY") return NextResponse.json({ error: "A file or folder with that name already exists", code: "file_exists" }, { status: 409 });
+  if (code === "EACCES" || code === "EPERM") return NextResponse.json({ error: "Access denied", code: "access_denied" }, { status: 403 });
+  return apiErrorResponse(error);
+}
+
+async function mutateFile(request: NextRequest, params: Promise<{ path: string[] }>) {
+  try {
+    const filePath = filePathFromSegments((await params).path);
+    const roots = await getAllowedFileRoots();
+    if (request.method === "DELETE") {
+      await deleteFileEntry(filePath, roots);
+      return NextResponse.json({ ok: true });
+    }
+    // JSON escaping can expand a byte of text to six bytes.
+    const body = await parseJsonWithinLimit<{ content?: unknown; revision?: unknown; action?: unknown; name?: unknown }>(request, TEXT_PREVIEW_MAX_BYTES * 6 + 1024);
+    if (!body || typeof body !== "object") throw new FileMutationError("file_edit_invalid", 400, "Invalid file operation");
+    if (request.method === "PUT") {
+      return NextResponse.json(saveTextFile(filePath, body.content, body.revision, roots));
+    }
+    if (body.action === "create-file" || body.action === "create-directory") {
+      return NextResponse.json({ path: createFileEntry(filePath, body.name, body.action === "create-directory", roots) }, { status: 201 });
+    }
+    if (body.action === "rename") {
+      return NextResponse.json({ path: renameFileEntry(filePath, body.name, roots) });
+    }
+    throw new FileMutationError("file_edit_invalid", 400, "Invalid file operation");
+  } catch (error) {
+    if (error instanceof RequestBodyTooLargeError) return NextResponse.json({ error: "File exceeds the editor limit", code: "file_too_large_preview" }, { status: 413 });
+    if (error instanceof SyntaxError) return NextResponse.json({ error: "Invalid JSON", code: "file_edit_invalid" }, { status: 400 });
+    return mutationErrorResponse(error);
+  }
+}
+
+export async function PUT(request: NextRequest, { params }: { params: Promise<{ path: string[] }> }) {
+  return mutateFile(request, params);
+}
+
+export async function PATCH(request: NextRequest, { params }: { params: Promise<{ path: string[] }> }) {
+  return mutateFile(request, params);
+}
+
+export async function DELETE(request: NextRequest, { params }: { params: Promise<{ path: string[] }> }) {
+  return mutateFile(request, params);
+}
+
 
 export async function GET(
   request: NextRequest,
@@ -424,6 +477,11 @@ export async function GET(
     const sessionId = request.nextUrl.searchParams.get("sessionId");
 
     const allowedRoots = await getAllowedFileRoots();
+    if (type === "edit") {
+      try {
+        return NextResponse.json(readEditableFile(filePath, allowedRoots), { headers: { "Cache-Control": "no-store" } });
+      } catch (error) { return mutationErrorResponse(error); }
+    }
     const allowedByRoot = isFilePathAllowed(filePath, allowedRoots);
     const allowedBySessionReference =
       !allowedByRoot &&
@@ -466,9 +524,11 @@ export async function GET(
       if (stat.size > TEXT_PREVIEW_MAX_BYTES) {
         return NextResponse.json({ error: "File too large for preview (>256KB)", code: "file_too_large_preview" }, { status: 413 });
       }
-      const content = fs.readFileSync(filePath, "utf-8");
+      const bytes = fs.readFileSync(filePath);
+      const content = bytes.toString("utf-8");
+      const editable = allowedByRoot && stat.nlink === 1 && !fs.lstatSync(filePath).isSymbolicLink() && !bytes.includes(0) && isUtf8(bytes);
       const language = getLanguage(filePath);
-      return NextResponse.json({ content, language, size: stat.size });
+      return NextResponse.json({ content, language, size: bytes.length, editable });
     }
 
     if (type === "download") {
@@ -545,7 +605,10 @@ export async function GET(
           // Send initial ping so client knows connection is live
           send("connected", { filePath });
           try {
-            watcher = fs.watch(filePath, () => {
+            // Atomic editor saves replace the inode. Watch the parent so later
+            // saves (and delete/recreate) still reach this subscription.
+            watcher = fs.watch(path.dirname(filePath), (_event, filename) => {
+              if (filename && filename.toString() !== path.basename(filePath)) return;
               try {
                 const s = fs.statSync(filePath);
                 // Some platforms emit watch events for file reads/attribute

@@ -19,10 +19,13 @@ import { TabBar, type Tab } from "./TabBar";
 import { FileExplorer, type FileExplorerHandle } from "./FileExplorer";
 import { GitChangesPanel } from "./GitChangesPanel";
 import { FileViewer } from "./FileViewer";
+import { TerminalPanel } from "./TerminalPanel";
+import { SystemPanel } from "./SystemPanel";
 import { useI18n } from "@/lib/i18n";
 import { getFileName } from "@/lib/file-paths";
+import type { FileEditorStatus, FileMutation } from "@/lib/file-editing";
 
-export type RightPanelView = "explorer" | "git" | "file";
+export type RightPanelView = "explorer" | "git" | "terminal" | "system" | "file";
 
 interface Props {
   fileTabs: Tab[];
@@ -50,14 +53,18 @@ interface Props {
   isMobile: boolean;
   isCompactOverlay: boolean;
   onOpenFile: (filePath: string, fileName: string, sourceSessionId?: string | null) => void;
+  fileEditorStates: ReadonlyMap<string, FileEditorStatus>;
+  onEditorStateChange: (filePath: string, status: FileEditorStatus) => void;
+  onBeforeFileMutation: (paths: string[]) => boolean;
+  onFileMutation: (mutation: FileMutation) => void;
   onSelectFileTab: (id: string) => void;
   onCloseFileTab: (id: string) => void;
-  onCloseOtherFileTabs: () => void;
+  onCloseOtherFileTabs: (id: string) => void;
   onCloseAllFileTabs: () => void;
-  onMentionActiveFile: () => void;
-  onCopyActiveFilePath: () => void;
-  onDownloadActiveFile: () => void;
-  onRevealActiveFile: () => void;
+  onMentionFileTab: (id: string) => void;
+  onCopyFileTabPath: (id: string) => void;
+  onDownloadFileTab: (id: string) => void;
+  onRevealFileTab: (id: string) => void;
   onExplorerRefresh: () => void;
   onExplorerRefreshDone: () => void;
   onAtMention: (relativePath: string, isDir: boolean) => void;
@@ -67,6 +74,8 @@ interface Props {
   onResetRightPanelWidth: () => void;
   onRightPanelResizeStart: (e: React.MouseEvent) => void;
   onRightPanelResizeKey: (e: React.KeyboardEvent) => void;
+  /** Latest "Open in terminal" request; a new id starts a shell in its cwd. */
+  terminalRequest: { id: number; cwd: string } | null;
 }
 
 // Memo boundary: AppShell re-renders on polls, timers, and session updates
@@ -100,14 +109,18 @@ export const RightPanel = memo(function RightPanel({
   isMobile,
   isCompactOverlay,
   onOpenFile,
+  fileEditorStates,
+  onEditorStateChange,
+  onBeforeFileMutation,
+  onFileMutation,
   onSelectFileTab,
   onCloseFileTab,
   onCloseOtherFileTabs,
   onCloseAllFileTabs,
-  onMentionActiveFile,
-  onCopyActiveFilePath,
-  onDownloadActiveFile,
-  onRevealActiveFile,
+  onMentionFileTab,
+  onCopyFileTabPath,
+  onDownloadFileTab,
+  onRevealFileTab,
   onExplorerRefresh,
   onExplorerRefreshDone,
   onAtMention,
@@ -117,8 +130,10 @@ export const RightPanel = memo(function RightPanel({
   onResetRightPanelWidth,
   onRightPanelResizeStart,
   onRightPanelResizeKey,
+  terminalRequest,
 }: Props) {
   const { t } = useI18n();
+  const [systemWarning, setSystemWarning] = useState(false);
   const activeFileTab = fileTabs.find((tab) => tab.id === activeFileTabId) ?? null;
   const gitBadge = explorerIsRepo ? explorerGitCount : 0;
   const [visitedViews, setVisitedViews] = useState<Set<RightPanelView>>(() => new Set(["explorer"]));
@@ -185,7 +200,7 @@ export const RightPanel = memo(function RightPanel({
         <div className="right-panel-toolbar wallpaper-surface" style={{ display: "flex", alignItems: "center", flexShrink: 0, background: "var(--bg-panel)", borderBottom: "1px solid var(--border)", minHeight: isMobile ? 44 : 36, paddingRight: isMobile ? 44 : 36, flexWrap: "wrap" }}>
           <div style={{ flex: isMobile ? "1 0 100%" : "1 1 160px", overflow: "hidden", minWidth: 0 }}>
             <TabBar
-              tabs={fileTabs}
+              tabs={fileTabs.map((tab) => fileEditorStates.has(tab.filePath) ? { ...tab, label: `${tab.label} *` } : tab)}
               activeTabId={rightView === "file" ? activeFileTabId ?? "" : ""}
               onSelectTab={onSelectFileTab}
               onCloseTab={onCloseFileTab}
@@ -195,6 +210,17 @@ export const RightPanel = memo(function RightPanel({
               gitSelected={rightView === "git"}
               onSelectGit={() => onSelectView("git")}
               gitBadge={gitBadge}
+              terminalSelected={rightView === "terminal"}
+              onSelectTerminal={() => onSelectView("terminal")}
+              systemSelected={rightView === "system"}
+              onSelectSystem={() => onSelectView("system")}
+              systemWarning={systemWarning}
+              onCloseOtherTabs={onCloseOtherFileTabs}
+              onCloseAllTabs={onCloseAllFileTabs}
+              onMentionTab={onMentionFileTab}
+              onCopyTabPath={onCopyFileTabPath}
+              onRevealTab={onRevealFileTab}
+              onDownloadTab={onDownloadFileTab}
             />
           </div>
           {rightView === "explorer" ? (
@@ -263,7 +289,7 @@ export const RightPanel = memo(function RightPanel({
           ) : activeFileTab && (
             <div style={{ display: "flex", alignItems: "center", flexShrink: 0, padding: "0 2px" }} role="toolbar" aria-label={activeFileTab.filePath}>
               <button
-                onClick={onMentionActiveFile}
+                onClick={() => onMentionFileTab(activeFileTab.id)}
                 title={t("appShell.mentionFileInChat")}
                 aria-label={t("appShell.mentionFileInChat")}
                 style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 26, height: 26, padding: 0, background: "none", border: "none", borderRadius: "var(--radius-control)", color: "var(--accent)", cursor: "pointer" }}
@@ -273,7 +299,7 @@ export const RightPanel = memo(function RightPanel({
                 <AtSign size={13} strokeWidth={2.2} aria-hidden="true" />
               </button>
               <button
-                onClick={onCopyActiveFilePath}
+                onClick={() => onCopyFileTabPath(activeFileTab.id)}
                 title={t("appShell.copyFilePath")}
                 aria-label={t("appShell.copyFilePath")}
                 style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 26, height: 26, padding: 0, background: "none", border: "none", borderRadius: "var(--radius-control)", color: "var(--text-dim)", cursor: "pointer" }}
@@ -283,7 +309,7 @@ export const RightPanel = memo(function RightPanel({
                 <Copy size={13} strokeWidth={2} aria-hidden="true" />
               </button>
               <button
-                onClick={onRevealActiveFile}
+                onClick={() => onRevealFileTab(activeFileTab.id)}
                 title={t("appShell.revealInExplorer")}
                 aria-label={t("appShell.revealInExplorer")}
                 style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 26, height: 26, padding: 0, background: revealPath ? "var(--bg-hover)" : "none", border: "none", borderRadius: "var(--radius-control)", color: revealPath ? "var(--accent)" : "var(--text-dim)", cursor: "pointer" }}
@@ -293,7 +319,7 @@ export const RightPanel = memo(function RightPanel({
                 <LocateFixed size={13} strokeWidth={2} aria-hidden="true" />
               </button>
               <button
-                onClick={onDownloadActiveFile}
+                onClick={() => onDownloadFileTab(activeFileTab.id)}
                 title={t("fileExplorer.downloadFile")}
                 aria-label={t("fileExplorer.downloadFile")}
                 style={{ display: "flex", alignItems: "center", justifyContent: "center", width: 26, height: 26, padding: 0, background: "none", border: "none", borderRadius: "var(--radius-control)", color: "var(--text-dim)", cursor: "pointer" }}
@@ -304,7 +330,7 @@ export const RightPanel = memo(function RightPanel({
               </button>
               {fileTabs.length > 1 && (
                 <button
-                  onClick={onCloseOtherFileTabs}
+                  onClick={() => onCloseOtherFileTabs(activeFileTab.id)}
                   title={t("appShell.closeOtherTabs")}
                   aria-label={t("appShell.closeOtherTabs")}
                   style={{ display: "flex", alignItems: "center", justifyContent: "center", height: 26, padding: "0 7px", background: "none", border: "none", borderRadius: "var(--radius-control)", color: "var(--text-dim)", cursor: "pointer", fontSize: 11, fontWeight: 600, whiteSpace: "nowrap" }}
@@ -387,6 +413,8 @@ export const RightPanel = memo(function RightPanel({
                   revealPath={revealPath}
                   onRevealDone={onRevealDone}
                   onGitStatusChange={onExplorerGitStatus}
+                  onBeforeMutation={onBeforeFileMutation}
+                  onMutation={onFileMutation}
                 />
               </div>
             </>
@@ -416,6 +444,18 @@ export const RightPanel = memo(function RightPanel({
             </div>
           ))}
         </div>
+        {/* Terminal tab view — kept mounted once opened so the shell view survives tab switches. */}
+        <div id="workspace-file-panel-terminal" role="tabpanel" aria-label={t("terminal.title")} style={{ display: rightView === "terminal" ? "flex" : "none", flexDirection: "column", flex: 1, minHeight: 0, overflow: "hidden" }}>
+          {visitedViews.has("terminal") && (
+            <TerminalPanel cwd={explorerCwd ?? activeCwd ?? null} active={rightPanelOpen && rightView === "terminal"} request={terminalRequest} />
+          )}
+        </div>
+        {/* System tab view — resource dashboard and memory guard (polls only while mounted). */}
+        <div id="workspace-file-panel-system" role="tabpanel" aria-label={t("systemPanel.title")} style={{ display: rightView === "system" ? "flex" : "none", flexDirection: "column", flex: 1, minHeight: 0, overflow: "hidden" }}>
+          {visitedViews.has("system") && (
+            <SystemPanel active={rightPanelOpen && rightView === "system"} onWarningChange={setSystemWarning} />
+          )}
+        </div>
         {/* Keep open viewers mounted so switching tabs preserves scroll and preview state. */}
         <div id="workspace-file-panel-file" role="tabpanel" aria-label={activeFileTab?.filePath ?? t("appShell.filePanel")} style={{ display: rightView === "file" ? "block" : "none", flex: 1, minHeight: 0, overflow: "hidden" }}>
           {fileTabs.length > 0 ? fileTabs.map((tab) => (
@@ -425,6 +465,8 @@ export const RightPanel = memo(function RightPanel({
                 cwd={activeCwd ?? undefined}
                 sourceSessionId={tab.sourceSessionId}
                 gitRefreshKey={explorerRefreshKey}
+                onEditorStateChange={onEditorStateChange}
+                onSaved={onExplorerRefresh}
                 active={tab.id === activeFileTabId && rightPanelOpen && rightView === "file"}
                 onMentionLines={tab.id === activeFileTabId && rightPanelOpen && rightView === "file" ? onMentionLines : undefined}
                 onOpenFile={(filePath) => onOpenFile(

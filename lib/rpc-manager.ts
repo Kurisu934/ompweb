@@ -1,6 +1,8 @@
 import { randomUUID } from "crypto";
 import { existsSync, realpathSync } from "fs";
 import { homedir } from "os";
+import { join } from "path";
+import { agentInstructionsPath } from "./agent-instructions-store";
 import { validateAgentImages } from "./image-attachments";
 import { hasVisibleAssistantContent } from "./assistant-response";
 import { invalidateModelsCache } from "./models-cache";
@@ -15,10 +17,17 @@ import {
   resolveSessionPath,
 } from "./session-reader";
 import { markShuttingDown, recordRunningSessions, RESUME_PROMPT, takeInterruptedSessions } from "./session-resume";
+import { prepareAskpassSpawn, withWebAskpassPrompt, type AskpassSessionIdentity } from "./askpass";
+import { ompWebDefaultConfigArgs } from "./omp/web-defaults";
+import { ompBinaryFingerprint } from "./omp/omp-cli";
+import { accountRoutingSignature, accountRoutingSpawnArgs, setSessionAccountPins } from "./account-routing";
+import type { AccountPins } from "./account-choices";
+import { dialogAttention, type AttentionItem } from "./attention";
 import { PRESET_FULL } from "./tool-presets";
 import { comparableProjectPath } from "./comparable-path";
 import { isRecord } from "./type-guards";
 import { isReservedLaunchArg, loadProjectRegistry } from "./project-registry";
+import { allowFileRoot } from "./file-access";
 import type {
   BashResultInfo,
   OmpModel,
@@ -166,8 +175,8 @@ export function mapPresetToolNames(toolNames: string[]): string[] {
 const FULL_PRESET_KEY = [...PRESET_FULL].map((n) => n.toLowerCase()).sort().join(",");
 
 /** Extra CLI args for spawning `omp --mode rpc-ui` for a session. */
-export function buildSessionSpawnArgs(sessionFile: string, toolNames?: string[], advisor = false, launchConfig?: ProjectLaunchConfig): string[] {
-  const args: string[] = [];
+export function buildSessionSpawnArgs(sessionFile: string, toolNames?: string[], advisor = false, launchConfig?: ProjectLaunchConfig, webConfigArgs: string[] = []): string[] {
+  const args: string[] = ["--extension", join(process.cwd(), "bin", "omp-web-instructions.ts")];
   if (sessionFile) {
     // An absolute path (or anything containing "/") resolves deterministically:
     // omp's createSessionManager opens it directly via SessionManager.open
@@ -191,6 +200,8 @@ export function buildSessionSpawnArgs(sessionFile: string, toolNames?: string[],
   // args and dash-leading profiles at the spawn boundary even though the
   // API validates them on write.
   if (launchConfig?.profile && !launchConfig.profile.startsWith("-")) args.push("--profile", launchConfig.profile);
+  // omp-web's overlays go before the workspace's own args so a `--config` there wins.
+  args.push(...webConfigArgs);
   if (launchConfig?.extraArgs) args.push(...launchConfig.extraArgs.filter((arg) => !isReservedLaunchArg(arg)));
   return args;
 }
@@ -312,6 +323,19 @@ export class AgentSessionWrapper {
    * or when the header lacks one. Used to detect a spawn fallback so a notice
    * can warn the user the agent is running in a different directory. */
   private readonly recordedCwd: string | null;
+  /** `accountRoutingSignature` the child was spawned with; a mismatch makes
+   * the next idle prompt restart it so changed account pins/disables apply. */
+  accountRoutingSpawned = "";
+  /** `ompBinaryFingerprint` at spawn; an `omp update` replaces the executable
+   * (by rename, so this child keeps running), and the next idle prompt
+   * restarts onto the new one. */
+  ompBinarySpawned: string | null = null;
+
+  /** Whether the child was spawned with outdated account policies or omp binary. */
+  private spawnOutdated(): boolean {
+    return accountRoutingSignature(this._sessionId) !== this.accountRoutingSpawned
+      || ompBinaryFingerprint() !== this.ompBinarySpawned;
+  }
 
   // Plain field assignments (not TS parameter properties) keep this module
   // runnable under Node's strip-only TypeScript mode for probes/tests.
@@ -327,8 +351,28 @@ export class AgentSessionWrapper {
     return this._sessionId;
   }
 
+  /** Who a sudo password request from this child belongs to (lib/askpass.ts). */
+  askpassIdentity(): AskpassSessionIdentity {
+    return { sessionId: this._sessionId, sessionName: this._sessionName, cwd: this.cwd };
+  }
+
   get sessionFile(): string {
     return this._sessionFile;
+  }
+
+  /** pid of this session's omp process (root of every command it runs). */
+  get pid(): number | undefined {
+    return this.isAlive() ? this.proc.pid : undefined;
+  }
+
+  /**
+   * The memory guard (lib/memory-guard.ts) killed a command this session
+   * started: tell the user in the chat and, mid-run, the agent through a
+   * steering message so it does not just retry the same command.
+   */
+  memoryGuardKilled(userNotice: string, agentNote: string): void {
+    this.emit({ type: "notice", level: "warning", message: userNotice });
+    if (this.isRunning()) void this.proc.sendCommand({ type: "steer", message: agentNote }).catch(() => {});
   }
 
   isAlive(): boolean {
@@ -389,6 +433,13 @@ export class AgentSessionWrapper {
     // and keeps the per-question select/editor fallback.
     // Bounded like get_state so a child that never answers cannot stall startup.
     await this.proc.sendCommand({ type: "set_ask_dialog", enabled: true }, GET_STATE_TIMEOUT_MS).catch(() => {});
+    // omp-web's server-side tools (scheduled tasks, wake-up webhooks) work
+    // without a browser tab, so register them here; tabs re-register theirs
+    // through set_host_tools, which merges these back in.
+    const serverTools = serverHostToolDefinitions();
+    if (serverTools.length > 0) {
+      await this.proc.sendCommand({ type: "set_host_tools", tools: serverTools }, GET_STATE_TIMEOUT_MS).catch(() => {});
+    }
     const state = await this.getStateWithTimeout();
     this.applyIdentity(state);
     // Warn when the spawn cwd differs from the session's recorded directory.
@@ -556,6 +607,11 @@ export class AgentSessionWrapper {
       case "host_tool_call": {
         const id = typeof event.id === "string" ? event.id : "";
         const toolName = typeof event.toolName === "string" ? event.toolName : "";
+        const serverTool = id && toolName ? getServerHostTools().get(toolName) : undefined;
+        if (serverTool) {
+          void this.runServerHostTool(id, serverTool, event.arguments);
+          return;
+        }
         // Route REGISTERED host tools to an attached UI (the browser answers
         // via host_tool_result). With no tab on this session, hand the call to
         // any open omp-web tab (the user switched sessions mid-run). Otherwise
@@ -673,10 +729,14 @@ export class AgentSessionWrapper {
       const timeout = typeof event.timeout === "number" ? event.timeout : undefined;
       if (timeout && timeout > 0) {
         event.expiresAt = Date.now() + timeout;
-        const timer = setTimeout(() => this.forgetPendingUiRequest(id), timeout);
+        const timer = setTimeout(() => {
+          this.forgetPendingUiRequest(id);
+          notifyRunningChange();
+        }, timeout);
         timer.unref?.();
         this.uiExpiryTimers.set(id, timer);
       }
+      event.receivedAt = Date.now();
       this.pendingUiRequests.set(id, event);
       return false;
     }
@@ -701,6 +761,21 @@ export class AgentSessionWrapper {
       }
     }
     return false;
+  }
+
+  /** Answer a server host tool call; a thrown error becomes the tool's error text. */
+  private async runServerHostTool(id: string, tool: ServerHostTool, rawArgs: unknown): Promise<void> {
+    const args = rawArgs && typeof rawArgs === "object" && !Array.isArray(rawArgs) ? rawArgs as Record<string, unknown> : {};
+    let text: string;
+    let isError = false;
+    try {
+      text = await tool.run({ sessionId: this.sessionId, cwd: this.recordedCwd ?? this.cwd }, args);
+    } catch (error) {
+      text = error instanceof Error ? error.message : String(error);
+      isError = true;
+    }
+    if (!this.isAlive()) return;
+    this.proc.sendFrame({ type: "host_tool_result", id, isError, result: { content: [{ type: "text", text }] } });
   }
 
   /**
@@ -908,6 +983,27 @@ export class AgentSessionWrapper {
         this.rejectPendingHostUris("The web UI disconnected while the agent was waiting for this URI request");
       }
     };
+  }
+
+  /** Dialogs this session is blocked on until the user answers (lib/attention.ts). */
+  attentionItems(): AttentionItem[] {
+    const items: AttentionItem[] = [];
+    const now = Date.now();
+    for (const [id, event] of this.pendingUiRequests) {
+      const expiresAt = event.expiresAt as number | undefined;
+      if (expiresAt !== undefined && expiresAt <= now) continue;
+      const dialog = dialogAttention(event);
+      if (!dialog) continue;
+      items.push({
+        id,
+        ...dialog,
+        sessionId: this._sessionId,
+        ...(this._sessionName ? { sessionName: this._sessionName } : {}),
+        cwd: this.cwd,
+        createdAt: typeof event.receivedAt === "number" ? event.receivedAt : now,
+      });
+    }
+    return items;
   }
 
   onDestroy(cb: () => void): void {
@@ -1130,10 +1226,24 @@ export class AgentSessionWrapper {
       this.bashRunning = false;
       this.streaming = false;
       this.compacting = false;
+      const askpass = await prepareAskpassSpawn(() => this.askpassIdentity());
+      if (!this._alive) {
+        askpass?.revoke();
+        return;
+      }
+      const routing = await accountRoutingSpawnArgs(this._sessionId, this.cwd);
+      this.accountRoutingSpawned = routing.signature;
+      this.ompBinarySpawned = ompBinaryFingerprint();
       const proc = new RpcProcess({
         cwd: this.cwd,
-        extraArgs: buildSessionSpawnArgs(resumable ? sessionFile : "", undefined, this.advisorSpawned, launchConfigForCwd(this.cwd)),
+        extraArgs: withWebAskpassPrompt(
+          buildSessionSpawnArgs(resumable ? sessionFile : "", undefined, this.advisorSpawned, launchConfigForCwd(this.cwd), [...ompWebDefaultConfigArgs(this.cwd), ...routing.args]),
+          this.cwd,
+          askpass !== null,
+        ),
+        env: { ...askpass?.env, OMP_WEB_AGENT_INSTRUCTIONS_FILE: agentInstructionsPath() },
         onExit: (info) => {
+          askpass?.revoke();
           if (this.proc === proc) this.handleProcessExit(info, proc);
         },
       });
@@ -1192,6 +1302,11 @@ export class AgentSessionWrapper {
           throw new Error("Cannot send a prompt while a shell command is running");
         }
         const streamingBehavior = command.streamingBehavior as "steer" | "followUp" | undefined;
+        // A session that is not on disk yet cannot be restarted in place
+        // (its id would change); it picks changes up at its next respawn.
+        if (!streamingBehavior && !this.isRunning() && existsSync(this._sessionFile) && this.spawnOutdated()) {
+          await this.restart();
+        }
         if (!streamingBehavior) {
           this.responseObserved = false;
           this.responseRunActive = false;
@@ -1405,6 +1520,7 @@ export class AgentSessionWrapper {
         }
         this.forgetPendingUiRequest(id);
         this.proc.sendFrame({ type: "extension_ui_response", id, ...rest });
+        notifyRunningChange();
         return null;
       }
 
@@ -1432,9 +1548,11 @@ export class AgentSessionWrapper {
 
       case "set_host_tools": {
         const tools = Array.isArray(command.tools) ? command.tools as Array<{ name?: unknown; [key: string]: unknown }> : [];
-        const valid = tools.filter((t) => typeof t.name === "string" && t.name);
+        // Server tools are omp-web's own; a browser tool cannot shadow one.
+        const valid = tools.filter((t) => typeof t.name === "string" && t.name && !getServerHostTools().has(t.name));
         this.hostToolNames = new Set(valid.map((t) => t.name as string));
-        await this.proc.sendCommand({ type: "set_host_tools", tools: valid });
+        // omp replaces the whole set, so server tools ride along every time.
+        await this.proc.sendCommand({ type: "set_host_tools", tools: [...valid, ...serverHostToolDefinitions()] });
         return null;
       }
 
@@ -1540,6 +1658,8 @@ export interface RunningSessionUpdate {
   ids: string[];
   runningSessions: RunningRpcSession[];
   exitedSessions: ExitedRpcSession[];
+  /** Dialogs sessions are blocked on until the user answers. */
+  attention: AttentionItem[];
   refreshSessionList: boolean;
 }
 
@@ -1550,6 +1670,7 @@ declare global {
   var __ompRunningListeners: Set<(update: RunningSessionUpdate) => void> | undefined;
   var __ompHostToolListeners: Set<(call: CrossSessionHostToolCall) => void> | undefined;
   var __ompExitedSessions: Map<string, ExitedRpcSession> | undefined;
+  var __ompServerHostTools: Map<string, ServerHostTool> | undefined;
 }
 
 function getExitedMap(): Map<string, ExitedRpcSession> {
@@ -1611,6 +1732,34 @@ export function getRunningRpcSessionIds(): string[] {
   return getRunningRpcSessions().map((s) => s.id);
 }
 
+export function getAttentionItems(): AttentionItem[] {
+  const items: AttentionItem[] = [];
+  for (const session of new Set(getRegistry().values())) {
+    if (session.isAlive()) items.push(...session.attentionItems());
+  }
+  return items;
+}
+
+export interface AgentProcess {
+  pid: number;
+  sessionId: string;
+  sessionName?: string;
+  cwd: string;
+  wrapper: AgentSessionWrapper;
+}
+
+/** Live omp processes, one per session. */
+export function getAgentProcesses(): AgentProcess[] {
+  const processes: AgentProcess[] = [];
+  for (const session of new Set(getRegistry().values())) {
+    const pid = session.pid;
+    if (pid === undefined) continue;
+    const name = session.askpassIdentity().sessionName;
+    processes.push({ pid, sessionId: session.sessionId, ...(name ? { sessionName: name } : {}), cwd: session.cwd, wrapper: session });
+  }
+  return processes;
+}
+
 /** Stop all live omp children after an explicit runtime update. The browser will
  * reconnect sessions on demand and start them with the updated executable. */
 export async function restartAllRpcSessions(): Promise<number> {
@@ -1647,6 +1796,27 @@ export function subscribeRunningSessions(listener: (update: RunningSessionUpdate
 // open omp-web tab (over /api/agent/host-tools/events) instead of being rejected.
 // ----------------------------------------------------------------------------
 
+/** A tool omp-web itself answers (no browser involved). The handler gets the
+ * CALLING session, so a tool can scope what it does to that session. */
+export interface ServerHostTool {
+  definition: { name: string; description: string; parameters: Record<string, unknown> };
+  run: (caller: { sessionId: string; cwd: string }, args: Record<string, unknown>) => Promise<string>;
+}
+
+function getServerHostTools(): Map<string, ServerHostTool> {
+  globalThis.__ompServerHostTools ??= new Map();
+  return globalThis.__ompServerHostTools;
+}
+
+function serverHostToolDefinitions(): ServerHostTool["definition"][] {
+  return [...getServerHostTools().values()].map((tool) => tool.definition);
+}
+
+/** Offer a server-answered tool to every omp child started from now on. */
+export function registerServerHostTool(tool: ServerHostTool): void {
+  getServerHostTools().set(tool.definition.name, tool);
+}
+
 function getHostToolListeners(): Set<(call: CrossSessionHostToolCall) => void> {
   if (!globalThis.__ompHostToolListeners) globalThis.__ompHostToolListeners = new Set();
   return globalThis.__ompHostToolListeners;
@@ -1665,7 +1835,7 @@ export function subscribeHostToolCalls(listener: (call: CrossSessionHostToolCall
 }
 
 // Starts at the empty state so an idle server never broadcasts "nothing changed".
-let lastRunningSnapshot = "[[],[]]";
+let lastRunningSnapshot = "[[],[],[]]";
 
 /**
  * Recompute the running-session-id set and, when it changes, broadcast it.
@@ -1675,13 +1845,14 @@ let lastRunningSnapshot = "[[],[]]";
 export function notifyRunningChange({ refreshSessionList = false }: { refreshSessionList?: boolean } = {}): void {
   const runningSessions = getRunningRpcSessions();
   const exitedSessions = getExitedRpcSessions();
+  const attention = getAttentionItems();
   const ids = runningSessions.map((s) => s.id);
   const byId = (a: { id: string }, b: { id: string }) => a.id.localeCompare(b.id);
-  const snapshot = JSON.stringify([runningSessions.slice().sort(byId), exitedSessions.slice().sort(byId)]);
+  const snapshot = JSON.stringify([runningSessions.slice().sort(byId), exitedSessions.slice().sort(byId), attention.slice().sort(byId)]);
   if (snapshot === lastRunningSnapshot && !refreshSessionList) return;
   lastRunningSnapshot = snapshot;
   syncInterruptibleSessions();
-  const update: RunningSessionUpdate = { ids, runningSessions, exitedSessions, refreshSessionList };
+  const update: RunningSessionUpdate = { ids, runningSessions, exitedSessions, attention, refreshSessionList };
   for (const listener of getRunningListeners()) {
     try { listener(update); } catch { /* ignore listener errors */ }
   }
@@ -1717,6 +1888,66 @@ export async function resumeInterruptedSessions(): Promise<void> {
   }));
 }
 
+/**
+ * Deliver a scheduled message (lib/scheduled-messages.ts) the way the composer
+ * would: a new prompt when the session is idle, a follow-up when a run is in
+ * progress (it then lands after that run). Starts the session's omp if needed.
+ */
+export async function deliverScheduledMessage(sessionId: string, message: string, advisor: boolean): Promise<void> {
+  let session = getRpcSession(sessionId);
+  if (!session?.isAlive()) {
+    const filePath = await resolveSessionPath(sessionId);
+    if (!filePath) throw new Error("Session not found");
+    const header = readSessionHeader(filePath);
+    const { cwd } = resolveSpawnCwdResult(header?.cwd);
+    session = (await startRpcSession(sessionId, filePath, cwd, undefined, advisor, header?.cwd)).session;
+  }
+  await session.send(session.isRunning() ? { type: "follow_up", message } : { type: "prompt", message });
+}
+
+export interface NewSessionOptions {
+  cwd: string;
+  toolNames?: string[];
+  advisor?: boolean;
+  accountPins?: AccountPins;
+  provider?: string;
+  modelId?: string;
+  thinkingLevel?: string;
+}
+
+/**
+ * Spawn a brand-new omp session in `cwd` and apply the chosen model and
+ * thinking level (RPC set_model / set_thinking_level, so failures surface as
+ * command errors and the live model catalog is consulted). The caller sends
+ * the first command and must `destroyAndWait()` the session if that fails;
+ * a failure here already cleans up.
+ */
+export async function spawnNewSession(options: NewSessionOptions): Promise<{ session: AgentSessionWrapper; realSessionId: string }> {
+  // Must be unique per request: startRpcSession coalesces concurrent callers
+  // that share a key onto one session. Date.now() (ms resolution) collides for
+  // requests in the same millisecond, merging two new sessions into one.
+  const tempKey = `__new__${randomUUID()}`;
+  const { session, realSessionId } = await startRpcSession(tempKey, "", options.cwd, options.toolNames, options.advisor === true, undefined, undefined, options.accountPins);
+  // Keep the files-route allowed roots in sync so the new cwd is readable via
+  // /api/files at once instead of 403ing for up to the cache TTL.
+  allowFileRoot(options.cwd);
+  invalidateSessionListCache();
+  try {
+    if (options.provider && options.modelId) {
+      await session.send({ type: "set_model", provider: options.provider, modelId: options.modelId });
+    }
+    if (options.thinkingLevel) {
+      await session.send({ type: "set_thinking_level", level: options.thinkingLevel });
+    }
+  } catch (error) {
+    // Without this a failed preset leaves an orphaned omp process and a
+    // registry entry nobody will ever use.
+    await session.destroyAndWait();
+    throw error;
+  }
+  return { session, realSessionId };
+}
+
 /** Look up the workspace-registered launch config; unregistered projects attach none. */
 function launchConfigForCwd(cwd: string): ProjectLaunchConfig | undefined {
   let canonical = cwd;
@@ -1747,6 +1978,9 @@ export async function startRpcSession(
    * fallback (recorded dir gone) and warn the user. Omit for new sessions. */
   recordedCwd?: string | null,
   launchConfig?: ProjectLaunchConfig,
+  /** Account pins for a NEW session (its id is unknown until omp starts);
+   * saved under the real id once it is. Existing sessions use stored pins. */
+  accountPins?: AccountPins,
 ): Promise<{ session: AgentSessionWrapper; realSessionId: string }> {
   const registry = getRegistry();
   const locks = getLocks();
@@ -1782,10 +2016,20 @@ export async function startRpcSession(
     // The wrapper needs the process and the process's onExit needs the wrapper;
     // the holder breaks that cycle (onExit only fires once the child dies).
     const holder: { wrapper?: AgentSessionWrapper } = {};
+    const askpass = await prepareAskpassSpawn(() => holder.wrapper?.askpassIdentity() ?? { sessionId, cwd });
+    const routing = await accountRoutingSpawnArgs(sessionId, cwd, accountPins);
     const proc = new RpcProcess({
       cwd,
-      extraArgs: buildSessionSpawnArgs(sessionFile, toolNames, advisor === true, launchConfig),
-      onExit: (info) => holder.wrapper?.handleProcessExit(info, proc),
+      extraArgs: withWebAskpassPrompt(
+        buildSessionSpawnArgs(sessionFile, toolNames, advisor === true, launchConfig, [...ompWebDefaultConfigArgs(cwd), ...routing.args]),
+        cwd,
+        askpass !== null,
+      ),
+      env: { ...askpass?.env, OMP_WEB_AGENT_INSTRUCTIONS_FILE: agentInstructionsPath() },
+      onExit: (info) => {
+        askpass?.revoke();
+        holder.wrapper?.handleProcessExit(info, proc);
+      },
     });
     const created = new AgentSessionWrapper(
       proc,
@@ -1795,6 +2039,8 @@ export async function startRpcSession(
       sessionFile ? sessionId : "",
     );
     holder.wrapper = created;
+    created.accountRoutingSpawned = routing.signature;
+    created.ompBinarySpawned = ompBinaryFingerprint();
     created.start();
     try {
       await created.waitUntilReady();
@@ -1818,6 +2064,7 @@ export async function startRpcSession(
     }
 
     const realSessionId = created.sessionId;
+    if (accountPins && Object.keys(accountPins).length > 0) setSessionAccountPins(realSessionId, accountPins);
     created.onDestroy(() => {
       if (registry.get(created.sessionId) === created) registry.delete(created.sessionId);
       if (registry.get(realSessionId) === created) registry.delete(realSessionId);

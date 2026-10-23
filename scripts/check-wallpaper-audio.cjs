@@ -37,8 +37,11 @@ if (!id) throw new Error('Set QA_ID to a local scene with an MP3 soundtrack.');
       await page.waitForFunction(() => window.qaAnalysers.some(a => { const data = new Uint8Array(a.frequencyBinCount); a.getByteFrequencyData(data); return data.some(v => v > 0); }));
       const gain = await page.evaluate(() => window.qaGains[1].gain.value);
       assert.ok(Math.abs(gain - .37) < 1e-5);
+      // Volume lives in Appearance & Personalization → Wallpapers & Glass; compact layouts put the shortcut in the overflow menu.
+      const openWallpapers = page.getByRole('button', { name: /Wallpaper settings|壁纸设置/ });
+      if (!await openWallpapers.isVisible()) await page.locator('.shell-topbar-overflow > summary').click();
+      await openWallpapers.click();
       const volume = page.locator('.wallpaper-volume').first();
-      if (!await volume.isVisible()) await page.locator('.shell-topbar-overflow > summary').click();
       await volume.fill('18');
       await page.waitForFunction(() => Math.abs(window.qaGains[1].gain.value - .18) < 1e-5);
       await page.evaluate(() => { const p = JSON.parse(localStorage.getItem('omp-web:wallpaper')); localStorage.setItem('omp-web:wallpaper', JSON.stringify({ ...p, muted: true, paused: true })); window.dispatchEvent(new Event('omp-web:wallpaper-preferences')); });

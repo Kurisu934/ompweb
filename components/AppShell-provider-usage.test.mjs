@@ -32,13 +32,16 @@ function setup(t, { query = "", refreshMs, hidden = false, online = true, ignore
   return { view, requests, tick, resolve, event };
 }
 
+// The data fields; `refresh` is a function and asserted through behavior.
+const state = (s) => { const { snapshot: data, loading, error } = s.view.result.current; return { snapshot: data, loading, error }; };
+
 test("usage loads immediately and refreshes every minute without blanking the panel", async t => {
   const s = setup(t);
   assert.equal(s.requests.length, 1);
   assert.equal(s.requests[0].url, "/api/provider-usage");
   assert.equal(s.requests[0].cache, "no-store");
   await s.resolve(0, 10);
-  assert.deepEqual(s.view.result.current, { snapshot: snapshot(10), loading: false, error: false });
+  assert.deepEqual(state(s), { snapshot: snapshot(10), loading: false, error: false });
   await s.tick(59_999);
   assert.equal(s.requests.length, 1);
   await s.tick(1);
@@ -121,19 +124,19 @@ test("failed refreshes preserve data, mark an error and recover automatically", 
   await s.resolve(0, 10);
   await s.tick(60_000);
   await act(async () => { s.requests[1].failHttp(); });
-  assert.deepEqual(s.view.result.current, { snapshot: snapshot(10), loading: false, error: true });
+  assert.deepEqual(state(s), { snapshot: snapshot(10), loading: false, error: true });
   await s.event("focus");
   assert.equal(s.requests.length, 2, "focus does not create an error retry storm");
   await s.tick(60_000);
   await s.resolve(2, 20);
-  assert.deepEqual(s.view.result.current, { snapshot: snapshot(20), loading: false, error: false });
+  assert.deepEqual(state(s), { snapshot: snapshot(20), loading: false, error: false });
 });
 
 test("request timeouts release the loading state and retry", async t => {
   const s = setup(t);
   await s.tick(35_000);
   assert.equal(s.requests[0].signal.aborted, true);
-  assert.deepEqual(s.view.result.current, { snapshot: null, loading: false, error: true });
+  assert.deepEqual(state(s), { snapshot: null, loading: false, error: true });
   await s.tick(60_000);
   await s.resolve(1, 20);
   assert.equal(s.view.result.current.error, false);
@@ -148,7 +151,7 @@ test("query changes ignore old responses and disabling cancels requests and time
   await s.resolve(0, 10);
   assert.deepEqual(s.view.result.current.snapshot, snapshot(20));
   s.view.rerender({ query: null });
-  assert.deepEqual(s.view.result.current, { snapshot: null, loading: false, error: false });
+  assert.deepEqual(state(s), { snapshot: null, loading: false, error: false });
   await s.tick(180_000);
   await s.event("online");
   assert.equal(s.requests.length, 2);
@@ -171,4 +174,23 @@ test("an explicit zero refresh interval remains a one-shot request", async t => 
   await s.tick(180_000);
   await s.event("focus");
   assert.equal(s.requests.length, 1);
+});
+
+test("refresh loads at once when idle and once more after a request already running", async t => {
+  const s = setup(t);
+  await s.resolve(0, 10);
+  await act(async () => { s.view.result.current.refresh(); });
+  assert.equal(s.requests.length, 2);
+  // Asked for during that request: no overlap, one follow-up when it ends.
+  await act(async () => { s.view.result.current.refresh(); s.view.result.current.refresh(); });
+  assert.equal(s.requests.length, 2);
+  await s.resolve(1, 20);
+  assert.equal(s.requests.length, 3);
+  await s.resolve(2, 30);
+  assert.deepEqual(state(s).snapshot, snapshot(30));
+  // Back on the regular interval afterwards.
+  await s.tick(59_999);
+  assert.equal(s.requests.length, 3);
+  await s.tick(1);
+  assert.equal(s.requests.length, 4);
 });

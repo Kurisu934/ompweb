@@ -1,7 +1,8 @@
 "use client";
 
-import { memo, useEffect, useLayoutEffect, useState, useCallback, useRef, useMemo, useDeferredValue } from "react";
+import { memo, useEffect, useLayoutEffect, useState, useCallback, useRef, useMemo, useDeferredValue, type ReactNode } from "react";
 import type { ExitedRpcSession, ManagedProject, ProjectLaunchConfig, SessionInfo } from "@/lib/types";
+import type { AttentionItem } from "@/lib/attention";
 import { useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
 import { DirectoryPicker } from "./DirectoryPicker";
@@ -10,9 +11,21 @@ import { ProviderUsageBar } from "./ProviderUsageBar";
 import { Tooltip } from "./ui/primitives";
 import { toast } from "./ui/toast";
 import { clearLastOpenSession, setLastOpenSession, workspaceKeyOf } from "@/lib/workspace-memory";
-import { groupSessionsByProject, projectActivityCounts, sortManagedProjects } from "@/lib/project-ordering";
+import { groupSessionsByProject, moveManagedProject, projectActivityCounts, shiftManagedProject, sortManagedProjects, type ProjectDropTarget } from "@/lib/project-ordering";
 import { comparableProjectPath } from "@/lib/comparable-path";
-import { Archive, Check, ChevronRight, FileUp, Plus, RefreshCw, Search, Settings2, SlidersHorizontal } from "lucide-react";
+import { Archive, CalendarClock, Check, ChevronRight, FileUp, Plus, RefreshCw, Search, Settings2 } from "lucide-react";
+import { openScheduledTasks } from "@/lib/scheduled-tasks-ui";
+import {
+  countActiveSessionFilters,
+  DEFAULT_SESSION_FILTERS,
+  matchesSessionFilters,
+  SESSION_STATUS_FILTERS,
+  sessionActiveWithin,
+  sessionHasStatus,
+  type SessionFilterContext,
+  type SessionFilters,
+} from "@/lib/session-filters";
+import { SessionFilterChips, SessionFilterMenu, type SessionFilterCounts } from "./SessionSidebar-filters";
 import { publishSessionsChanged } from "@/lib/session-change-bus";
 import {
   EMPTY_PROJECT_SET,
@@ -31,7 +44,7 @@ import {
   type WorktreeState,
 } from "./SessionSidebar-helpers";
 import { OmpWebTitle, SIDEBAR_BUTTON_TRANSITION, SidebarIconButton } from "./SessionSidebar-chrome";
-import { ProjectRow, ProjectWorktreeSwitcher } from "./SessionSidebar-rows";
+import { ProjectRow, ProjectSectionDropZone, ProjectSectionLabel, ProjectWorktreeSwitcher } from "./SessionSidebar-rows";
 
 /** Deadline for one /api/sessions fetch. A wedged-but-listening server never
  * answers; without this the initial spinner would pend forever. */
@@ -51,6 +64,12 @@ interface Props {
   optimisticSession?: SessionInfo | null;
   onSelectSession: (session: SessionInfo, isRestore?: boolean) => void;
   onNewSession?: (sessionId: string, cwd: string) => void;
+  /** A workspace header was clicked: show that workspace's new-chat page. */
+  onOpenWorkspace?: (cwd: string) => void;
+  /** Pending "needs you" dialogs from the running-sessions stream. */
+  onAttentionChange?: (items: AttentionItem[]) => void;
+  /** Rendered first among the header utilities (the attention bell). */
+  headerAccessory?: ReactNode;
   initialSessionId?: string | null;
   skipInitialProjectSelection?: boolean;
   onInitialRestoreDone?: () => void;
@@ -78,7 +97,7 @@ interface Props {
 
 
 
-export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onWorkspaceOptionsChange, addProjectOpen, setAddProjectOpen, usageVisible = true, onOpenSettings, onOpenArchive, updateAvailable, settingsOpen = false }: Props) {
+export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, optimisticSession, onSelectSession, onNewSession, onOpenWorkspace, onAttentionChange, headerAccessory, initialSessionId, skipInitialProjectSelection, onInitialRestoreDone, refreshKey, onSessionDeleted, selectedCwd: selectedCwdProp, onCwdChange, onWorkspaceOptionsChange, addProjectOpen, setAddProjectOpen, usageVisible = true, onOpenSettings, onOpenArchive, updateAvailable, settingsOpen = false }: Props) {
 
 
   const { t } = useI18n();
@@ -90,6 +109,11 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   // Managed + session-discovered projects (server-merged, hidden excluded).
   const [projects, setProjects] = useState<ManagedProject[]>([]);
   const [draggedProjectPath, setDraggedProjectPath] = useState<string | null>(null);
+  // The drag source is tracked in a ref immediately (drop handlers read it)
+  // while the state that re-renders the list is deferred one frame: mutating
+  // layout synchronously inside dragstart makes Chrome abort the drag.
+  const draggedProjectRef = useRef<string | null>(null);
+  const [projectDropTarget, setProjectDropTarget] = useState<ProjectDropTarget | null>(null);
   const [projectsError, setProjectsError] = useState<string | null>(null);
   // Add-project picker state.
   const [addProjectBusy, setAddProjectBusy] = useState(false);
@@ -126,7 +150,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   // Client-side workspace/session filtering (Workspaces header controls).
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
-  const [runningOnly, setRunningOnly] = useState(false);
+  const [sessionFilters, setSessionFilters] = useState<SessionFilters>(DEFAULT_SESSION_FILTERS);
   const searchInputRef = useRef<HTMLInputElement>(null);
 
   // Once the SSE stream has delivered a frame it is the source of truth for
@@ -262,6 +286,10 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     }
   }, []);
 
+  const onAttentionChangeRef = useRef(onAttentionChange);
+  useLayoutEffect(() => {
+    onAttentionChangeRef.current = onAttentionChange;
+  }, [onAttentionChange]);
   useEffect(() => {
     // Live running status and session-list invalidations arrive via SSE; the
     // sidebar never has to poll while an agent is working.
@@ -274,11 +302,13 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
           runningSessionIds?: string[];
           runningSessions?: Array<{ id: string; cwd: string }>;
           exitedSessions?: ExitedRpcSession[];
+          attention?: AttentionItem[];
           refreshSessionList?: boolean;
           sessionIds?: string[];
         };
         if (data.type === "running") {
           sseAuthoritativeRef.current = true;
+          onAttentionChangeRef.current?.(data.attention ?? []);
           setRunningSessionIds(new Set(data.runningSessionIds ?? []));
           setExitedSessions(new Map((data.exitedSessions ?? []).map((session) => [session.id, session])));
           if (data.runningSessions) {
@@ -432,13 +462,15 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
   }, []);
 
 
-  /** Activate a project (effective cwd = its root) and expand it, without
-   *  opening a session. */
+  /** Activate a project (effective cwd = its root), expand it, and open its
+   *  new-chat page. The cwd sync alone would keep an open session of the same
+   *  project, and fires nothing when the cwd is already this root. */
   const activateProject = useCallback((path: string) => {
     provisionalSelectionRef.current = false;
     setSelectedCwd(path);
     expandProject(path);
-  }, [expandProject]);
+    onOpenWorkspace?.(path);
+  }, [expandProject, onOpenWorkspace]);
 
   // Notify parent only when the effective cwd actually changes (not when
   // projectRootFor identity changes due to session/worktree refreshes).
@@ -671,30 +703,46 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     [visibleSessions, runningSessionIds, unreadSessionIds, exitedSessions],
   );
 
-  // Client-side filtering (Workspaces header: search + "running only").
+  // Client-side filtering (Workspaces header: search + Filter menu).
   // While a filter is active, workspaces with no matching sessions are hidden
   // so the list reads as a genuine result set; at rest every workspace stays.
   // Deferred search: typing stays responsive (input updates immediately) while the heavy
   // visibleProjectEntries filter runs at lower priority. Combines with the 200ms ETag loadSessions
   // debounce already in place — keystrokes never block the main thread on large session lists.
   const deferredSearchQuery = useDeferredValue(searchQuery);
-  const filtersActive = searchOpen || runningOnly || deferredSearchQuery.trim().length > 0;
+  const sessionFiltersApplied = countActiveSessionFilters(sessionFilters) > 0;
+  const filtersActive = searchOpen || sessionFiltersApplied || deferredSearchQuery.trim().length > 0;
+  const filterContext = useMemo<SessionFilterContext>(() => ({
+    running: runningSessionIds,
+    unread: unreadSessionIds,
+    exited: new Set(exitedSessions.keys()),
+    now: relativeTimeNow,
+  }), [runningSessionIds, unreadSessionIds, exitedSessions, relativeTimeNow]);
+  const filterCounts = useMemo<SessionFilterCounts>(() => {
+    const counts: SessionFilterCounts = { running: 0, unread: 0, exited: 0, "24h": 0, "7d": 0 };
+    for (const session of visibleSessions) {
+      for (const status of SESSION_STATUS_FILTERS) if (sessionHasStatus(session.id, status, filterContext)) counts[status]++;
+      if (sessionActiveWithin(session, "24h", filterContext)) counts["24h"]++;
+      if (sessionActiveWithin(session, "7d", filterContext)) counts["7d"]++;
+    }
+    return counts;
+  }, [visibleSessions, filterContext]);
   const visibleProjectEntries = useMemo(() => {
     const q = deferredSearchQuery.trim().toLowerCase();
     const entries: { project: ManagedProject; sessions: SessionInfo[] }[] = [];
     for (const project of sortedProjects) {
       let list = sessionsByProject.get(project.path) ?? [];
-      if (runningOnly) list = list.filter((s) => runningSessionIds.has(s.id));
+      if (sessionFiltersApplied) list = list.filter((s) => matchesSessionFilters(s, sessionFilters, filterContext));
       if (q) {
         list = list.filter((s) => (s.name ?? "").toLowerCase().includes(q) || s.firstMessage.toLowerCase().includes(q));
       }
       // Label/alias-only matches surface as empty workspaces; without this
       // clause a custom workspace name would be unfindable by search.
-      if (list.length === 0 && (runningOnly || (q && !projectLabel(project.path).toLowerCase().includes(q) && !(project.alias ?? "").toLowerCase().includes(q)))) continue;
+      if (list.length === 0 && (sessionFiltersApplied || (q && !projectLabel(project.path).toLowerCase().includes(q) && !(project.alias ?? "").toLowerCase().includes(q)))) continue;
       entries.push({ project, sessions: list });
     }
     return entries;
-  }, [sortedProjects, sessionsByProject, runningOnly, deferredSearchQuery, runningSessionIds]);
+  }, [sortedProjects, sessionsByProject, sessionFiltersApplied, sessionFilters, filterContext, deferredSearchQuery]);
 
   const treesByProject = useMemo(() => {
     const m = new Map<string, ReturnType<typeof buildSessionTree>>();
@@ -834,8 +882,26 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     }
   }, [loadProjects, t]);
 
-  /** Persist one whole-list order as a single atomic batched PATCH. */
+  /** Persist one whole-list order (positions + pinned state) as a single
+   *  atomic batched PATCH, applied optimistically so the row lands at once. */
   const persistProjectOrder = useCallback(async (next: ManagedProject[]) => {
+    // Supersede any in-flight list load so a stale response can't snap the
+    // rows back before the PATCH lands.
+    projectsLoadSeqRef.current += 1;
+    const order = new Map(next.map((project, index) => [comparableProjectPath(project.path), { project, index }] as const));
+    setProjects((prev) => {
+      const seen = new Set<string>();
+      const updated = prev.map((project) => {
+        const key = comparableProjectPath(project.path);
+        const hit = order.get(key);
+        if (!hit) return project;
+        seen.add(key);
+        return { ...project, sortOrder: hit.index, pinned: hit.project.pinned || undefined };
+      });
+      // Placeholder rows (not yet in the server list) get registered by the PATCH.
+      for (const [key, hit] of order) if (!seen.has(key)) updated.push({ ...hit.project, sortOrder: hit.index });
+      return updated;
+    });
     try {
       // One batched request: the server applies every entry in a single
       // atomic registry save, so per-project writes can't interleave and lose
@@ -843,39 +909,60 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
       const response = await fetch("/api/projects", {
         method: "PATCH",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ updates: next.map((project, index) => ({ cwd: project.path, sortOrder: index })) }),
+        body: JSON.stringify({ updates: next.map((project, index) => ({ cwd: project.path, sortOrder: index, pinned: Boolean(project.pinned) })) }),
       });
       if (!response.ok) throw new Error(t("projects.reorderFailed"));
-      await loadProjects();
     } catch (error) {
       toast.error(error instanceof Error ? error.message : String(error));
     }
+    // Reconcile with the server either way (reverts the optimistic order on failure).
+    await loadProjects();
   }, [loadProjects, t]);
 
-  const handleProjectDrop = useCallback(async (targetPath: string) => {
-    const sourcePath = draggedProjectPath;
-    setDraggedProjectPath(null);
-    if (!sourcePath || sourcePath === targetPath) return;
-    const next = [...sortedProjects];
-    const from = next.findIndex((project) => project.path === sourcePath);
-    const to = next.findIndex((project) => project.path === targetPath);
-    if (from < 0 || to < 0) return;
-    const [moved] = next.splice(from, 1);
-    if (!moved) return;
-    next.splice(to, 0, moved);
-    await persistProjectOrder(next);
-  }, [draggedProjectPath, sortedProjects, persistProjectOrder]);
+  const handleProjectDragStart = useCallback((projectPath: string) => {
+    draggedProjectRef.current = projectPath;
+    requestAnimationFrame(() => {
+      if (draggedProjectRef.current === projectPath) setDraggedProjectPath(projectPath);
+    });
+  }, []);
 
-  /** Keyboard-accessible reorder: move one project up/down the list. */
+  const handleProjectDragEnd = useCallback(() => {
+    draggedProjectRef.current = null;
+    setDraggedProjectPath(null);
+    setProjectDropTarget(null);
+  }, []);
+
+  const handleProjectDragOver = useCallback((projectPath: string, position: "before" | "after" | null) => {
+    setProjectDropTarget((prev) => {
+      if (position === null) return prev === null ? prev : null;
+      if (prev && "path" in prev && prev.path === projectPath && prev.position === position) return prev;
+      return { path: projectPath, position };
+    });
+  }, []);
+
+  const handleSectionDragOver = useCallback((pinned: boolean) => {
+    setProjectDropTarget((prev) => (prev && "pinned" in prev && prev.pinned === pinned ? prev : { pinned }));
+  }, []);
+
+  const handleProjectDrop = useCallback(async (target: ProjectDropTarget) => {
+    const sourcePath = draggedProjectRef.current;
+    handleProjectDragEnd();
+    if (!sourcePath) return;
+    const next = moveManagedProject(sortedProjects, sourcePath, target);
+    if (next) await persistProjectOrder(next);
+  }, [handleProjectDragEnd, sortedProjects, persistProjectOrder]);
+
+  /** Keyboard-accessible reorder: move one project up/down within its section. */
   const handleMoveProject = useCallback(async (projectPath: string, delta: -1 | 1) => {
-    const next = [...sortedProjects];
-    const index = next.findIndex((project) => project.path === projectPath);
-    const target = index + delta;
-    if (index < 0 || target < 0 || target >= next.length) return;
-    const [moved] = next.splice(index, 1);
-    if (!moved) return;
-    next.splice(target, 0, moved);
-    await persistProjectOrder(next);
+    const next = shiftManagedProject(sortedProjects, projectPath, delta);
+    if (next) await persistProjectOrder(next);
+  }, [sortedProjects, persistProjectOrder]);
+
+  const handleToggleProjectPinned = useCallback(async (projectPath: string) => {
+    const project = sortedProjects.find((candidate) => candidate.path === projectPath);
+    if (!project) return;
+    const next = moveManagedProject(sortedProjects, projectPath, { pinned: !project.pinned });
+    if (next) await persistProjectOrder(next);
   }, [sortedProjects, persistProjectOrder]);
 
   const handleRemoveProject = useCallback(async (projectPath: string) => {
@@ -1152,6 +1239,78 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
     />
   ) : null;
 
+  // Pinned workspaces render in their own leading section. sortedProjects is
+  // pinned-first, so each section keeps the persisted order.
+  const pinnedProjectEntries = visibleProjectEntries.filter((entry) => entry.project.pinned);
+  const otherProjectEntries = visibleProjectEntries.filter((entry) => !entry.project.pinned);
+  const draggedProject = draggedProjectPath === null ? undefined : sortedProjects.find((project) => project.path === draggedProjectPath);
+  // An empty destination section still needs a drop target while dragging.
+  const dragShowsPinZone = Boolean(draggedProject && !draggedProject.pinned && pinnedProjectEntries.length === 0);
+  const dragShowsUnpinZone = Boolean(draggedProject?.pinned && otherProjectEntries.length === 0);
+  const projectIndexByPath = new Map(sortedProjects.map((project, index) => [project.path, index] as const));
+  const sameSectionNeighbor = (project: ManagedProject, delta: -1 | 1): boolean => {
+    const index = projectIndexByPath.get(project.path);
+    const neighbor = index === undefined ? undefined : sortedProjects[index + delta];
+    return neighbor !== undefined && Boolean(neighbor.pinned) === Boolean(project.pinned);
+  };
+
+  const renderProjectRow = ({ project, sessions }: { project: ManagedProject; sessions: SessionInfo[] }) => {
+    const tree = treesByProject.get(project.path) ?? buildSessionTree(sessions);
+    // Sessions group under a project through the case-folded comparable
+    // form (see groupSessionsByProject), so the active highlight must
+    // use the same comparison: a session whose cwd/projectRoot spells
+    // the project folder with different casing (Windows/NTFS) lands in
+    // this row — the row must light up for it too.
+    const isActive = selectedProject !== null && comparableProjectPath(selectedProject) === comparableProjectPath(project.path);
+    // Each project's own branch comes from its own cached Git state —
+    // a project never inherits another repo's branch. Only the active
+    // repo's row owns the single switcher anchor so the dropdown opens
+    // against the correct row.
+    const projectBranch = worktreeBranchForProject(project.path);
+    return (
+      <ProjectRow
+        key={project.path}
+        project={project}
+        isActive={isActive}
+        activity={projectActivity.get(comparableProjectPath(project.path))}
+        tree={tree}
+        isExpanded={expandedProjectKeys.has(comparableProjectPath(project.path))}
+        hiddenCount={filtersActive ? 0 : Math.max(0, tree.length - MAX_PROJECT_SESSIONS)}
+        selectedSessionId={selectedSessionId}
+        runningSessionIds={runningSessionIds}
+        unreadSessionIds={unreadSessionIds}
+        exitedSessions={exitedSessions}
+        relativeTimeNow={relativeTimeNow}
+        onActivate={activateProject}
+        onToggleExpand={toggleProjectExpanded}
+        onRemoveProject={handleRemoveProject}
+        onEditLaunchConfig={setLaunchConfigProject}
+        onUpdatePresentation={handleUpdateProjectPresentation}
+        onTogglePinned={(path) => void handleToggleProjectPinned(path)}
+        dragActive={draggedProjectPath !== null}
+        isDragSource={draggedProjectPath === project.path}
+        dropPosition={projectDropTarget !== null && "path" in projectDropTarget && projectDropTarget.path === project.path ? projectDropTarget.position : null}
+        onDragStartProject={handleProjectDragStart}
+        onDragEndProject={handleProjectDragEnd}
+        onDragOverProject={handleProjectDragOver}
+        onDropProject={(target) => void handleProjectDrop(target)}
+        onMoveProject={(path, delta) => void handleMoveProject(path, delta)}
+        canMoveUp={sameSectionNeighbor(project, -1)}
+        canMoveDown={sameSectionNeighbor(project, 1)}
+        removeBusy={removeProjectPath === project.path}
+        onSelectSession={handleSelectSessionFromList}
+        onRenamed={loadSessions}
+        onSessionDeleted={handleSessionDeleted}
+        activeWorktreeSwitcher={isActive ? activeProjectSwitcher : null}
+        worktreeBranch={projectBranch}
+        worktreeToggleRef={isActive && projectBranch ? wtToggleRef : undefined}
+        worktreeOpen={isActive ? wtDropdownOpen : false}
+        onToggleWorktrees={isActive ? toggleWorktrees : undefined}
+        homeDir={homeDir}
+      />
+    );
+  };
+
   return (
     <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden", paddingBottom: "env(safe-area-inset-bottom)" }}>
       {addProjectOpen && (
@@ -1188,9 +1347,16 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
           gap: 8,
         }}
       >
-        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-          <OmpWebTitle />
-          <div style={{ display: "flex", gap: 2 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 4 }}>
+          {/* The title clips instead of running under the buttons on narrow touch sidebars. */}
+          <div style={{ minWidth: 0, overflow: "hidden" }}><OmpWebTitle /></div>
+          <div style={{ display: "flex", gap: 2, flexShrink: 0 }}>
+            {headerAccessory}
+            <Tooltip content={t("scheduledTasks.title")} side="bottom">
+              <SidebarIconButton label={t("scheduledTasks.title")} onClick={openScheduledTasks}>
+                <CalendarClock size={14} strokeWidth={1.9} aria-hidden="true" />
+              </SidebarIconButton>
+            </Tooltip>
             {onOpenArchive && (
               <Tooltip content={t("sessionSidebar.archiveBrowserTitle")} side="bottom">
                 <SidebarIconButton
@@ -1305,14 +1471,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
         >
           <Search size={15} strokeWidth={1.9} aria-hidden="true" />
         </SidebarIconButton>
-        <SidebarIconButton
-          label={t("sessionSidebar.filterRunning")}
-          title={t("sessionSidebar.filterRunningTitle")}
-          active={runningOnly}
-          onClick={() => setRunningOnly((v) => !v)}
-        >
-          <SlidersHorizontal size={15} strokeWidth={1.9} aria-hidden="true" />
-        </SidebarIconButton>
+        <SessionFilterMenu filters={sessionFilters} counts={filterCounts} onChange={setSessionFilters} />
         <SidebarIconButton
           label={t("projects.add")}
           title={t("projects.addTitle")}
@@ -1324,6 +1483,7 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
           <Plus size={15} strokeWidth={1.9} aria-hidden="true" />
         </SidebarIconButton>
       </div>
+      <SessionFilterChips filters={sessionFilters} onChange={setSessionFilters} />
       {searchOpen && (
         <div style={{ padding: "0 10px 6px", flexShrink: 0 }}>
           <input
@@ -1360,6 +1520,10 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
 
       {/* Workspaces */}
         <div
+          onDragLeave={(event) => {
+            // Leaving the list entirely drops the stale insertion line.
+            if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setProjectDropTarget(null);
+          }}
           style={{
             flex: "1 1 auto",
             overflowY: "auto",
@@ -1398,55 +1562,30 @@ export const SessionSidebar = memo(function SessionSidebar({ selectedSessionId, 
             </div>
           )}
 
-          {visibleProjectEntries.map(({ project, sessions }) => {
-            const tree = treesByProject.get(project.path) ?? buildSessionTree(sessions);
-            // Sessions group under a project through the case-folded comparable
-            // form (see groupSessionsByProject), so the active highlight must
-            // use the same comparison: a session whose cwd/projectRoot spells
-            // the project folder with different casing (Windows/NTFS) lands in
-            // this row — the row must light up for it too.
-            const isActive = selectedProject !== null && comparableProjectPath(selectedProject) === comparableProjectPath(project.path);
-            // Each project's own branch comes from its own cached Git state —
-            // a project never inherits another repo's branch. Only the active
-            // repo's row owns the single switcher anchor so the dropdown opens
-            // against the correct row.
-            const projectBranch = worktreeBranchForProject(project.path);
-            return (
-              <ProjectRow
-                key={project.path}
-                project={project}
-                isActive={isActive}
-                activity={projectActivity.get(comparableProjectPath(project.path))}
-                tree={tree}
-                isExpanded={expandedProjectKeys.has(comparableProjectPath(project.path))}
-                hiddenCount={filtersActive ? 0 : Math.max(0, tree.length - MAX_PROJECT_SESSIONS)}
-                selectedSessionId={selectedSessionId}
-                runningSessionIds={runningSessionIds}
-                unreadSessionIds={unreadSessionIds}
-                exitedSessions={exitedSessions}
-                relativeTimeNow={relativeTimeNow}
-                onActivate={activateProject}
-                onToggleExpand={toggleProjectExpanded}
-                onRemoveProject={handleRemoveProject}
-                onEditLaunchConfig={setLaunchConfigProject}
-                onUpdatePresentation={handleUpdateProjectPresentation}
-                onDragPathChange={setDraggedProjectPath}
-                onDropProject={(path) => void handleProjectDrop(path)}
-                onMoveProject={(path, delta) => void handleMoveProject(path, delta)}
-                isDragTarget={draggedProjectPath !== null && draggedProjectPath !== project.path}
-                removeBusy={removeProjectPath === project.path}
-                onSelectSession={handleSelectSessionFromList}
-                onRenamed={loadSessions}
-                onSessionDeleted={handleSessionDeleted}
-                activeWorktreeSwitcher={isActive ? activeProjectSwitcher : null}
-                worktreeBranch={projectBranch}
-                worktreeToggleRef={isActive && projectBranch ? wtToggleRef : undefined}
-                worktreeOpen={isActive ? wtDropdownOpen : false}
-                onToggleWorktrees={isActive ? toggleWorktrees : undefined}
-                homeDir={homeDir}
-              />
-            );
-          })}
+          {pinnedProjectEntries.length > 0 || dragShowsPinZone ? (
+            <>
+              <ProjectSectionLabel pinned label={t("projects.pinnedSection")} />
+              {pinnedProjectEntries.length > 0 ? pinnedProjectEntries.map(renderProjectRow) : (
+                <ProjectSectionDropZone
+                  pinned
+                  label={t("projects.dropToPin")}
+                  highlighted={projectDropTarget !== null && "pinned" in projectDropTarget && projectDropTarget.pinned}
+                  onDragOverZone={() => handleSectionDragOver(true)}
+                  onDropZone={(target) => void handleProjectDrop(target)}
+                />
+              )}
+              {(otherProjectEntries.length > 0 || dragShowsUnpinZone) && <ProjectSectionLabel label={t("projects.otherSection")} />}
+            </>
+          ) : null}
+          {otherProjectEntries.length > 0 ? otherProjectEntries.map(renderProjectRow) : dragShowsUnpinZone && (
+            <ProjectSectionDropZone
+              pinned={false}
+              label={t("projects.dropToUnpin")}
+              highlighted={projectDropTarget !== null && "pinned" in projectDropTarget && !projectDropTarget.pinned}
+              onDragOverZone={() => handleSectionDragOver(false)}
+              onDropZone={(target) => void handleProjectDrop(target)}
+            />
+          )}
         </div>
 
       {/* Provider usage bar — pinned above Settings */}

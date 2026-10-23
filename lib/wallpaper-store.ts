@@ -4,6 +4,7 @@ import * as path from "node:path";
 import { homedir } from "node:os";
 import { getAgentDir } from "./omp/paths";
 import type { WallpaperInfo } from "./wallpapers";
+import { wallpaperMetadata } from "./wallpaper-metadata";
 
 export const MAX_WALLPAPER_BYTES = 512 * 1024 * 1024;
 const TYPES: Record<string, string> = { ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp", ".gif": "image/gif", ".avif": "image/avif", ".mp4": "video/mp4", ".webm": "video/webm" };
@@ -31,6 +32,11 @@ async function readJson(file: string) {
   const stat = await fs.stat(file);
   if (!stat.isFile() || stat.size > 256 * 1024) throw new Error("Invalid metadata");
   return JSON.parse(await fs.readFile(file, "utf8"));
+}
+async function sceneFile(folder: string, entryFile: string) {
+  if (!/^[\w-]+\.json$/.test(entryFile)) throw new Error("Unsupported scene entry point");
+  try { return await safeWallpaperFile(folder, entryFile.replace(/\.json$/, ".pkg")); }
+  catch { return safeWallpaperFile(folder, entryFile); }
 }
 export async function readScenePropertyOverrides(id: string): Promise<Record<string, string | number | boolean>> {
   if (!/^[a-f0-9]{32}$/.test(id)) throw new Error("Invalid scene identifier");
@@ -146,6 +152,19 @@ async function scan(): Promise<Catalog> {
     e.metadata = { ...base.metadata, preset: { ...(base.metadata?.preset as object || {}), ...(e.metadata.preset as object || {}) } };
   }
   for (const e of entries.values()) resolvePreset(e);
+  for (const entry of entries.values()) {
+    try {
+      if (entry.kind === "scene") {
+        const name = typeof entry.metadata?.file === "string" ? entry.metadata.file : "scene.json";
+        Object.assign(entry, await wallpaperMetadata(await sceneFile(entry.resourceFolder || entry.folder, name), "scene", name));
+      } else if (entry.file && (entry.kind === "image" || entry.kind === "video")) {
+        Object.assign(entry, await wallpaperMetadata(entry.file, entry.kind));
+      } else {
+        const stat = await fs.stat(path.join(entry.folder, "project.json"));
+        entry.modifiedAt = stat.mtimeMs; entry.addedAt = stat.birthtimeMs > 0 ? stat.birthtimeMs : stat.mtimeMs;
+      }
+    } catch { /* Missing source data remains in the catalogue with unknown dimensions. */ }
+  }
   if (visited > 3000) warnings.push("Folder limit reached (3000); add a more specific folder");
   return { entries: [...entries.values()], roots, warnings };
 }
@@ -155,7 +174,7 @@ export async function wallpaperCatalog(refresh = false) {
 }
 export async function listWallpapers(refresh = false) {
   const { entries, roots, warnings } = await wallpaperCatalog(refresh);
-  return { wallpapers: entries.map(({ id, title, kind, source, preview, reason }) => ({ id, title, kind, source, preview, reason })), roots, warnings };
+  return { wallpapers: entries.map(({ id, title, kind, source, preview, reason, width, height, addedAt, modifiedAt }) => ({ id, title, kind, source, preview, reason, width, height, addedAt, modifiedAt })), roots, warnings };
 }
 export async function resolveSceneProject(id: string) {
   if (!/^[a-f0-9]{32}$/.test(id)) throw new Error("Wallpaper not found");
@@ -166,9 +185,7 @@ export async function resolveSceneProject(id: string) {
   const metadata = entry.metadata || await readJson(project);
   const entryFile = typeof metadata.file === "string" ? metadata.file : "scene.json";
   if (String(metadata.type).toLowerCase() !== "scene" || !/^[\w-]+\.json$/.test(entryFile)) throw new Error("Unsupported scene entry point");
-  let file: string;
-  try { file = await safeWallpaperFile(folder, entryFile.replace(/\.json$/, ".pkg")); }
-  catch { file = await safeWallpaperFile(folder, entryFile); }
+  const file = await sceneFile(folder, entryFile);
   return { project, file, metadata, entryFile, projectFiles: [...new Set([project, ...(entry.projectFiles || [])])] };
 }
 export async function resolveWebProject(id: string) {

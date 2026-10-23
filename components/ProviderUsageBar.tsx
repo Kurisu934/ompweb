@@ -1,10 +1,13 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { ChevronRight, Gauge } from "lucide-react";
+import { Check, ChevronRight, Gauge, Pencil, RotateCcw, X } from "lucide-react";
 import { useI18n } from "@/lib/i18n";
+import { toast } from "@/components/ui/toast";
+import { ConfirmDialog } from "@/components/ui/field";
 import { formatUsageReset, usageTone, useProviderUsage } from "./AppShell-provider-usage";
-import type { ProviderCreditBalance, ProviderUsageReport, ProviderUsageWindow } from "@/lib/provider-usage-types";
+import { PROVIDER_ACCOUNT_ALIAS_MAX_LENGTH } from "@/lib/provider-usage-types";
+import type { ProviderCreditBalance, ProviderResets, ProviderUsageReport, ProviderUsageWindow } from "@/lib/provider-usage-types";
 
 interface WindowDef {
   short: string;
@@ -76,13 +79,241 @@ function DetailMeter({ short, window, t }: {
   );
 }
 
+const aliasIconButtonStyle = {
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  width: 22,
+  height: 22,
+  flexShrink: 0,
+  padding: 0,
+  background: "none",
+  border: "1px solid var(--border)",
+  borderRadius: 4,
+  color: "var(--text-muted)",
+  cursor: "pointer",
+} as const;
+
+// Names an account so several logins of one provider are told apart. Saved
+// server-side (omp-web-settings.json) so every browser sees the same names.
+function AccountAliasEditor({ accountKey, alias, original, onSaved, t }: {
+  accountKey: string;
+  alias: string | undefined;
+  original: string;
+  onSaved: (accountKey: string, alias: string | null) => void;
+  t: (key: string, vars?: Record<string, string | number>) => string;
+}) {
+  const [draft, setDraft] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+
+  const save = async () => {
+    if (draft === null || saving) return;
+    setSaving(true);
+    try {
+      const response = await fetch("/api/provider-usage/aliases", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ accountKey, alias: draft }),
+      });
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      const saved = await response.json() as { alias: string | null };
+      onSaved(accountKey, saved.alias);
+      setDraft(null);
+    } catch {
+      toast.error(t("providerUsage.aliasSaveFailed"));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (draft === null) {
+    return (
+      <span style={{ display: "flex", alignItems: "center", gap: 6, fontFamily: "inherit", fontSize: 10, color: "var(--text-dim)", minWidth: 0 }}>
+        <button
+          type="button"
+          onClick={() => setDraft(alias ?? "")}
+          style={{ display: "flex", alignItems: "center", gap: 4, padding: 0, background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: 10, fontFamily: "inherit", flexShrink: 0 }}
+        >
+          <Pencil size={10} strokeWidth={2} aria-hidden="true" />
+          {t(alias ? "providerUsage.aliasEdit" : "providerUsage.aliasSet")}
+        </button>
+        {alias && (
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}>
+            {t("providerUsage.aliasOriginal", { label: original })}
+          </span>
+        )}
+      </span>
+    );
+  }
+
+  return (
+    <form
+      onSubmit={(event) => {
+        event.preventDefault();
+        void save();
+      }}
+      style={{ display: "flex", alignItems: "center", gap: 4, minWidth: 0 }}
+    >
+      <input
+        autoFocus
+        value={draft}
+        maxLength={PROVIDER_ACCOUNT_ALIAS_MAX_LENGTH}
+        disabled={saving}
+        placeholder={t("providerUsage.aliasPlaceholder")}
+        aria-label={t("providerUsage.aliasSet")}
+        onChange={(event) => setDraft(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key !== "Escape") return;
+          event.preventDefault();
+          event.stopPropagation();
+          setDraft(null);
+        }}
+        style={{
+          flex: 1,
+          minWidth: 0,
+          height: 22,
+          boxSizing: "border-box",
+          padding: "0 6px",
+          fontSize: 11,
+          fontFamily: "inherit",
+          color: "var(--text)",
+          background: "var(--bg)",
+          border: "1px solid var(--accent)",
+          borderRadius: 4,
+          outline: "none",
+        }}
+      />
+      <button type="submit" disabled={saving} aria-label={t("providerUsage.aliasSave")} title={t("providerUsage.aliasSave")} style={aliasIconButtonStyle}>
+        <Check size={12} strokeWidth={2} aria-hidden="true" />
+      </button>
+      <button type="button" disabled={saving} onClick={() => setDraft(null)} aria-label={t("providerUsage.aliasCancel")} title={t("providerUsage.aliasCancel")} style={aliasIconButtonStyle}>
+        <X size={12} strokeWidth={2} aria-hidden="true" />
+      </button>
+    </form>
+  );
+}
+
+const RESET_REASON_KEYS: Record<string, string> = {
+  not_at_wall: "providerUsage.resetReasonNotAtWall",
+  cooldown: "providerUsage.resetReasonCooldown",
+  ineligible: "providerUsage.resetReasonIneligible",
+};
+
+// Saved Codex / Claude rate-limit resets: how many, when they expire, and a
+// button that spends one through `omp usage reset` after a confirmation.
+function ResetCredits({ resets, accountKey, account, now, locale, onSpent, t }: {
+  resets: ProviderResets;
+  accountKey: string;
+  account: string;
+  /** Snapshot time; expiries are shown relative to it. */
+  now: number | null;
+  locale: string;
+  onSpent: () => void;
+  t: (key: string, vars?: Record<string, string | number>) => string;
+}) {
+  const [confirming, setConfirming] = useState(false);
+  const [spending, setSpending] = useState(false);
+  const formatTime = (ms: number) => new Date(ms).toLocaleString(locale, { month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  const expiries = resets.credits.flatMap((credit) =>
+    (credit.status ?? "available") === "available" && credit.expiresAt !== undefined && (now === null || credit.expiresAt > now) ? [credit.expiresAt] : [],
+  ).sort((a, b) => a - b);
+  // A cooldown without an end time reads as an unknown reason.
+  const reasonKey = resets.reason && !(resets.reason === "cooldown" && resets.cooldownUntil === undefined) ? RESET_REASON_KEYS[resets.reason] : undefined;
+  // Known reasons explain an empty count too (Claude offers none below its limit).
+  const reason = resets.spendable || !resets.reason
+    ? null
+    : reasonKey
+      ? t(reasonKey, { time: resets.cooldownUntil !== undefined ? formatTime(resets.cooldownUntil) : "" })
+      : resets.available > 0 ? t("providerUsage.resetReasonOther", { reason: resets.reason }) : null;
+
+  const spend = async () => {
+    setSpending(true);
+    try {
+      const response = await fetch("/api/provider-usage/reset", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ accountKey }),
+      });
+      const data = await response.json().catch(() => null) as { ok?: unknown; message?: unknown; error?: unknown } | null;
+      if (!response.ok || typeof data?.ok !== "boolean") {
+        throw new Error(typeof data?.error === "string" ? data.error : `HTTP ${response.status}`);
+      }
+      const message = typeof data.message === "string" ? data.message : undefined;
+      if (data.ok) toast.success(t("providerUsage.resetApplied"), message);
+      else toast.error(t("providerUsage.resetNotApplied"), message);
+    } catch (error) {
+      toast.error(t("providerUsage.resetRequestFailed"), error instanceof Error ? error.message : undefined);
+    } finally {
+      setSpending(false);
+      onSpent();
+    }
+  };
+
+  return (
+    <div style={{ display: "flex", flexDirection: "column", gap: 3, fontSize: 10, color: "var(--text-muted)" }}>
+      <span style={{ display: "flex", alignItems: "center", gap: 6, minHeight: 20 }}>
+        <RotateCcw size={10} strokeWidth={2.2} aria-hidden="true" style={{ flexShrink: 0, color: resets.available > 0 ? "var(--accent)" : "var(--text-dim)" }} />
+        <span style={{ flex: 1, minWidth: 0, color: resets.available > 0 ? "var(--text)" : "var(--text-dim)" }}>
+          {resets.available > 0 ? t("providerUsage.resetsAvailable", { count: resets.available }) : t("providerUsage.resetsNone")}
+        </span>
+        {resets.available > 0 && (
+          <button
+            type="button"
+            disabled={!resets.spendable || spending}
+            onClick={() => setConfirming(true)}
+            title={reason ?? undefined}
+            style={{
+              flexShrink: 0,
+              height: 20,
+              padding: "0 7px",
+              border: "1px solid var(--border)",
+              borderRadius: 4,
+              background: "var(--bg)",
+              color: resets.spendable && !spending ? "var(--accent)" : "var(--text-dim)",
+              cursor: resets.spendable && !spending ? "pointer" : "default",
+              fontSize: 10,
+              fontFamily: "inherit",
+              fontWeight: 600,
+            }}
+          >
+            {spending ? t("providerUsage.resetUsing") : t("providerUsage.resetUse")}
+          </button>
+        )}
+      </span>
+      {expiries.map((expiresAt, index) => (
+        <span key={`${expiresAt}-${index}`} style={{ paddingLeft: 16, color: "var(--text-dim)", overflowWrap: "anywhere" }}>
+          {now !== null
+            ? t("providerUsage.resetExpiresIn", { value: formatUsageReset(Math.max(0, Math.round((expiresAt - now) / 3_600_000)), "hours"), time: formatTime(expiresAt) })
+            : t("providerUsage.resetExpiresAt", { time: formatTime(expiresAt) })}
+        </span>
+      ))}
+      {reason && <span style={{ paddingLeft: 16, color: "var(--text-dim)", overflowWrap: "anywhere" }}>{reason}</span>}
+      <ConfirmDialog
+        open={confirming}
+        onOpenChange={setConfirming}
+        title={<span style={{ overflowWrap: "anywhere" }}>{t("providerUsage.resetConfirmTitle", { account })}</span>}
+        description={t("providerUsage.resetConfirmBody")}
+        confirmLabel={t("providerUsage.resetConfirm")}
+        cancelLabel={t("providerUsage.aliasCancel")}
+        busy={spending}
+        onConfirm={() => {
+          setConfirming(false);
+          void spend();
+        }}
+      />
+    </div>
+  );
+}
+
 // Compact provider rate-limit block pinned above Settings in the sidebar: one
 // slim row per account (worst window only), click to expand the full detail.
 export function ProviderUsageBar() {
-  const { t } = useI18n();
-  const { snapshot, loading, error } = useProviderUsage("");
+  const { t, locale } = useI18n();
+  const { snapshot, loading, error, refresh } = useProviderUsage("");
   const reports = snapshot?.reports ?? [];
   const [expandedKey, setExpandedKey] = useState<string | null>(null);
+  // Aliases saved from this panel, shown until the next snapshot carries them.
+  const [aliasOverrides, setAliasOverrides] = useState<Record<string, string | null>>({});
   // The first render must match the server, where localStorage is unavailable,
   // so start collapsed and apply the stored preference after mounting.
   const [collapsed, setCollapsed] = useState(true);
@@ -175,8 +406,11 @@ export function ProviderUsageBar() {
         </span>
       </button>
       {!collapsed && reports.map((report, index) => {
-        const account = report.accountLabel ?? t("appShell.account", { number: report.accountIndex ?? index + 1 });
-        const key = `${report.provider}:${account}:${report.modelId ?? "all"}:${index}`;
+        const original = report.accountLabel ?? t("appShell.account", { number: report.accountIndex ?? index + 1 });
+        const alias = report.accountKey in aliasOverrides ? aliasOverrides[report.accountKey] ?? undefined : report.accountAlias;
+        const account = alias ?? original;
+        const rowLabel = report.pool ? `${report.pool} · ${account}` : account;
+        const key = `${report.provider}:${report.accountKey}:${report.modelId ?? "all"}:${report.pool ?? ""}:${index}`;
         const best = worstWindow(report);
         const expanded = expandedKey === key;
         const pct = best ? Math.round(best.window.percent) : 0;
@@ -186,8 +420,8 @@ export function ProviderUsageBar() {
             <button
               type="button"
               onClick={() => setExpandedKey((prev) => (prev === key ? null : key))}
-              aria-expanded={report.noLimits ? undefined : expanded}
-              title={account}
+              aria-expanded={expanded}
+              title={alias ? `${rowLabel} (${original})` : rowLabel}
               style={{
                 display: "flex",
                 alignItems: "center",
@@ -197,30 +431,37 @@ export function ProviderUsageBar() {
                 padding: "5px 6px 4px",
                 background: "none",
                 border: "none",
-                cursor: report.noLimits ? "default" : "pointer",
+                cursor: "pointer",
                 textAlign: "left",
                 minWidth: 0,
               }}
             >
-              {!report.noLimits && (
-                <ChevronRight
-                  size={11}
-                  strokeWidth={2}
-                  aria-hidden="true"
-                  style={{
-                    flexShrink: 0,
-                    color: "var(--text-dim)",
-                    transform: expanded ? "rotate(90deg)" : "none",
-                    transition: "transform var(--dur-med) var(--ease-out-warm)",
-                  }}
-                />
-              )}
+              <ChevronRight
+                size={11}
+                strokeWidth={2}
+                aria-hidden="true"
+                style={{
+                  flexShrink: 0,
+                  color: "var(--text-dim)",
+                  transform: expanded ? "rotate(90deg)" : "none",
+                  transition: "transform var(--dur-med) var(--ease-out-warm)",
+                }}
+              />
               <span className="provider-usage-name wallpaper-inset" style={{ fontFamily: "var(--font-mono)", fontWeight: 700, fontSize: 10, color: "var(--text)", background: "var(--bg)", border: "1px solid var(--border)", padding: "0 5px", borderRadius: 4, whiteSpace: "nowrap", flexShrink: 0, lineHeight: 1.7 }}>
                 {report.provider}
               </span>
               <span style={{ fontSize: 11, color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", flex: 1, minWidth: 0 }}>
-                {account}
+                {rowLabel}
               </span>
+              {(report.resets?.available ?? 0) > 0 && (
+                <span
+                  title={t("providerUsage.resetsAvailable", { count: report.resets!.available })}
+                  style={{ display: "inline-flex", alignItems: "center", gap: 2, flexShrink: 0, fontFamily: "var(--font-mono)", fontSize: 10, fontWeight: 700, color: "var(--accent)" }}
+                >
+                  <RotateCcw size={10} strokeWidth={2.2} aria-hidden="true" />
+                  {report.resets!.available}
+                </span>
+              )}
               {report.noLimits ? (
                 <span style={{ fontSize: 10, color: "var(--text-dim)", flexShrink: 0 }}>∞</span>
               ) : report.credits ? (
@@ -239,13 +480,31 @@ export function ProviderUsageBar() {
                 <div style={{ height: "100%", width: `${Math.min(100, Math.max(0, pct))}%`, background: tone, borderRadius: 2 }} />
               </div>
             )}
-            {expanded && !report.noLimits && (
+            {expanded && (
               <div style={{ display: "flex", flexDirection: "column", gap: 4, padding: "6px 8px 7px 23px", fontFamily: "var(--font-mono)" }}>
                 {report.credits && <CreditBalanceDetails credits={report.credits} t={t} />}
-                {WINDOWS.map((def) => {
+                {!report.noLimits && WINDOWS.map((def) => {
                   const window = def.pick(report);
                   return window ? <DetailMeter key={def.short} short={def.short} window={window} t={t} /> : null;
                 })}
+                {report.resets && (
+                  <ResetCredits
+                    resets={report.resets}
+                    accountKey={report.accountKey}
+                    account={`${report.provider} · ${account}`}
+                    now={snapshot?.generatedAt ?? null}
+                    locale={locale}
+                    onSpent={refresh}
+                    t={t}
+                  />
+                )}
+                <AccountAliasEditor
+                  accountKey={report.accountKey}
+                  alias={alias}
+                  original={original}
+                  onSaved={(accountKey, saved) => setAliasOverrides((previous) => ({ ...previous, [accountKey]: saved }))}
+                  t={t}
+                />
               </div>
             )}
           </div>

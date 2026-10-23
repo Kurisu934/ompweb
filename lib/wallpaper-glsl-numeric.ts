@@ -18,6 +18,7 @@ export function lowerSceneNumericExpressions(source: string, combos: Record<stri
   const scopes = [macros, new Map<string, string>()];
   const lookup = (name: string) => { for (let i = scopes.length - 1; i >= 0; i--) if (scopes[i].has(name)) return scopes[i].get(name); };
   const functionTypes = new Map<string, string>(), parameters = new Map<number, Map<string, string>>();
+  const functionArguments = new Map<string, string[][]>();
   const edits: { start: number; end: number; text: string }[] = [];
   const conditions = new Map<number, number>();
   for (let i = 0; i < tokens.length; i++) {
@@ -36,6 +37,14 @@ export function lowerSceneNumericExpressions(source: string, combos: Record<stri
   }
   let remainder = false;
   const precedence: Record<string, number> = { "||": 1, "&&": 2, "==": 3, "!=": 3, "<": 4, ">": 4, "<=": 4, ">=": 4, "+": 5, "-": 5, "*": 6, "/": 6, "%": 6 };
+  function convert(value: Expression, type: string) {
+    if (!value.type || value.type === type || !numeric.test(value.type) || !numeric.test(type)) return;
+    const from = Number(value.type[3]) || 1, to = Number(type[3]) || 1;
+    if (from > to) value.text = `(${value.text}).${"xyzw".slice(0, to)}`;
+    else if (from !== to || integral(value.type) || integral(type)) value.text = `${type}(${value.text})`;
+    else return;
+    value.type = type; value.changed = true;
+  }
 
   function expression(first: number, last: number): Expression | undefined {
     let cursor = first, depth = 0;
@@ -62,12 +71,19 @@ export function lowerSceneNumericExpressions(source: string, combos: Record<stri
           if (tokens[cursor]?.data !== ")") return undefined;
           value.end = tokens[cursor++].end;
           value.type = numeric.test(token.data) ? token.data : functionTypes.get(token.data);
-          if (/^(?:floor|ceil|round|trunc|abs|sin|cos|sqrt|fract|frac|saturate|normalize|min|max|mix|lerp|clamp)$/.test(token.data)) value.type = args[0]?.type;
+          if (/^(?:floor|ceil|round|trunc|abs|sin|cos|sqrt|pow|exp|log|fract|frac|saturate|normalize|min|max|mix|lerp|clamp|fmod)$/.test(token.data)) value.type = args[0]?.type;
           if (token.data === "step") value.type = args[1]?.type;
           if (token.data === "smoothstep") value.type = args[2]?.type;
           if (/^(?:length|distance|dot)$/.test(token.data)) value.type = "float";
+          const signatures = functionArguments.get(token.data)?.filter(types => types.length === args.length);
+          const signature = signatures?.find(types => types.every((type, i) => type === args[i].type)) || (signatures?.length === 1 ? signatures[0] : undefined);
+          if (signature) args.forEach((arg, i) => convert(arg, signature[i]));
           value.changed = args.some(a => a.changed);
           value.text = `${token.data}(${args.map(a => a.text).join(", ")})`;
+          if (token.data === "fmod") {
+            value.text = `we_scene_remainder(${args.map(a => a.text).join(", ")})`;
+            remainder = value.changed = true;
+          }
         } else value.type = lookup(token.data);
       } else return undefined;
       while (cursor < last && [".", "["].includes(tokens[cursor].data)) {
@@ -91,6 +107,7 @@ export function lowerSceneNumericExpressions(source: string, combos: Record<stri
         else if (integral(value.type) && floating(right.type)) { leftText = `float(${leftText})`; type = right.type; changed = true; }
         else if (value.type === "uint" && right.type === "int") { rightText = `uint(${rightText})`; changed = true; }
         else if (value.type === "int" && right.type === "uint") { leftText = `uint(${leftText})`; type = "uint"; changed = true; }
+        if (floating(value.type) && floating(right.type) && (Number(right.type?.[3]) || 1) > (Number(value.type?.[3]) || 1)) type = right.type;
         if (!value.type || !right.type) type = undefined;
         if (rank < 5) type = "bool";
         let text = `${leftText} ${operator} ${rightText}`;
@@ -115,35 +132,43 @@ export function lowerSceneNumericExpressions(source: string, combos: Record<stri
     }
     if (token.data === "{") { scopes.push(parameters.get(i) || new Map()); continue; }
     if (token.data === "}") { if (scopes.length > 2) scopes.pop(); continue; }
+    if (["=", "+=", "-=", "*=", "/="].includes(token.data)) {
+      const lhs = tokens[i - 1], field = tokens[i - 2]?.data === ".";
+      const type = field && /^[xyzwrgba]{1,4}$/.test(lhs?.data) ? (lhs.data.length === 1 ? "float" : `vec${lhs.data.length}`) : lookup(lhs?.data);
+      if (!type) continue;
+      let end = i + 1, nesting = 0;
+      for (; end < tokens.length; end++) {
+        const word = tokens[end].data;
+        if (!nesting && [";", ","].includes(word)) break;
+        if (["(", "["].includes(word)) nesting++;
+        if ([")", "]"].includes(word)) { if (!nesting) break; nesting--; }
+      }
+      const start = tokens[i + 1]?.start, finish = tokens[end - 1]?.end;
+      if (start === undefined || finish === undefined || source.slice(start, finish).includes("#")) continue;
+      const value = expression(i + 1, end); if (!value) continue;
+      convert(value, type);
+      if (value.changed) edits.push({ start, end: finish, text: value.text });
+      i = end - 1; continue;
+    }
     if (!(numeric.test(token.data) || token.data === "void") || tokens[i + 1]?.type !== "ident") continue;
     const type = token.data, name = tokens[i + 1].data;
     if (tokens[i + 2]?.data === "(") {
-      functionTypes.set(name, type); const args = new Map<string, string>();
+      functionTypes.set(name, type); const args = new Map<string, string>(), signature: string[] = [];
       let end = i + 3;
       while (end < tokens.length && tokens[end].data !== ")") {
-        if (numeric.test(tokens[end].data) && tokens[end + 1]?.type === "ident") args.set(tokens[end + 1].data, tokens[end].data);
+        if (numeric.test(tokens[end].data) && tokens[end + 1]?.type === "ident") { args.set(tokens[end + 1].data, tokens[end].data); signature.push(tokens[end].data); }
         end++;
       }
+      const signatures = functionArguments.get(name) || [];
+      if (!signatures.some(types => types.join(",") === signature.join(","))) signatures.push(signature);
+      functionArguments.set(name, signatures);
       if (tokens[end + 1]?.data === "{") parameters.set(end + 1, args);
       i = end; continue;
     }
     scopes.at(-1)!.set(name, type);
-    if (tokens[i + 2]?.data !== "=") continue;
-    let end = i + 3, nesting = 0;
-    for (; end < tokens.length; end++) {
-      const word = tokens[end].data;
-      if (!nesting && [";", ","].includes(word)) break;
-      if (["(", "["].includes(word)) nesting++;
-      if ([")", "]"].includes(word)) { if (!nesting) break; nesting--; }
-    }
-    const start = tokens[i + 3]?.start, finish = tokens[end - 1]?.end;
-    if (start === undefined || finish === undefined || source.slice(start, finish).includes("#")) continue;
-    const value = expression(i + 3, end); if (!value) continue;
-    if (integral(type) && value.type && value.type !== type && numeric.test(value.type)) { value.text = `${type}(${value.text})`; value.changed = true; }
-    if (type === "float" && integral(value.type)) { value.text = `float(${value.text})`; value.changed = true; }
-    if (value.changed) edits.push({ start, end: finish, text: value.text });
-    i = end - 1;
   }
   for (const edit of edits.reverse()) source = source.slice(0, edit.start) + edit.text + source.slice(edit.end);
-  return (remainder ? "float we_scene_remainder(float x, float y) { return x - y * trunc(x / y); }\n" : "") + source;
+  if (!remainder) return source;
+  const helpers = ["float", "vec2", "vec3", "vec4"].map(type => `${type} we_scene_remainder(${type} x, ${type} y) { return x - y * trunc(x / y); }${type === "float" ? "" : `\n${type} we_scene_remainder(${type} x, float y) { return x - y * trunc(x / y); }\n${type} we_scene_remainder(float x, ${type} y) { return x - y * trunc(x / y); }`}`).join("\n");
+  return helpers + "\n" + source;
 }

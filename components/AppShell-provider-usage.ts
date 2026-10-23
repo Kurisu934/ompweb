@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import type { ProviderUsageReport, ProviderUsageSnapshot } from "@/lib/provider-usage-types";
 
 export function formatUsageReset(value: number, unit: "minutes" | "hours"): string {
@@ -23,6 +23,7 @@ export function usageTone(percent: number): string {
 export function formatProviderUsageReport(report: ProviderUsageReport, noLimitsLabel: string): string {
   if (report.noLimits) return noLimitsLabel;
   const parts: string[] = [];
+  if (report.pool) parts.push(report.pool);
   if (report.tier) parts.push(report.tier);
   if (report.credits) {
     const { remaining, limit, limitSource } = report.credits;
@@ -55,8 +56,9 @@ export type ProviderUsageState = {
   error: boolean;
 };
 
-export function useProviderUsage(query: string | null, refreshMs = 60_000): ProviderUsageState {
+export function useProviderUsage(query: string | null, refreshMs = 60_000): ProviderUsageState & { refresh: () => void } {
   const [state, setState] = useState<ProviderUsageState>({ snapshot: null, loading: false, error: false });
+  const refreshRef = useRef<() => void>(() => {});
   useEffect(() => {
     if (query === null) {
       setState({ snapshot: null, loading: false, error: false });
@@ -65,6 +67,8 @@ export function useProviderUsage(query: string | null, refreshMs = 60_000): Prov
     const polling = Number.isFinite(refreshMs) && refreshMs > 0;
     let disposed = false;
     let inFlight = false;
+    // Asked for while a request runs: that answer may predate the change.
+    let refreshPending = false;
     let nextRefreshAt = 0;
     let controller: AbortController | undefined;
     let refreshTimer: number | undefined;
@@ -98,8 +102,13 @@ export function useProviderUsage(query: string | null, refreshMs = 60_000): Prov
         window.clearTimeout(requestTimer);
         inFlight = false;
         // Count from completion so slow requests neither overlap nor race the server cache TTL.
-        nextRefreshAt = polling ? Date.now() + refreshMs : Infinity;
-        schedule();
+        nextRefreshAt = refreshPending ? Date.now() : polling ? Date.now() + refreshMs : Infinity;
+        if (refreshPending) {
+          refreshPending = false;
+          void load();
+        } else {
+          schedule();
+        }
       }
     };
     const resume = () => {
@@ -108,6 +117,10 @@ export function useProviderUsage(query: string | null, refreshMs = 60_000): Prov
       else schedule();
     };
     void load();
+    refreshRef.current = () => {
+      if (inFlight) refreshPending = true;
+      else void load();
+    };
     document.addEventListener("visibilitychange", resume);
     window.addEventListener("focus", resume);
     window.addEventListener("online", resume);
@@ -121,7 +134,9 @@ export function useProviderUsage(query: string | null, refreshMs = 60_000): Prov
       window.removeEventListener("focus", resume);
       window.removeEventListener("online", resume);
       window.removeEventListener("offline", resume);
+      refreshRef.current = () => {};
     };
   }, [query, refreshMs]);
-  return state;
+  const refresh = useCallback(() => refreshRef.current(), []);
+  return { ...state, refresh };
 }

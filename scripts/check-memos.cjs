@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-require-imports -- Node-only browser QA. */
 const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
@@ -20,6 +19,8 @@ const delay = ms => new Promise(resolve=>setTimeout(resolve,ms));
   assert.deepEqual(await list(),[], 'Test agent directory must start with no memos');
   async function setup(page, control={}) {
     page.on('pageerror',e=>errors.push(e.message));
+    page.on('crash',()=>errors.push('Browser page crashed'));
+    page.on('requestfailed',request=>{if(request.isNavigationRequest())console.error(JSON.stringify({navigationFailure:request.url(),failure:request.failure()}));});
     await page.addInitScript(({wid})=>{
       localStorage.setItem('omp-lang','en');localStorage.setItem('omp-theme','light');
       localStorage.setItem('omp-web:wallpaper',JSON.stringify({id:wid,kind:'image',glass:'default',glassOpacity:40,textMode:'auto',muted:true}));
@@ -68,12 +69,19 @@ const delay = ms => new Promise(resolve=>setTimeout(resolve,ms));
     await page.getByRole('textbox',{name:'Memo content',exact:true}).fill('## Today\n\n- [ ] Read the paper\n- [x] Save an experiment\n\nA short note.');
     await page.keyboard.press('Insert');await page.getByRole('dialog',{name:'Memos',exact:true}).waitFor({state:'hidden'});
     for(let i=0;i<40;i++){const items=await list();items.forEach(m=>owned.add(m.id));if(items[0]?.content.includes('short note'))break;await delay(100);}
-    assert.equal((await list())[0].title,'Field notes');await open(page);
+    const firstMemo=(await list())[0];assert.equal(firstMemo.title,'Field notes');await open(page);
     assert.match(await page.getByRole('textbox',{name:'Memo content',exact:true}).inputValue(),/short note/);
     await page.getByRole('button',{name:'Preview',exact:true}).click();await page.locator('.memo-preview h2').waitFor();
+    assert.equal(await page.evaluate(id=>localStorage.getItem(`omp-web:memo-mode:${id}`),firstMemo.id),'preview');
+    await page.keyboard.press('Insert');await page.locator('.memo-dialog').waitFor({state:'hidden'});await open(page);
+    assert.equal(await page.getByRole('button',{name:'Preview',exact:true}).getAttribute('aria-pressed'),'true');
+    await page.reload();await open(page);
+    await page.locator('.memo-list-item').first().click();await page.locator('.memo-preview h2').waitFor();
+    assert.equal(await page.getByRole('button',{name:'Preview',exact:true}).getAttribute('aria-pressed'),'true');
     const download=page.waitForEvent('download');await page.getByRole('button',{name:'Download Markdown',exact:true}).click();
     const file=await download;await file.saveAs(path.join(out,'memo.md'));assert.match(fs.readFileSync(path.join(out,'memo.md'),'utf8'),/# Field notes/);
     await page.getByRole('button',{name:'Edit',exact:true}).click();
+    assert.equal(await page.evaluate(id=>localStorage.getItem(`omp-web:memo-mode:${id}`),firstMemo.id),'edit');
     control.slow=true;
     const pending=page.waitForRequest(r=>r.method()==='PUT'&&r.url().includes('/api/memos/'));
     await page.getByRole('textbox',{name:'Memo content',exact:true}).fill('First revision');await pending;
@@ -112,6 +120,26 @@ const delay = ms => new Promise(resolve=>setTimeout(resolve,ms));
       const dimensions=await page.locator('.memo-dialog').evaluate(el=>{const r=el.getBoundingClientRect();return {left:r.left,right:r.right,top:r.top,bottom:r.bottom,width:innerWidth,height:innerHeight,overflow:el.scrollWidth>el.clientWidth};});
       assert.ok(dimensions.left>=0&&dimensions.right<=dimensions.width&&dimensions.top>=0&&dimensions.bottom<=dimensions.height&&!dimensions.overflow);
       await page.screenshot({path:path.join(out,`${theme}-${viewport.width}.png`)});report.push({theme,viewport,dimensions});
+    }
+    await page.locator('.memo-list-item').nth(0).click();
+    await page.getByRole('button',{name:'Preview',exact:true}).click();
+    await page.locator('.memo-list-item').nth(1).click();
+    await page.getByRole('button',{name:'Edit',exact:true}).click();
+    for(const viewport of [{width:1440,height:1000},{width:390,height:844},{width:3840,height:2160}]) {
+      const modePage=await api.newPage();await modePage.setViewportSize(viewport);await setup(modePage);await open(modePage);
+      await modePage.locator('.memo-list-item').nth(0).click();
+      assert.equal(await modePage.getByRole('button',{name:'Preview',exact:true}).getAttribute('aria-pressed'),'true');
+      await modePage.reload();await open(modePage);
+      await modePage.locator('.memo-list-item').nth(0).click();
+      assert.equal(await modePage.getByRole('button',{name:'Preview',exact:true}).getAttribute('aria-pressed'),'true');
+      await modePage.locator('.memo-preview').waitFor();
+      await modePage.screenshot({path:path.join(out,`per-memo-preview-${viewport.width}.png`)});
+      if(viewport.width<640)await modePage.getByRole('button',{name:'Back to memos',exact:true}).click();
+      await modePage.locator('.memo-list-item').nth(1).click();
+      assert.equal(await modePage.getByRole('button',{name:'Edit',exact:true}).getAttribute('aria-pressed'),'true');
+      await modePage.getByRole('textbox',{name:'Memo content',exact:true}).waitFor();
+      await modePage.close();
+      report.push({viewport,perMemoModesRestored:true});
     }
     for(const flags of [{shiftKey:true},{ctrlKey:true},{altKey:true},{metaKey:true},{repeat:true},{isComposing:true}]) {
       const prevented=await page.evaluate(flags=>{const event=new KeyboardEvent('keydown',{key:'Insert',bubbles:true,cancelable:true,...flags});document.querySelector('.memo-content').dispatchEvent(event);return event.defaultPrevented;},flags);
@@ -154,13 +182,14 @@ const delay = ms => new Promise(resolve=>setTimeout(resolve,ms));
     await page.locator('.sidebar-settings-row').click();await page.locator('.settings-view').waitFor();
     await page.keyboard.press('Insert');await page.getByRole('dialog',{name:'Memos',exact:true}).waitFor();await page.keyboard.press('Insert');await page.getByRole('dialog',{name:'Memos',exact:true}).waitFor({state:'hidden'});assert.equal(await page.locator('.settings-view').isVisible(),true);
     assert.deepEqual(errors,[]);
-    console.log(JSON.stringify({report,errors,checks:['Insert from chat/settings and close','modified Insert and IME left intact','autosave on close','slow saves','stale refresh','pin','Markdown preview/export','offline reload recovery','multi-window conflicts/copy','search','confirmed deletion and cancel','Escape isolation','command palette','other dialog isolation','glass modes','solid theme contrast']}));
+    console.log(JSON.stringify({report,errors,checks:['Insert from chat/settings and close','modified Insert and IME left intact','autosave on close','slow saves','stale refresh','pin','Markdown preview/export','per-memo mode persistence across reopen/reload/selection','offline reload recovery','multi-window conflicts/copy','search','confirmed deletion and cancel','Escape isolation','command palette','other dialog isolation','glass modes','solid theme contrast']}));
     fs.writeFileSync(path.join(out,'results.json'),JSON.stringify({report,errors},null,2));
   } catch(error) {
     for (const [index,page] of api.pages().entries()) {
       await page.screenshot({path:path.join(out,`failure-${index}.png`)}).catch(()=>{});
-      console.error(JSON.stringify(await page.evaluate(()=>({dialog:!!document.querySelector('.memo-dialog'),status:document.querySelector('.memo-editor-footer')?.textContent,alerts:[...document.querySelectorAll('.memo-alert')].map(e=>e.textContent),value:document.querySelector('.memo-content')?.value,backup:sessionStorage.getItem('omp-web:memo-draft:v1')})).catch(()=>({closed:true}))));
+      console.error(JSON.stringify(await page.evaluate(()=>({dialog:!!document.querySelector('.memo-dialog'),status:document.querySelector('.memo-editor-footer')?.textContent,alerts:[...document.querySelectorAll('.memo-alert')].map(e=>e.textContent),value:document.querySelector('.memo-content')?.value,backup:sessionStorage.getItem('omp-web:memo-draft:v1')})).catch(e=>({url:page.url(),evaluationError:e.message}))));
     }
+    console.error(JSON.stringify({errors,report}));
     throw error;
   } finally {
     for(const memo of await list()) if(owned.has(memo.id)) await api.request.delete(base+'/api/memos/'+memo.id,{data:{revision:memo.revision}});

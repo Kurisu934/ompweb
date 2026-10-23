@@ -28,6 +28,7 @@ import { resolveSessionPathOr404 } from "@/lib/api-utils";
 import { parseJsonWithinLimit, RequestBodyTooLargeError } from "@/lib/bounded-form-data";
 import { sessionPathKey } from "@/lib/paths";
 import { clearExitedRpcSession, getRpcSession } from "@/lib/rpc-manager";
+import { forgetSessionAccountPins } from "@/lib/account-routing";
 
 /** Stable, client-safe error body for catch-all handlers: details go to the
  *  server log only, never to the browser. */
@@ -423,6 +424,7 @@ export async function DELETE(
     await getRpcSession(id)?.destroyAndWait?.();
     deleteSessionFileWithArtifacts(filePath);
     clearExitedRpcSession(id);
+    forgetSessionAccountPins(deletedSessionId);
     invalidateSessionPathCache(id);
     invalidateSessionCaches(); // deletion drops the file: full flush is correct
     return NextResponse.json({

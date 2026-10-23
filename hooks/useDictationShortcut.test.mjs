@@ -4,8 +4,10 @@ import test, { afterEach } from "node:test";
 import { createJiti } from "jiti";
 import { act, cleanup, renderHook } from "@testing-library/react/pure.js";
 
-const { useDictationShortcut } = await createJiti(import.meta.url, { tryNative: false }).import("./useDictationShortcut.ts");
-afterEach(() => { cleanup(); document.body.replaceChildren(); });
+const jiti = createJiti(import.meta.url, { tryNative: false, tsconfigPaths: true });
+const { useDictationShortcut } = await jiti.import("./useDictationShortcut.ts");
+const { setShortcutBinding } = await jiti.import("../lib/keyboard-shortcuts.ts");
+afterEach(() => { cleanup(); document.body.replaceChildren(); setShortcutBinding("toggleDictation", null); });
 
 function setup() {
   const root = document.createElement("div"), input = document.createElement("textarea");
@@ -133,4 +135,16 @@ test("non-modal transcription toasts do not block the next recording", () => {
   toast.setAttribute("role", "dialog"); toast.setAttribute("aria-modal", "false"); toast.className = "toast-card";
   toast.getClientRects = () => [{}]; document.body.append(toast);
   s.tap(); assert.equal(s.count(), 1);
+});
+
+test("remapped dictation responds immediately and clearing it restores native key handling", () => {
+  const s = setup();
+  setShortcutBinding("toggleDictation", ["Ctrl+Shift+D"]);
+  s.tap();
+  assert.equal(s.count(), 0);
+  assert.equal(s.key("keydown", "d", { code: "KeyD", ctrlKey: true, shiftKey: true }).defaultPrevented, true);
+  assert.equal(s.count(), 1);
+  setShortcutBinding("toggleDictation", []);
+  assert.equal(s.key("keydown", "d", { code: "KeyD", ctrlKey: true, shiftKey: true }).defaultPrevented, false);
+  assert.equal(s.count(), 1);
 });

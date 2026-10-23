@@ -1,6 +1,7 @@
 # Codex-compatible web pets
 
-Open **Settings > Pets** (Chinese: **设置 > 桌宠**).
+Open **Settings > Appearance & Personalization > Pets** (Chinese:
+**设置 > 外观与个性化 > 桌宠**).
 
 - Local Codex pets are discovered from `$CODEX_HOME/pets` or `~/.codex/pets`.
   `OMP_WEB_CODEX_PETS_DIR` overrides that discovery directory.
@@ -10,7 +11,7 @@ Open **Settings > Pets** (Chinese: **设置 > 桌宠**).
   Persist this directory on a NAS. Mount external Codex assets read-only.
 - Enabled pet, size, position, and pointer tracking are browser preferences.
   Each device can choose its own display. Drag or arrow keys reposition it;
-  the close icon hides it. Restore it from Settings > Pets.
+  the close icon hides it. Restore it from Settings > Appearance & Personalization > Pets.
 - While settings are open, only the settings preview is shown, so the floating
   pet cannot obscure controls. Other dialogs remain above the pet.
 

@@ -6,7 +6,7 @@ const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
   tsconfigPaths: true,
 });
-const { providerInitials } = await jiti.import("./ModelsConfig.tsx");
+const { providerInitials } = await jiti.import("./ModelsConfig-types.ts");
 
 test("provider glyphs derive from arbitrary runtime provider ids", () => {
   assert.equal(providerInitials("acme-provider"), "AP");

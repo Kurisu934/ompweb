@@ -1,10 +1,12 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
+import { ChevronDown } from "lucide-react";
 import type { ExtensionUiRequest } from "@/lib/types";
 import type { RpcAskDialogAnswer } from "@/lib/pi-types";
 import { useI18n } from "@/lib/i18n";
 import { useModalDialog } from "@/hooks/useModalDialog";
+import { matchesShortcut } from "@/lib/keyboard-shortcuts";
 
 export type ExtensionDialogRequest = Extract<
   ExtensionUiRequest,
@@ -53,6 +55,10 @@ export function ExtensionDialog({
   const [value, setValue] = useState(request.method === "editor" ? request.prefill ?? "" : "");
   const [selectedOption, setSelectedOption] = useState<string | null>(null);
   const [askDrafts, setAskDrafts] = useState(() => initialAskDrafts(request));
+  const [expanded, setExpanded] = useState(true);
+  const contentId = useId();
+  const Header = attached ? "button" : "div";
+  useEffect(() => { setExpanded(true); }, [request.id]);
 
   useEffect(() => {
     setValue(request.method === "editor" ? request.prefill ?? "" : "");
@@ -82,7 +88,7 @@ export function ExtensionDialog({
     const frame = window.requestAnimationFrame(() => {
       const panel = panelRef.current;
       if (!panel) return;
-      const target = panel.querySelector<HTMLElement>("input, textarea, button:not([disabled])");
+      const target = panel.querySelector<HTMLElement>("[data-extension-body] input, [data-extension-body] textarea, [data-extension-body] button:not([disabled])");
       (target ?? panel).focus();
     });
     return () => window.cancelAnimationFrame(frame);
@@ -150,11 +156,27 @@ export function ExtensionDialog({
           maxHeight: attached ? "min(420px, 60dvh)" : "100%",
         }}
       >
+        <Header
+          type={attached ? "button" : undefined}
+          onClick={attached ? () => setExpanded((value) => !value) : undefined}
+          aria-expanded={attached ? expanded : undefined}
+          aria-controls={attached ? contentId : undefined}
+          style={{
+            padding: "12px 14px", width: "100%", flexShrink: 0,
+            border: "none", borderBottom: attached && !expanded ? "none" : "1px solid var(--border)",
+            background: "transparent", textAlign: "left",
+            display: "flex", alignItems: "center", gap: 8,
+            cursor: attached ? "pointer" : undefined,
+          }}
+        >
+          <span style={{ minWidth: 0, flex: 1 }}>
+            <span style={{ display: "block", color: "var(--text)", fontSize: 14, fontWeight: 650, whiteSpace: attached && !expanded ? "nowrap" : "pre-wrap", overflow: "hidden", textOverflow: "ellipsis" }}>{title}</span>
+            {!attached && <span style={{ display: "block", marginTop: 3, color: "var(--text-dim)", fontSize: 11, fontFamily: "var(--font-mono)" }}>{t("chatWindow.extensionRequest")}</span>}
+          </span>
+          {attached && <ChevronDown size={14} aria-hidden style={{ flexShrink: 0, transform: expanded ? "none" : "rotate(-90deg)", transition: "transform var(--dur-fast) var(--ease-out-warm)" }} />}
+        </Header>
+        <div id={contentId} data-extension-body hidden={attached && !expanded} style={{ display: attached && !expanded ? "none" : "flex", flexDirection: "column", minHeight: 0 }}>
         <div style={{ minHeight: 0, overflowY: "auto", overflowWrap: "anywhere" }}>
-        <div style={{ padding: "12px 14px", borderBottom: "1px solid var(--border)" }}>
-          <div style={{ color: "var(--text)", fontSize: 14, fontWeight: 650, whiteSpace: "pre-wrap" }}>{title}</div>
-          <div style={{ marginTop: 3, color: "var(--text-dim)", fontSize: 11, fontFamily: "var(--font-mono)" }}>{t("chatWindow.extensionRequest")}</div>
-        </div>
 
         <div style={{ padding: 14 }}>
           {request.method === "confirm" && (
@@ -219,7 +241,7 @@ export function ExtensionDialog({
               value={value}
               onChange={(e) => setValue(e.target.value)}
               onKeyDown={(e) => {
-                if ((e.metaKey || e.ctrlKey) && e.key === "Enter") submitValue();
+                if (matchesShortcut("submitDialog", e.nativeEvent)) { e.preventDefault(); submitValue(); }
               }}
               style={{
                 width: "100%",
@@ -304,7 +326,7 @@ export function ExtensionDialog({
                         setAskDrafts((drafts) => drafts.map((current, i) => i === index ? { selected: question.multi ? current.selected : [], other } : current));
                       }}
                       onKeyDown={(e) => {
-                        if ((e.metaKey || e.ctrlKey) && e.key === "Enter") submitValue();
+                        if (matchesShortcut("submitDialog", e.nativeEvent)) { e.preventDefault(); submitValue(); }
                       }}
                       style={{
                         width: "100%",
@@ -396,6 +418,7 @@ export function ExtensionDialog({
               {t("chatWindow.submit")}
             </button>
           ) : null}
+        </div>
         </div>
       </div>
     </div>

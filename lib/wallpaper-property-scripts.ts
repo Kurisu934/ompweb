@@ -4,13 +4,14 @@ import { sceneGuestModule } from "./wallpaper-script-modules";
 import { sceneAlignments } from "./wallpaper-scene-parent";
 import { sampleSceneTimeline, timelineGuestSource } from "./wallpaper-timeline";
 import { boneGuestSource, type SceneScriptInput, type ScriptBonePose } from "./wallpaper-script-bones";
-import type { BrowserScene, SceneLayer, SceneMesh, SceneSoundCommand } from "./wallpaper-scene-types";
+import type { BrowserScene, SceneBoneCommand, SceneLayer, SceneMesh, SceneSoundCommand } from "./wallpaper-scene-types";
 
 export interface ScriptLayerState {
   id: number; template?: string; origin: number[]; scale: number[]; angles: number[];
   parallaxDepth: number[]; color: number[]; alpha: number; visible: boolean; alignment: string;
   shaderValues?: Record<string, number | number[]>[];
   boneWrites?: Record<string, number[]>;
+  boneCommands?: SceneBoneCommand[];
   videoPlaying?: boolean;
 }
 type ScriptFrame = { layers: ScriptLayerState[]; audio: boolean; warnings: string[]; soundCommands: SceneSoundCommand[] };
@@ -71,7 +72,7 @@ const guest = String.raw`(function(input) {
   function invoke(script,fn,args,assign=false){
     select(script.spec);
     const previous=activeScript,commandCount=soundCommands.length;activeScript=script;inFlight=script;
-    const data=states.get(current),saved=config.partial?{...data,shaderValues:JSON.parse(stringify(data.shaderValues)),boneWrites:JSON.parse(stringify(data.boneWrites??{}))}:undefined;
+    const data=states.get(current),saved=config.partial?{...data,shaderValues:JSON.parse(stringify(data.shaderValues)),boneWrites:JSON.parse(stringify(data.boneWrites??{})),boneCommands:JSON.parse(stringify(data.boneCommands??[]))}:undefined;
     try{const v=fn(...args);if(assign&&v!==undefined)write(script.spec,v);inFlight=undefined;script.interruptions=0;return true;}
     catch(e){
       if(!config.partial)throw e;
@@ -181,6 +182,7 @@ const guest = String.raw`(function(input) {
       const frame=JSON.parse(json),script=inFlight;
       for(const old of frame.layers){const layer=layers.find(l=>states.get(l).id===old.id);if(layer)Object.assign(states.get(layer),old);}
       soundCommands.length=0;activeScript=undefined;inFlight=undefined;
+      for(const layer of layers)states.get(layer).boneCommands=[];
       if(script){
         script.interruptions=(script.interruptions??0)+1;
         if(script.interruptions>=3){
@@ -240,7 +242,7 @@ const guest = String.raw`(function(input) {
       const out=stringify({layers:layers.filter(l=>!states.get(l).sound).map(l=>{const {bones,bonePose,...state}=states.get(l);return state;}),soundCommands,audio:buffers.length>0,warnings:[...warnings]});
       soundCommands.length=0;
       for(const script of scripts)script.interruptions=0;
-      for(const layer of layers)states.get(layer).boneWrites={};
+      for(const layer of layers){states.get(layer).boneWrites={};states.get(layer).boneCommands=[];}
       return out;
     }
   };
@@ -278,7 +280,7 @@ export class ScenePropertyScripts {
     const runner = new ScenePropertyScripts((await sceneScriptModule()).newContext(), data, partial);
     try {
       runner.deadline = performance.now() + 500;
-      const initial = JSON.stringify({ now, partial, userProperties: data.userProperties || {}, width: data.width, height: data.height, alignments: sceneAlignments, sounds: (data.sounds || []).map(s => ({id:s.id,name:s.name || "",volume:s.volume})), layers: data.layers.map(l => ({ ...state(l), ...(data.textures?.some(t => t.key === l.texture && t.mimeType === "video/mp4") ? { videoPlaying: true } : {}), bonePose: poses.find(p => p.id === l.id) })),
+      const initial = JSON.stringify({ now, partial, userProperties: data.userProperties || {}, width: data.width, height: data.height, alignments: sceneAlignments, sounds: (data.sounds || []).map(s => ({id:s.id,name:s.name || "",volume:s.volume})), layers: data.layers.map(l => ({ ...state(l), ...(data.textures?.some(t => t.key === l.texture && t.mimeType?.startsWith("video/")) ? { videoPlaying: true } : {}), bonePose: poses.find(p => p.id === l.id) })),
         templates: Object.fromEntries(Object.entries(data.scriptTemplates || {}).map(([k, l]) => [k, state(l)])) });
       if (initial.length > 1024 * 1024) throw new Error("SceneScript initial state exceeds limit");
       const factory = runner.result(runner.vm.evalCode(guest));
@@ -355,7 +357,7 @@ export class ScenePropertyScripts {
       try { identified = this.vm.getNumber(recovery) !== 0; } finally { recovery.dispose(); }
       if (!identified && ++this.recoveryFailures >= 3) throw error;
       this.recoveries++;
-      return { ...this.lastFrame, soundCommands: [], warnings: [...this.lastFrame.warnings, "SceneScript frame deferred after an execution timeout; last valid layer state retained"] };
+      return { ...this.lastFrame, layers: this.lastFrame.layers.map(layer => ({ ...layer, boneCommands: [] })), soundCommands: [], warnings: [...this.lastFrame.warnings, "SceneScript frame deferred after an execution timeout; last valid layer state retained"] };
     }
     let json: string;
     try {
@@ -378,10 +380,15 @@ export class ScenePropertyScripts {
       if (layer.angles[0] || layer.angles[1]) throw new Error("3D SceneScript rotations are not supported");
       if (!Number.isFinite(layer.alpha) || layer.alpha < 0 || layer.alpha > 1 || typeof layer.visible !== "boolean" || !sceneAlignments.includes(layer.alignment)) throw new Error("Invalid SceneScript appearance");
       const definition = layer.id < 0 ? this.data.scriptTemplates![layer.template!] : this.data.layers.find(l => l.id === layer.id)!;
-      if (layer.videoPlaying !== undefined && (typeof layer.videoPlaying !== "boolean" || !this.data.textures?.some(t => t.key === definition.texture && t.mimeType === "video/mp4"))) throw new Error("Invalid SceneScript video state");
+      if (layer.videoPlaying !== undefined && (typeof layer.videoPlaying !== "boolean" || !this.data.textures?.some(t => t.key === definition.texture && t.mimeType?.startsWith("video/")))) throw new Error("Invalid SceneScript video state");
       for(const [index,matrix] of Object.entries(layer.boneWrites??{})) {
         const bone=Number(index);
         if(!Number.isInteger(bone)||bone<0||bone>=(definition.mesh?.bones?.length??0)||!vector(matrix,16)||Math.abs(matrix[3])+Math.abs(matrix[7])+Math.abs(matrix[11])+Math.abs(matrix[15]-1)>1e-6)throw new Error("Invalid SceneScript bone output");
+      }
+      if (layer.boneCommands !== undefined && (!Array.isArray(layer.boneCommands) || layer.boneCommands.length > 128)) throw new Error("Invalid bone physics commands");
+      for (const command of layer.boneCommands || []) {
+        if (!Number.isInteger(command.bone) || command.bone < -1 || command.bone >= (definition.mesh?.bones?.length ?? 0) || !["impulse", "reset"].includes(command.action)) throw new Error("Invalid bone physics command");
+        if (command.action === "impulse" && (!vector(command.translation, 3) || !vector(command.rotation, 3))) throw new Error("Invalid bone physics impulse");
       }
       if (!Array.isArray(layer.shaderValues) || layer.shaderValues.length !== definition.passes.length) throw new Error("Invalid SceneScript shader passes");
       for (const [pass, values] of layer.shaderValues.entries()) {
