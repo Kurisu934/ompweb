@@ -62,6 +62,10 @@ stage() {
   # every file reports 0755; the umask above applies instead.
   git -C "$SRC" ls-files -z -co --exclude-standard \
     | rsync -rlt --from0 --files-from=- --ignore-missing-args "$SRC/" "$STAGE/"
+  # Restore only actual executable entry points after the permission-neutral
+  # copy; sudo must be able to launch the web askpass helpers after switching.
+  chmod 700 "$STAGE/bin/askpass/sudo" "$STAGE/bin/askpass/omp-web-askpass" \
+    "$STAGE/scripts/deploy-linux-service.sh"
 
   if [[ -f "$APP/.env.local" ]]; then
     cp -p "$APP/.env.local" "$STAGE/.env.local"
