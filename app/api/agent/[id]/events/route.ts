@@ -36,6 +36,7 @@ export async function GET(
       let closed = false;
       let cleaned = false;
       let unsubscribe: (() => void) | null = null;
+      let stopWatchingDestroy: (() => void) | null = null;
       // Backpressure slot: while the consumer is behind (desiredSize < 0),
       // replaceable `message_update` frames collapse to the latest one (omp
       // sends the FULL accumulated message each time, so latest-wins is safe).
@@ -57,6 +58,8 @@ export async function GET(
           try { unsubscribe(); } catch {}
           unsubscribe = null;
         }
+        stopWatchingDestroy?.();
+        stopWatchingDestroy = null;
         req.signal?.removeEventListener("abort", cleanup);
         try {
           controller.close();
@@ -126,6 +129,14 @@ export async function GET(
         return;
       }
       unsubscribe = detach;
+      // A reaped or crashed child must end this stream: otherwise the heartbeat
+      // keeps a dead wrapper looking live, and the tab neither reconnects (to a
+      // desktop owner that took over the session) nor respawns on its next send.
+      stopWatchingDestroy = session.onDestroy(cleanup);
+      if (!session.isAlive()) {
+        cleanup();
+        return;
+      }
       encode({ type: "connected", sessionId: id, web: session.getStreamSnapshot().cursor });
     },
     // When a slow consumer resumes reading, the stream calls pull() as soon

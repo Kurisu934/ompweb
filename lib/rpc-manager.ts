@@ -77,6 +77,17 @@ interface CompactionResultLike {
 
 const IDLE_DESTROY_MS = 10 * 60 * 1000;
 /**
+ * Idle backstop for a **Web-owned** child (`omp --mode rpc-ui`). That child holds
+ * OMP's native session lease for its whole lifetime, so a terminal `omp --resume`
+ * of the same session forks to a sibling file until it exits. A shorter window
+ * (`OMP_WEB_IDLE_DESTROY_MS`) hands the session back to the terminal sooner at the
+ * cost of a cold respawn on the next Web command. Attached desktop owners hold no
+ * lease on Web's behalf and keep IDLE_DESTROY_MS. 0 or invalid keeps the default.
+ */
+const WEB_OWNED_IDLE_DESTROY_MS = Number(process.env.OMP_WEB_IDLE_DESTROY_MS) > 0
+  ? Number(process.env.OMP_WEB_IDLE_DESTROY_MS)
+  : IDLE_DESTROY_MS;
+/**
  * How long a session may sit with **no web UI attached** before its omp child is
  * torn down. IDLE_DESTROY_MS (10min) is the backstop for a session that keeps
  * receiving traffic; this is the much faster path for "the user closed the tab
@@ -503,7 +514,9 @@ export class AgentSessionWrapper {
    *  - a subscriber means an open HTTP 200 stream that `destroy()` would leave
    *    half-open (the route holds its own detach + heartbeat), so the run would
    *    vanish silently and the tab would only notice via a later 409;
-   *  - isRunning() covers an in-flight turn that no listener is watching;
+   *  - isRunning() covers an in-flight turn that no listener is watching, and
+   *    `unsettled` covers background work (async bash/task/eval) that outlives
+   *    the turn until omp reports `session_settled`;
    *  - handshaking covers a spawn that has not finished its startup handshake;
    *  - pendingCommands covers a route command (predict_word, mcp list, export)
    *    whose response the child still owes us;
@@ -511,7 +524,7 @@ export class AgentSessionWrapper {
    * Anything else keeps the session and re-arms for the remaining window.
    */
   private reapIfDisconnected(): void {
-    if (!this.isAlive() || this.hasSubscribers() || this.isRunning()
+    if (!this.isAlive() || this.hasSubscribers() || this.isRunning() || this.unsettled
       || this.handshaking || this.pendingCommands > 0) {
       this.armReap();
       return;
@@ -1263,7 +1276,7 @@ export class AgentSessionWrapper {
     if (this.idleTimer) clearTimeout(this.idleTimer);
     this.idleTimer = setTimeout(() => {
       if (
-        this.isRunning() || this.restarting ||
+        this.isRunning() || this.unsettled || this.restarting ||
         this.pendingUiRequests.size > 0 ||
         this.pendingHostTools.size > 0 ||
         this.pendingHostUris.size > 0
@@ -1272,7 +1285,7 @@ export class AgentSessionWrapper {
         return;
       }
       this.destroy();
-    }, IDLE_DESTROY_MS);
+    }, this.isAttached ? IDLE_DESTROY_MS : WEB_OWNED_IDLE_DESTROY_MS);
     // A cleanup deadline must not keep the process alive; the registry's
     // process-exit handler disposes every child anyway.
     this.idleTimer.unref?.();
@@ -1328,8 +1341,10 @@ export class AgentSessionWrapper {
     return items;
   }
 
-  onDestroy(cb: () => void): void {
+  /** Runs `cb` after the child exits; the returned function unregisters it. */
+  onDestroy(cb: () => void): () => void {
     this.destroyListeners.add(cb);
+    return () => { this.destroyListeners.delete(cb); };
   }
 
   /** Called when a session-changing command re-keyed this wrapper (branch/new_session/switch_session). */

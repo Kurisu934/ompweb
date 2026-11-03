@@ -6,6 +6,12 @@ All notable changes to **omp-web** (`@kahme247/ompweb`) are documented in this f
 
 ## Unreleased
 
+### Terminal resume lock release and upstream merge — 0.5.4 (2026-11-04)
+
+- Release a Web-owned session to the terminal sooner: `OMP_WEB_IDLE_DESTROY_MS` shortens the idle backstop for Web-owned `omp --mode rpc-ui` children (default unchanged at 10 minutes), so their native session lease is freed and a terminal `omp --resume` no longer forks to a sibling. Attached desktop owners keep the 10-minute backstop. The next Web command cold-starts a new child.
+- Never reap a child while background work (async bash/task/eval) can still wake the session: both idle reaping and disconnected reaping now wait for omp's `session_settled`.
+- End a session's event stream when its wrapper is destroyed (idle reap, crash, desktop disconnect), so open tabs reconnect instead of reusing a dead stream; a tab then attaches to a desktop owner that took the session over, or respawns on its next send.
+
 - Document the native `telegram_send_file` compatibility contract for Web-owned RPC children and attached original desktop processes: ordinary native tool events/results, process-local extension loading and private target configuration, without a Telegram runtime dependency, private protocol, host-tool routing or Ask changes.
 - Display server-observed enqueue timestamps for queued messages using parallel `{steering: number[], followUp: number[]}` arrays aligned with OMP queue lists. Time sorting changes only the expanded view; cancellation and editing retain the native text-and-queue, first-match contract. Missing timestamps fall back to queue order; the collapsed first item remains in queue order.
 - Honor non-empty model-declared `serviceTiers` for `/fast`; absent tier metadata falls back to supported provider families, including ChatGPT/Codex (`openai-codex`) and Google Vertex (`google-vertex`). The command lazily creates an empty session, applies `set_fast_mode`, reports creation/ownership errors, and ignores results after leaving the session. Attachments and execution during an active turn are rejected without discarding the draft.
