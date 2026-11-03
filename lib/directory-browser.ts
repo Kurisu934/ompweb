@@ -84,3 +84,23 @@ export async function listDirectories(directory: string): Promise<BrowsableDirec
     .filter((entry): entry is BrowsableDirectory => entry !== null)
     .sort((left, right) => left.name.localeCompare(right.name));
 }
+
+/** A new folder name must be exactly one path segment. Windows additionally
+ * forbids `<>:"|?*` and control characters in names. */
+export function isValidNewDirectoryName(
+  name: string,
+  platform: NodeJS.Platform = process.platform,
+): boolean {
+  if (!name || name === "." || name === "..") return false;
+  if (/[/\\\0]/.test(name)) return false;
+  return platform !== "win32" || !/[<>:"|?*\x00-\x1f]/.test(name);
+}
+
+/** Creates `name` inside `parent` (non-recursive; fails with EEXIST if taken). */
+export async function createDirectory(parent: string, name: string): Promise<string> {
+  // Opaque to Next's NFT tracer for the same reason as `listDirectories`.
+  const makeDirectory = Reflect.get(fsPromises, "mkdir") as typeof fsPromises.mkdir;
+  const target = path.join(parent, name);
+  await makeDirectory(target);
+  return target;
+}

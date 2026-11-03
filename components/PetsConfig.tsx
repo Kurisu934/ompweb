@@ -6,6 +6,7 @@ import { notifyPetLibraryChanged, usePetLibrary, usePetPreferences } from "@/hoo
 import { PET_ROWS, type PetInfo, type PetState } from "@/lib/pets";
 import { PetSprite } from "./PetSprite";
 import { Tooltip } from "./ui/primitives";
+import { Select } from "./ui/field";
 
 export function PetsConfig() {
   const { t } = useI18n();
@@ -48,9 +49,9 @@ export function PetsConfig() {
     finally { setBusy(false); }
   };
   return (
-    <section role="tabpanel" id="settings-panel-pets" aria-labelledby="settings-tab-pets" className="settings-panel-inner pet-settings">
+    <section aria-labelledby="appearance-pets-heading" className="pet-settings">
       <header className="pet-settings-header">
-        <h2>{t("pets.title")}</h2>
+        <h3 id="appearance-pets-heading">{t("pets.title")}</h3>
         <div className="pet-settings-actions">
           <Tooltip content={t("pets.refresh")}><button className="shell-toolbar-btn" aria-label={t("pets.refresh")} onClick={refresh} disabled={loading}><RefreshCw size={16} /></button></Tooltip>
           <button className="pet-import-button" onClick={() => input.current?.click()} disabled={busy}><Upload size={16} />{t("pets.import")}</button>
@@ -79,9 +80,14 @@ export function PetsConfig() {
         <div className="pet-option-row"><span>{t("pets.position")}</span><Tooltip content={t("pets.reset")}><button className="shell-toolbar-btn" aria-label={t("pets.reset")} onClick={() => update({ x: 0.96, y: 0.65 })}><RotateCcw size={16} /></button></Tooltip></div>
       </div>
       {selected && <div className="pet-preview">
-        <label>{t("pets.preview")}<select aria-label={t("pets.preview")} value={preview} onChange={(event) => setPreview(event.target.value as PetState)}>
-          {(Object.keys(PET_ROWS) as PetState[]).map((state) => <option key={state} value={state}>{t(`pets.state.${state}`)}</option>)}
-        </select></label>
+        <label>{t("pets.preview")}<Select
+          aria-label={t("pets.preview")}
+          value={preview}
+          onChange={(nextValue) => setPreview(nextValue as PetState)}
+          options={[
+            ...(Object.keys(PET_ROWS) as PetState[]).map((state) => ({ value: state, label: t(`pets.state.${state}`) })),
+          ]}
+        /></label>
         <PetSprite key={selected.key} pet={selected} size={preferences.size} state={preview} />
       </div>}
     </section>

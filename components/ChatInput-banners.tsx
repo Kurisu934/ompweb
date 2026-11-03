@@ -59,6 +59,7 @@ export function ModelErrorBanner({ error }: { error?: string | null }) {
   if (!error) return null;
   return (
     <div
+      className="composer-model-error wallpaper-surface"
       role="alert"
       style={{
         display: "flex",
@@ -276,6 +277,7 @@ export function ComposerModeStatus({ goal, plan }: { goal?: ActiveGoal | null; p
     <div style={{ display: "flex", flexDirection: "column", gap: 6, marginBottom: 8 }}>
       {goal && (
         <button
+          className="composer-goal wallpaper-surface"
           type="button"
           aria-expanded={expanded}
           onClick={() => setExpanded((value) => !value)}
@@ -300,7 +302,7 @@ export function ComposerModeStatus({ goal, plan }: { goal?: ActiveGoal | null; p
         </button>
       )}
       {plan && (
-        <div role="status" aria-live="polite" style={{ display: "flex", alignItems: "center", gap: 7, padding: "5px 9px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text-muted)", fontSize: 12 }}>
+        <div className="composer-plan wallpaper-surface" role="status" aria-live="polite" style={{ display: "flex", alignItems: "center", gap: 7, padding: "5px 9px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text-muted)", fontSize: 12 }}>
           <ListChecks size={14} strokeWidth={2} style={{ flexShrink: 0, color: "var(--accent)" }} aria-hidden="true" />
           <span style={{ fontWeight: 600 }}>{t("chatInput.planningInProgress")}</span>
           <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", color: "var(--text-dim)" }}>{plan.objective}</span>

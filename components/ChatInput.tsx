@@ -2,7 +2,7 @@
 
 import React, { useRef, useState, useCallback, useEffect, useLayoutEffect, useImperativeHandle, forwardRef, memo, KeyboardEvent } from "react";
 import { createPortal } from "react-dom";
-import { ChevronDown, ClipboardPaste, ListChecks, Loader2, Mic, Paperclip, Plus, RotateCw, Shrink, Snail, Sparkles, Wrench, X, Zap } from "lucide-react";
+import { ChevronDown, ClipboardPaste, CornerDownRight, ListChecks, Loader2, Mic, Paperclip, Plus, RotateCw, Shrink, Snail, Sparkles, Wrench, X, Zap } from "lucide-react";
 import { getSubmitDuringRunBehavior, isWordCompletionEnabled } from "@/lib/composer-prefs";
 import type { BuiltinSlashCommandResult, CompactResultInfo, QueuedMessages, SlashCommandInfo } from "@/hooks/useAgentSession";
 import type { ActiveGoal, ActivePlan } from "@/lib/web-mode-state";
@@ -10,11 +10,17 @@ import { toast } from "@/components/ui/toast";
 import { ConfirmDialog } from "@/components/ui/field";
 import { useDictation } from "@/hooks/useDictation";
 import { toastBtwError } from "@/hooks/useBtw";
-import type { GenerationSpeedInfo, SessionStatsInfo, SlowModeScope, UsageLimitState } from "@/lib/pi-types";
+import type { GenerationSpeedInfo, QueuedMessageTimestamps, SessionStatsInfo, SlowModeScope, UsageLimitState } from "@/lib/pi-types";
 import type { SttAfter } from "@/lib/stt";
 import { formatCompactNumber, formatPercent } from "@/lib/format";
 import { ContextDetailPanel } from "./ComposerPanels";
 import { RecordingDeck } from "./RecordingDeck";
+import { useDictationShortcut } from "@/hooks/useDictationShortcut";
+import { matchesShortcut, shortcutAria, shortcutHint } from "@/lib/keyboard-shortcuts";
+import { useShortcuts } from "@/hooks/useShortcuts";
+import { WhaleTail } from "./WhaleTail";
+import { ScheduledMessagesPanel, ScheduleSendButton } from "./ScheduledSend";
+import type { ScheduledMessage } from "@/lib/scheduled-messages";
 import { clearDraft, getDraft, mergeRecoveredText, recoverDraft, setDraft, subscribeDraftRecovery, getUnconfirmedDeliveries, clearUnconfirmedDelivery, clearAllUnconfirmedDeliveries, subscribeUnconfirmedDelivery, type ChatDraftImage, type UnconfirmedDeliveryPayload } from "@/lib/draft-store";
 import { expandWebSlashCommand } from "@/lib/web-slash-commands";
 import type { AttachedImage, AttachedTextFile } from "./ChatInput-draft-attachments";
@@ -195,6 +201,7 @@ interface Props {
   retryInfo?: { attempt: number; maxAttempts: number; errorMessage?: string } | null;
   onAbortRetry?: () => void;
   queuedMessages?: QueuedMessages | null;
+  queuedMessageTimestamps?: QueuedMessageTimestamps | null;
   inputHistory?: string[];
   /** True while the advisor model is actively reviewing the running turn. */
   advisorActive?: boolean;
@@ -215,7 +222,11 @@ interface Props {
   /** Cancel one pending message in omp before removing it from the queue
    *  panel; resolves to its images once omp confirms, else false. */
   onRemoveQueuedMessage?: (text: string, queue: keyof QueuedMessages) => Promise<ChatDraftImage[] | false>;
-
+  /** Server-side scheduled messages for this session. */
+  scheduledMessages?: ScheduledMessage[];
+  onScheduleMessage?: (message: string, sendAt: number) => Promise<boolean>;
+  onCancelScheduledMessage?: (id: string) => void;
+  onSendScheduledMessageNow?: (id: string) => void;
   slashCommands?: SlashCommandInfo[];
   slashCommandsLoading?: boolean;
   onLoadSlashCommands?: () => Promise<SlashCommandInfo[]> | SlashCommandInfo[];
@@ -233,13 +244,15 @@ interface Props {
   onMinimize?: () => void;
   /** Active status label attached to the composer's top edge (e.g. "Waiting for model..."). */
   statusText?: string | null;
-  /** Open Settings → API Keys & Providers from the model picker footer. */
+  /** Open Settings → Models & Providers from the model picker footer. */
   onOpenProviders?: () => void;
 }
 
 export interface ChatInputHandle {
   focus: () => void;
   insertText: (text: string) => void;
+  /** Append a quoted block at the end of the draft, on its own lines. */
+  insertQuote: (quote: string) => void;
   insertIfEmpty: (text: string) => void;
   prependText: (text: string) => void;
   addFiles: (files: File[]) => void;
@@ -323,15 +336,14 @@ function menuDropStyle(placement: MenuPlacement, maxHeight: number | null): Reac
 }
 
 export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatInput({
-  onSend, onPredictWord, onPredictWordFeedback, onAbort, onSteer, onFollowUp, onInterruptAndReply, isStreaming, model, isAutoModelSelection, modelNames, modelList, modelError, modelsLoading, onModelChange, fastModeEnabled, fastModeActive, usageLimit, fastModeSupported, onFastModeChange, slowModeSupported, slowModeEnabled, slowModeScope, onSlowModeChange,
+  onSend, onPredictWord, onPredictWordFeedback, onAbort, onSteer, onFollowUp, onInterruptAndReply, onPromptWithStreamingBehavior, isStreaming, model, isAutoModelSelection, modelNames, modelList, modelError, modelsLoading, onModelChange, fastModeEnabled, fastModeActive, usageLimit, fastModeSupported, onFastModeChange, slowModeSupported, slowModeEnabled, slowModeScope, onSlowModeChange,
   onAbortCompaction, isCompacting, compactResult,
   thinkingLevel, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap, modelNameOverride,
   toolPreset, onToolPresetChange,
-  retryInfo, queuedMessages, inputHistory = [], onAbortRetry,
+  retryInfo, queuedMessages, queuedMessageTimestamps, inputHistory = [], onAbortRetry,
   slashCommands, slashCommandsLoading, onLoadSlashCommands,
   onBuiltinCommand,
   onAudioUnlock,
-  onPromptWithStreamingBehavior,
   advisorActive,
   advisorModel,
   onCompact,
@@ -341,6 +353,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   modelCapacity,
   generationSpeed,
   onRemoveQueuedMessage,
+  scheduledMessages,
+  onScheduleMessage,
+  onCancelScheduledMessage,
+  onSendScheduledMessageNow,
   draftKey = "new:unassigned",
   cwd,
   activeGoal,
@@ -405,6 +421,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     });
   }, [draftKey]);
 
+  const shortcutBindings = useShortcuts();
   const [queuedDeleteTarget, setQueuedDeleteTarget] = useState<{
     text: string;
     kind: "follow-up" | "steer";
@@ -455,6 +472,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const [atServerResult, setAtServerResult] = useState<{ cwd: string; query: string; matches: FileIndexEntry[] } | null>(null);
 
   const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const composerRef = useRef<HTMLDivElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const modelDropdownPanelRef = useRef<HTMLDivElement>(null);
   const modelTriggerRef = useRef<HTMLButtonElement>(null);
@@ -493,7 +511,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   const insertTextAtCursor = useCallback((text: string) => {
     const ta = textareaRef.current;
     if (!ta) {
-      setValue((v) => v + (v ? " " : "") + text);
+      setValue((v) => v + (v && !v.endsWith(" ") ? " " : "") + text);
       return;
     }
     const start = ta.selectionStart ?? ta.value.length;
@@ -550,6 +568,21 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       });
     },
     insertText: insertTextAtCursor,
+    insertQuote(quote: string) {
+      const ta = textareaRef.current;
+      const current = (ta ? ta.value : value).replace(/\s+$/, "");
+      const combined = current ? `${current}\n\n${quote}` : quote;
+      setValue(combined);
+      setAtQuery(null);
+      requestAnimationFrame(() => {
+        if (!ta) return;
+        ta.focus();
+        ta.setSelectionRange(combined.length, combined.length);
+        ta.style.height = "auto";
+        ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
+        ta.scrollTop = ta.scrollHeight;
+      });
+    },
     addFiles(files: File[]) {
       processFiles(files);
     },
@@ -617,7 +650,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     } finally {
       pendingImageCountRef.current -= imageFiles.length;
     }
-  }, []);
+  }, [t]);
 
   const processTextFiles = useCallback(async (files: File[]) => {
     const remaining = Math.max(
@@ -675,7 +708,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       pendingTextFileCountRef.current -= textFiles.length;
       pendingTextFileBytesRef.current -= textFiles.reduce((total, file) => total + file.size, 0);
     }
-  }, []);
+  }, [t]);
 
   const processFiles = useCallback((files: File[]) => {
     const imageFiles = files.filter((file) => file.type.startsWith("image/"));
@@ -844,7 +877,6 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       ta.style.height = Math.min(ta.scrollHeight, 200) + "px";
     });
   }), []);
-
   useLayoutEffect(() => {
     const ta = textareaRef.current;
     if (!ta) return;
@@ -912,6 +944,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     if (!msg && !attachedImagesRef.current.length && !attachedTextFilesRef.current.length) return;
     onAudioUnlock?.();
     if (sendSideQuestion(msg, overrideText)) return;
+    if (/^\/fast(?:\s|$)/.test(msg) && (attachedImagesRef.current.length || attachedTextFilesRef.current.length)) {
+      setAttachError(t("chatInput.fastAttachmentsUnsupported"));
+      return;
+    }
     const composedMessage = composeMessageWithTextAttachments(msg, attachedTextFilesRef.current);
     if (!attachedImagesRef.current.length && !attachedTextFilesRef.current.length && msg.startsWith("/") && onBuiltinCommand) {
       const expansion = expandWebSlashCommand(msg);
@@ -923,7 +959,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     const images = attachedImagesRef.current.length ? [...attachedImagesRef.current] : undefined;
     onSend(composedMessage, images);
     clearInput();
-  }, [isStreaming, onBuiltinCommand, onSend, clearInput, onAudioUnlock, rejectsOversizedPrompt, runBuiltinCommand, sendSideQuestion]);
+  }, [isStreaming, onBuiltinCommand, onSend, clearInput, onAudioUnlock, rejectsOversizedPrompt, runBuiltinCommand, sendSideQuestion, t]);
   const handleInterrupt = useCallback(async (overrideText?: string) => {
     if (!onInterruptAndReply || interruptingRef.current) return;
     const gen = draftGenerationRef.current;
@@ -932,8 +968,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     const images = [...attachedImagesRef.current];
     const files = [...attachedTextFilesRef.current];
     if (!msg && !images.length && !files.length) return;
+    if (sendSideQuestion(msg, overrideText)) return;
     let message = composeMessageWithTextAttachments(msg, files);
-    if (!images.length && !files.length && msg.startsWith("/")) {
+    if (msg.startsWith("/")) {
       if (msg.split(/\s+/, 1)[0] === "/advisor" && !advisorEnabled) {
         toast.error(t("agentSession.advisorDisabled"));
         return;
@@ -943,7 +980,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         toast.error(t("agentSession.commandRequiresArgs", { command: expansion.command, usage: t(expansion.argumentHintKey) }));
         return;
       }
-      if (expansion.kind === "expand") message = expansion.prompt;
+      if (expansion.kind === "expand") message = composeMessageWithTextAttachments(expansion.prompt, files);
+      else if (CLIENT_BUILTIN_COMMAND_NAMES.has(msg.slice(1).split(/\s+/)[0])) {
+        toast.error(t("chatInput.commandDuringRun", { command: msg.split(/\s+/, 1)[0] }));
+        return;
+      }
     }
     if (rejectsOversizedPrompt(message, images)) return;
     onAudioUnlock?.();
@@ -965,11 +1006,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       interruptingRef.current = false;
       setIsInterrupting(false);
     }
-  }, [onInterruptAndReply, advisorEnabled, t, rejectsOversizedPrompt, onAudioUnlock, clearInput]);
+  }, [onInterruptAndReply, advisorEnabled, t, rejectsOversizedPrompt, onAudioUnlock, clearInput, sendSideQuestion]);
   /** Dictation either stays editable or follows the selected submission mode. */
   type DictationAfterMode = "send" | "interrupt" | "steer" | "followup";
   const dictationAfterRef = useRef<DictationAfterMode | null>(null);
   const {
+    isStarting: isStartingDictation,
     isRecording,
     isPaused,
     isReviewing,
@@ -1011,6 +1053,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       } else if (after === "steer" || after === "followup") {
         sendQueued(after, finalText);
       } else {
+        requestAnimationFrame(() => textareaRef.current?.focus());
         toast.success(t("chatInput.dictationSuccess"));
       }
     },
@@ -1057,16 +1100,29 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     dictationAfterRef.current = null;
     toggleDictation();
   }, [toggleDictation]);
-  // While the recording deck replaces the textarea there is no focused input,
-  // so Escape/Enter are handled at window level: Escape cancels/discard, Enter
-  // retries after an error or converts the recording to text.
+  useDictationShortcut({
+    rootRef: composerRef,
+    inputRef: textareaRef,
+    isComposingRef,
+    onToggle: () => {
+      if (isTranscribing) return;
+      dictationAfterRef.current = null;
+      if (isStartingDictation) cancelDictation();
+      else if (isRecording || isPaused) stopDictation({ immediateSend: true });
+      else if (transcribeError) retryDictation();
+      else if (isReviewing) confirmTranscribeDictation();
+      else startFreshDictation();
+    },
+  });
+  // The recording deck replaces the textarea, so handle its configured
+  // discard/transcribe shortcuts at window level.
   useEffect(() => {
-    if (!(isRecording || isPaused || isReviewing || isTranscribing || transcribeError)) return;
+    if (!(isStartingDictation || isRecording || isPaused || isReviewing || isTranscribing || transcribeError)) return;
     const onKeyDown = (e: globalThis.KeyboardEvent) => {
-      if (e.key === "Escape") {
+      if (matchesShortcut("cancelDictation", e)) {
         e.preventDefault();
-        cancelDictation();
-      } else if (e.key === "Enter" && !e.shiftKey && !isTranscribing) {
+        cancelDictationAndReset();
+      } else if (matchesShortcut("confirmDictation", e) && !isTranscribing && !isStartingDictation) {
         // Let focused deck/toolbar controls keep their own activation;
         // only hijack Enter from the non-interactive page context.
         const target = e.target as HTMLElement | null;
@@ -1079,7 +1135,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [isRecording, isPaused, isReviewing, isTranscribing, transcribeError, cancelDictation, retryDictation, confirmTranscribeDictation, stopDictation]);
+  }, [isStartingDictation, isRecording, isPaused, isReviewing, isTranscribing, transcribeError, cancelDictationAndReset, retryDictation, confirmTranscribeDictation, stopAndInsertDictation]);
 
   const slashQuery = value.startsWith("/") && !/\s/.test(value.slice(1))
     ? value.slice(1).toLowerCase()
@@ -1108,14 +1164,14 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     () => BUILTIN_SLASH_COMMAND_DEFS
       // The /advisor command is linked to Settings → Enable Advisor: hidden
       // from the palette while the advisor is disabled.
-      .filter((def) => def.name !== "advisor" || advisorEnabled)
+      .filter((def) => (def.name !== "advisor" || advisorEnabled) && (def.name !== "fast" || fastModeSupported))
       .map((def) => ({
         name: def.name,
         description: t(def.descriptionKey),
         ...(def.argumentHintKey ? { argumentHint: t(def.argumentHintKey) } : {}),
         source: "builtin" as const,
       })),
-    [t, advisorEnabled],
+    [t, advisorEnabled, fastModeSupported],
   );
 
   // Externally reported commands (extension/prompt/skill/ompBuiltin) group
@@ -1134,10 +1190,10 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     [slashCommands],
   );
 
-  const filteredSlashCommands = (() => {
+  const filteredSlashCommands = React.useMemo(() => {
     if (slashQuery === null) return [];
     const commands = [...(isStreaming ? [] : builtinSlashCommands), ...externalSlashCommands];
-    return [...commands]
+    return commands
       .filter((command) => {
         const name = command.name.toLowerCase();
         const description = command.description?.toLowerCase() ?? "";
@@ -1151,7 +1207,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         return SLASH_SOURCE_ORDER[a.source] - SLASH_SOURCE_ORDER[b.source]
           || modelCollator.compare(a.name, b.name);
       });
-  })();
+  }, [slashQuery, isStreaming, builtinSlashCommands, externalSlashCommands, dormantSkillNames, modelCollator]);
 
   const groupedSlashCommands = (() => {
     const groups = new Map<SlashCommandSource, { source: SlashCommandSource; items: { command: SlashCommandPaletteItem; index: number }[] }>();
@@ -1397,20 +1453,14 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     };
     const streamingBehavior = mode === "steer" ? "steer" : "followUp";
     onAudioUnlock?.();
-    if (msg.startsWith("/") && onPromptWithStreamingBehavior) {
+    let promptText = msg;
+    if (msg.startsWith("/")) {
       const commandName = msg.slice(1).split(/\s+/)[0];
       if (commandName === "advisor" && !advisorEnabled) {
         toast.error(t("agentSession.advisorDisabled"));
         return;
       }
       const expansion = expandWebSlashCommand(msg);
-      if (expansion.kind === "expand") {
-        const prompt = composeMessageWithTextAttachments(expansion.prompt, files);
-        if (rejectsOversizedPrompt(prompt, images ?? [])) return;
-        recoverOnFailure(onPromptWithStreamingBehavior(prompt, streamingBehavior, images), prompt);
-        clearInput();
-        return;
-      }
       if (expansion.kind === "usage-error") {
         toast.error(t("chatInput.commandUsageTitle"), t("agentSession.commandRequiresArgs", {
           command: expansion.command,
@@ -1418,13 +1468,20 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         }));
         return;
       }
-      const prompt = composeMessageWithTextAttachments(msg, files);
-      if (rejectsOversizedPrompt(prompt, images ?? [])) return;
-      recoverOnFailure(onPromptWithStreamingBehavior(prompt, streamingBehavior, images), prompt);
-      clearInput();
-      return;
+      if (expansion.kind === "expand") promptText = expansion.prompt;
+      else if (CLIENT_BUILTIN_COMMAND_NAMES.has(commandName)) {
+        toast.error(t("chatInput.commandDuringRun", { command: `/${commandName}` }));
+        return;
+      }
+      if (onPromptWithStreamingBehavior) {
+        const prompt = composeMessageWithTextAttachments(promptText, files);
+        if (rejectsOversizedPrompt(prompt, images ?? [])) return;
+        recoverOnFailure(onPromptWithStreamingBehavior(prompt, streamingBehavior, images), prompt);
+        clearInput();
+        return;
+      }
     }
-    const composedMessage = composeMessageWithTextAttachments(msg, files);
+    const composedMessage = composeMessageWithTextAttachments(promptText, files);
     if (rejectsOversizedPrompt(composedMessage, images ?? [])) return;
     if (mode === "steer" && onSteer) {
       recoverOnFailure(onSteer(composedMessage, images), composedMessage);
@@ -1447,14 +1504,29 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
     : "followup";
   // ── Queued follow-up bar ────────────────────────────────────────────────
   // Texts are mirrored locally; mutations wait for native acknowledgement.
-  const queuedEntries = [
-    ...(queuedMessages?.followUp ?? []).map((text) => ({ kind: "follow-up" as const, text })),
-    ...(queuedMessages?.steering ?? []).map((text) => ({ kind: "steer" as const, text })),
-  ];
-  const firstQueued = queuedEntries[0] ?? null;
-  const queuedCount = queuedEntries.length;
-
   const [queueExpanded, setQueueExpanded] = useState(false);
+  const [queueSortByTime, setQueueSortByTime] = useState(false);
+  const queuedEntries = [
+    ...(queuedMessages?.followUp ?? []).map((text, index) => ({
+      kind: "follow-up" as const,
+      text,
+      timestamp: queuedMessageTimestamps?.followUp?.[index] ?? 0,
+      order: index,
+    })),
+    ...(queuedMessages?.steering ?? []).map((text, index) => ({
+      kind: "steer" as const,
+      text,
+      timestamp: queuedMessageTimestamps?.steering?.[index] ?? 0,
+      order: (queuedMessages?.followUp.length ?? 0) + index,
+    })),
+  ];
+  const queuedCount = queuedEntries.length;
+  const canSortQueueByTime = queuedCount > 1 && queuedEntries.every((entry) => entry.timestamp > 0);
+  const displayedQueuedEntries = queueSortByTime && canSortQueueByTime
+    ? [...queuedEntries].sort((a, b) => a.timestamp - b.timestamp || a.order - b.order)
+    : queuedEntries;
+  const firstQueued = queuedEntries[0] ?? null;
+
   const [queueActionPending, setQueueActionPending] = useState(false);
   const queueActionPendingRef = useRef(false);
   // Invalidate confirmation if delivery or navigation changes the queue.
@@ -1486,6 +1558,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       setQueueActionPending(false);
     }
   }, [onRemoveQueuedMessage]);
+
 
   const handleItemDelete = useCallback((entry: { kind: "follow-up" | "steer"; text: string }) => {
     setQueuedDeleteTarget({ ...entry, draftKey, queue: queuedMessages });
@@ -1546,8 +1619,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
       : Math.max(0, slashActiveIndex - 1);
   }, [filteredSlashCommands.length, slashActiveIndex]);
 
-  const handleKeyDown = useCallback(
-    (e: KeyboardEvent<HTMLTextAreaElement>) => {
+  const handleKeyDown = useCallback((e: KeyboardEvent<HTMLTextAreaElement>) => {
       const nativeEvent = e.nativeEvent;
       const recentlyComposed = Date.now() - lastCompositionEndAtRef.current < COMPOSITION_END_ENTER_GRACE_MS;
       const isComposing =
@@ -1555,11 +1627,12 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         nativeEvent.isComposing ||
         nativeEvent.keyCode === 229;
 
-      if (e.key === "Enter" && !e.shiftKey && (isComposing || recentlyComposed)) {
-        if (recentlyComposed) e.preventDefault();
+      if (isComposing) return;
+      if (recentlyComposed && matchesShortcut("sendMessage", nativeEvent)) {
+        e.preventDefault();
         return;
       }
-      if ((e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey && e.key.toLowerCase() === "m") {
+      if (!isComposing && matchesShortcut("startDictation", e.nativeEvent)) {
         e.preventDefault();
         toggleDictation();
         return;
@@ -1647,11 +1720,11 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         }
       }
 
-      // Tab (or → at the end of the line) accepts the ghost word, like omp's editor.
+      // Accept the ghost word only at the caret for which it was predicted.
       const ghost = wordPrediction.peek();
       if (
-        ghost && ghost.text === value && !isComposing && !e.shiftKey && !e.altKey && !e.ctrlKey && !e.metaKey &&
-        (e.key === "Tab" || e.key === "ArrowRight") &&
+        ghost && ghost.text === value && !isComposing &&
+        matchesShortcut("acceptCompletion", e.nativeEvent) &&
         e.currentTarget.selectionStart === ghost.cursor && e.currentTarget.selectionEnd === ghost.cursor
       ) {
         e.preventDefault();
@@ -1670,7 +1743,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         return;
       }
 
-      if (e.key === "ArrowUp" && !isComposing && !isStreaming && inputHistory.length > 0 && value.trim().length === 0) {
+      if (matchesShortcut("inputHistory", e.nativeEvent) && !isComposing && !isStreaming && inputHistory.length > 0 && value.trim().length === 0) {
         e.preventDefault();
         setSlashMenuOpen(false);
         setAtMenuOpen(false);
@@ -1679,15 +1752,15 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         return;
       }
 
-      // Esc stops the agent when no slash/@/history menu or IME composition is active.
-      if (e.key === "Escape" && !isComposing && isStreaming && onAbort) {
+      // The stop binding is shared with the page-level handler; menus take priority.
+      if (matchesShortcut("abort", e.nativeEvent) && !isComposing && isStreaming && onAbort) {
         e.preventDefault();
         onAbort();
         return;
       }
 
-      // Esc minimizes the composer when idle, empty, and no menus open.
-      if (e.key === "Escape" && !isComposing && !isStreaming && onMinimize && value.trim().length === 0) {
+      // Minimize only when idle, empty, and no menus open.
+      if (matchesShortcut("minimizeComposer", e.nativeEvent) && !isComposing && !isStreaming && onMinimize && value.trim().length === 0) {
         e.preventDefault();
         onMinimize();
         return;
@@ -1695,7 +1768,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
       // Soft keyboards rarely offer Shift+Enter; on the mobile breakpoint Enter
       // inserts a newline and the Send button submits.
-      if (e.key === "Enter" && !e.shiftKey && !isMobile) {
+      if (matchesShortcut("sendMessage", e.nativeEvent) && !isComposing && !isMobile) {
         e.preventDefault();
         if (interruptingRef.current) return;
         if (isStreaming && (onInterruptAndReply || onSteer || onFollowUp)) {
@@ -1714,14 +1787,14 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
   );
 
 
-  const handlePaste = useCallback((e: React.ClipboardEvent) => {
+  const handlePaste = (e: React.ClipboardEvent) => {
     const items = Array.from(e.clipboardData?.items ?? []);
     const imageItems = items.filter((item) => item.type.startsWith("image/"));
     if (!imageItems.length) return;
     e.preventDefault();
     const files = imageItems.map((item) => item.getAsFile()).filter((f): f is File => f !== null);
     processFiles(files);
-  }, [processFiles]);
+  };
 
   useEffect(() => {
     if (slashQuery === null) {
@@ -1952,6 +2025,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
 
   return (
     <div
+      ref={composerRef}
       role="group"
       aria-label={t("chatInput.composerLabel")}
       style={{
@@ -2010,7 +2084,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         <ComposerModeStatus goal={activeGoal} plan={activePlan} />
         {/* Retry banner */}
         {retryInfo && (
-          <div style={{
+          <div className="composer-retry wallpaper-surface" style={{
             marginBottom: 8, padding: "5px 10px",
             background: "color-mix(in srgb, var(--status-warning) 8%, transparent)", border: "1px solid color-mix(in srgb, var(--status-warning) 25%, transparent)",
             borderRadius: 6, fontSize: 12, color: "var(--status-warning)",
@@ -2047,7 +2121,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
           </div>
         )}
         {compactResultText && (
-          <div style={{
+          <div className="composer-compaction-result wallpaper-surface" style={{
             marginBottom: 8, padding: "5px 10px",
             background: "color-mix(in srgb, var(--status-success) 8%, transparent)", border: "1px solid color-mix(in srgb, var(--status-success) 24%, transparent)",
             borderRadius: 6, fontSize: 12, color: "var(--status-success)",
@@ -2061,7 +2135,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
         )}
         {/* Image previews */}
         {attachError && (
-          <div role="alert" style={{
+          <div className="composer-attachment-error wallpaper-surface" role="alert" style={{
             marginBottom: 8, padding: "5px 10px",
             background: "color-mix(in srgb, var(--status-error) 7%, transparent)", border: "1px solid color-mix(in srgb, var(--status-error) 30%, transparent)",
             borderRadius: 6, fontSize: 12, color: "var(--status-error)",
@@ -2108,6 +2182,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             {attachedTextFiles.map((file, i) => (
               <div
                 key={i}
+                className="composer-file-attachment wallpaper-surface"
                 style={{
                   display: "flex", alignItems: "center", gap: 7,
                   maxWidth: 260, height: 30,
@@ -2526,10 +2601,14 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               </div>
             );
           })()}
+        {scheduledMessages && onCancelScheduledMessage && onSendScheduledMessageNow && (
+          <ScheduledMessagesPanel messages={scheduledMessages} onCancel={onCancelScheduledMessage} onSendNow={onSendScheduledMessageNow} />
+        )}
         {/* Queued prompts panel / bar — attached to composer's top edge.
             When 1 item: compact single row. When multiple items: compact row with expand toggle, or full list when expanded. */}
         {queuedCount > 0 && (
           <div
+            className="composer-queue-panel wallpaper-surface"
             aria-label={t("chatInput.queuedPrompts")}
             style={{
               border: "1px solid var(--border)",
@@ -2641,6 +2720,24 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     )}
                   </button>
                   <div style={{ display: "flex", alignItems: "center", gap: 4, flexShrink: 0 }}>
+                    {queueExpanded && canSortQueueByTime && (
+                      <button
+                        type="button"
+                        onClick={() => setQueueSortByTime((sorted) => !sorted)}
+                        aria-pressed={queueSortByTime}
+                        title={queueSortByTime ? t("chatInput.queueSortByQueue") : t("chatInput.queueSortChronologically")}
+                        style={{
+                          background: "none",
+                          border: "none",
+                          padding: "2px 6px",
+                          cursor: "pointer",
+                          color: queueSortByTime ? "var(--accent)" : "var(--text-dim)",
+                          fontSize: 11,
+                        }}
+                      >
+                        {queueSortByTime ? t("chatInput.queueSortByQueue") : t("chatInput.queueSortChronologically")}
+                      </button>
+                    )}
                     <button
                       type="button"
                       onClick={() => setQueueExpanded((prev) => !prev)}
@@ -2667,7 +2764,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                     background: "var(--bg-subtle)",
                     padding: "4px 0",
                   }}>
-                    {queuedEntries.map((entry, idx) => (
+                    {displayedQueuedEntries.map((entry, idx) => (
                       <div
                         key={`${entry.kind}:${idx}:${entry.text}`}
                         style={{
@@ -2741,10 +2838,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               color: "var(--text-muted)",
             }}
           >
-            <span
-              aria-hidden
-              className="live-status-dot live-pulse inline-block h-2 w-2 shrink-0 rounded-full bg-accent"
-            />
+            <WhaleTail active width={16} style={{ color: "var(--accent)" }} />
             <span>{statusText}</span>
           </div>
         )}
@@ -3290,6 +3384,7 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
                 {usageLimitLabel}
               </div>
             )}
+            <div className="composer-toolbar-spacer" style={{ marginLeft: "auto" }} />
 
             {/* Advisor activity — thunder while the advisor model reviews this run */}
             {advisorActive && (
@@ -3438,8 +3533,20 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
               contextContainer,
             )}
 
+            {onScheduleMessage && (
+              <ScheduleSendButton
+                model={model}
+                disabled={!value.trim() || attachedImages.length > 0 || attachedTextFiles.length > 0}
+                disabledReason={attachedImages.length > 0 || attachedTextFiles.length > 0 ? t("scheduledSend.textOnly") : t("scheduledSend.typeFirst")}
+                onSchedule={async (sendAt) => {
+                  const ok = await onScheduleMessage(value.trim(), sendAt);
+                  if (ok) clearInput();
+                  return ok;
+                }}
+              />
+            )}
             {/* Dictation */}
-            {isRecording || isPaused || isReviewing || isTranscribing || transcribeError ? (
+            {isStartingDictation || isRecording || isPaused || isReviewing || isTranscribing || transcribeError ? (
               <button
                 type="button"
                 onClick={cancelDictation}
@@ -3461,8 +3568,9 @@ export const ChatInput = memo(forwardRef<ChatInputHandle, Props>(function ChatIn
             ) : (
               <button
                 type="button"
-                onClick={toggleDictation}
-                title={t("chatInput.startDictation")}
+                onClick={startFreshDictation}
+                title={shortcutHint(t("chatInput.startDictation"), "toggleDictation", shortcutBindings)}
+                aria-keyshortcuts={shortcutAria("toggleDictation", shortcutBindings)}
                 aria-label={t("chatInput.startDictation")}
                 style={{
                   display: "flex", alignItems: "center", justifyContent: "center",

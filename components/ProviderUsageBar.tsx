@@ -82,7 +82,7 @@ function DetailMeter({ short, window, t }: {
 // slim row per account (worst window only), click to expand the full detail.
 export function ProviderUsageBar() {
   const { t } = useI18n();
-  const { snapshot, loading, error, refresh } = useProviderUsage("", 5 * 60_000);
+  const { snapshot, loading, error, refresh } = useProviderUsage("", 60_000);
   const [refreshDone, setRefreshDone] = useState(false);
   useEffect(() => {
     if (!refreshDone) return;

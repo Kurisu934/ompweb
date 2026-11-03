@@ -2,6 +2,7 @@ import { homedir } from "os";
 import { invalidateModelsCache } from "@/lib/models-cache";
 import { enableProvider } from "@/lib/omp/model-roles";
 import { RpcProcess, type RpcFrame } from "@/lib/omp/rpc-process";
+import { startControlRpc } from "@/lib/omp/rpc-control";
 import { disposeUtilityRpc } from "@/lib/omp/rpc-utility";
 
 export const dynamic = "force-dynamic";
@@ -134,7 +135,11 @@ export async function GET(
       };
 
       try {
-        proc = new RpcProcess({ cwd: homedir(), extraArgs: LOGIN_EXTRA_ARGS, onFrame: handleFrame });
+        proc = await startControlRpc(
+          { cwd: homedir(), extraArgs: LOGIN_EXTRA_ARGS, onFrame: handleFrame },
+          READY_TIMEOUT_MS,
+          req.signal,
+        );
       } catch (error) {
         send({ type: "error", message: error instanceof Error ? error.message : String(error) });
         clearInterval(heartbeat);
@@ -165,8 +170,6 @@ export async function GET(
       req.signal.addEventListener("abort", cleanup);
 
       try {
-        const ready = await child.waitReady(READY_TIMEOUT_MS);
-        await child.negotiateProtocol(ready);
         await child.sendCommand({ type: "login", providerId: provider }, LOGIN_TIMEOUT_MS);
         enableProvider(provider);
         invalidateModelsCache();

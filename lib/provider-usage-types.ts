@@ -19,6 +19,7 @@ export interface ProviderUsageReport {
   accountIndex?: number;
   plan?: string;
   modelId?: string;
+  pool?: string;
   tier?: string;
   noLimits?: boolean;
   credits?: ProviderCreditBalance;

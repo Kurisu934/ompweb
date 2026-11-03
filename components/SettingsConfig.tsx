@@ -2,21 +2,24 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, useTransition, cloneElement, isValidElement, type ReactElement, type ReactNode } from "react";
 import { getSubmitDuringRunBehavior, getWordCompletionMode, setSubmitDuringRunBehavior, setWordCompletionMode, type SubmitDuringRunBehavior, type WordCompletionMode } from "@/lib/composer-prefs";
+import { getWhaleTailMotion, setWhaleTailMotion, type WhaleTailMotion } from "@/lib/whale-tail";
+import { WhaleTailPicker } from "./WhaleTail";
 import dynamic from "next/dynamic";
 import { ArrowDown, ArrowLeft, ArrowUp, Copy, Download, ExternalLink, RefreshCw, RotateCcw, Search, Monitor, Play, Square, Trash2, X } from "lucide-react";
 import { COMPACTION_METHODS, DEFAULT_COMPACTION_METHOD_ORDER, type CompactionMethod } from "@/lib/compaction-methods";
 import { formatAgentEnvText, parseAgentEnvText, type AgentEnvErrorLabels } from "@/lib/omp/agent-env-policy";
 import { isRecord } from "@/lib/type-guards";
-import { Alert } from "@/components/ui/field";
+import { Alert, Select } from "@/components/ui/field";
 import { toast } from "@/components/ui/toast";
 import { useI18n } from "@/lib/i18n";
 import { useIsMobile } from "@/hooks/useIsMobile";
-import { SettingsTabs, type SettingsTab, SETTINGS_CATEGORIES, getNormalizedActive } from "./SettingsTabs";
+import { SettingsTabs, getNormalizedActive, type AppearanceTab, type ProvidersTab, type SettingsTab, SETTINGS_CATEGORIES } from "./SettingsTabs";
 import { copyText } from "@/lib/clipboard";
 import type { AppUpdateInfo } from "./AppUpdateDialog";
 import { useFontSize, type FontSizePreference } from "@/hooks/useFontSize";
 import { useUiScale, type UiScalePreference } from "@/hooks/useUiScale";
 import { useTouchTargets, type TouchTargetsPreference } from "@/hooks/useTouchTargets";
+import { ALL_THEMES, useTheme, type ThemePreference } from "@/hooks/useTheme";
 import { useSpeechSynthesis } from "@/hooks/useSpeechSynthesis";
 import { useNotificationPrefs } from "@/hooks/useNotifications";
 import { NOTIFICATION_TYPES, renderNotification, type NotificationType } from "@/lib/notification-events";
@@ -35,12 +38,57 @@ const SettingsTabLoading = () => {
 };
 const ModelsConfig = dynamic(() => import("./ModelsConfig").then((module) => module.ModelsConfig), { loading: SettingsTabLoading, ssr: false });
 const SkillsConfig = dynamic(() => import("./SkillsConfig").then((module) => module.SkillsConfig), { loading: SettingsTabLoading, ssr: false });
-const PluginsConfig = dynamic(() => import("./PluginsConfig").then((module) => module.PluginsConfig), { loading: SettingsTabLoading, ssr: false });
 const McpConfig = dynamic(() => import("./McpConfig").then((module) => module.McpConfig), { loading: SettingsTabLoading, ssr: false });
 const AgentsConfig = dynamic(() => import("./AgentsConfig").then((module) => module.AgentsConfig), { loading: SettingsTabLoading, ssr: false });
+const AgentInstructionsConfig = dynamic(() => import("./AgentInstructionsConfig").then((module) => module.AgentInstructionsConfig), { loading: SettingsTabLoading, ssr: false });
 const UsageConfig = dynamic(() => import("./UsageConfig").then((module) => module.UsageConfig), { loading: SettingsTabLoading, ssr: false });
 const PetsConfig = dynamic(() => import("./PetsConfig").then((module) => module.PetsConfig), { loading: SettingsTabLoading, ssr: false });
 const WallpapersConfig = dynamic(() => import("./WallpapersConfig").then((module) => module.WallpapersConfig), { loading: SettingsTabLoading, ssr: false });
+const KeyboardShortcutsConfig = dynamic(() => import("./KeyboardShortcutsConfig").then((module) => module.KeyboardShortcutsConfig), { loading: SettingsTabLoading, ssr: false });
+const APPEARANCE_TABS: readonly AppearanceTab[] = ["display", "wallpapers", "pets", "motion"];
+const GENERAL_TABS = ["layout", "behavior", "shortcuts"] as const;
+type GeneralTab = typeof GENERAL_TABS[number];
+const AGENT_TABS = ["instructions", "subagents", "runtime", "approvals"] as const;
+type AgentTab = typeof AGENT_TABS[number];
+
+function SettingsSubTabs<T extends string>({ id, label, tabs, value, onChange, labelFor }: {
+  id: string;
+  label: string;
+  tabs: readonly T[];
+  value: T;
+  onChange: (tab: T) => void;
+  labelFor: (tab: T) => string;
+}) {
+  return (
+    <div className="providers-segmented" role="tablist" aria-label={label} aria-orientation="horizontal" style={{ marginBottom: 4, flexShrink: 0 }}>
+      {tabs.map((tab, index) => (
+        <button
+          key={tab}
+          type="button"
+          role="tab"
+          id={`${id}-tab-${tab}`}
+          aria-controls={`${id}-panel-${tab}`}
+          aria-selected={value === tab}
+          tabIndex={value === tab ? 0 : -1}
+          className={`providers-segmented-btn ui-focus-ring${value === tab ? " active" : ""}`}
+          onClick={() => onChange(tab)}
+          onKeyDown={(event) => {
+            const nextIndex = event.key === "ArrowRight" ? (index + 1) % tabs.length
+              : event.key === "ArrowLeft" ? (index + tabs.length - 1) % tabs.length
+                : event.key === "Home" ? 0 : event.key === "End" ? tabs.length - 1 : null;
+            if (nextIndex === null) return;
+            event.preventDefault();
+            const next = tabs[nextIndex];
+            onChange(next);
+            document.getElementById(`${id}-tab-${next}`)?.focus();
+          }}
+        >
+          {labelFor(tab)}
+        </button>
+      ))}
+    </div>
+  );
+}
 
 type UpdateState = AppUpdateInfo;
 type WindowsServiceStatus = {
@@ -75,8 +123,14 @@ type NativeSettings = {
   mnemopi?: { scoping?: "global" | "per-project" | "per-project-tagged"; autoRecall?: boolean; autoRetain?: boolean; noEmbeddings?: boolean };
   mcp?: { enableProjectConfig?: boolean; renderMarkdownResults?: boolean; notifications?: boolean; notificationDebounceMs?: number };
   skills?: { showStartupDiagnostics?: boolean };
+  generate_image?: { enabled?: boolean };
   retry?: { enabled?: boolean; maxRetries?: number; modelFallback?: boolean };
 };
+
+const selectStyle = {
+  padding: "4px var(--control-padding-inline)",
+  fontSize: "var(--text-sm)",
+} as const;
 
 const nativeSelectStyle = {
   minHeight: "var(--control-height)",
@@ -135,6 +189,10 @@ type SearchResult = {
   id: string;
   kind: "category" | "setting";
   tab: SettingsTab;
+  appearanceTab?: AppearanceTab;
+  generalTab?: GeneralTab;
+  providersTab?: ProvidersTab;
+  agentTab?: AgentTab;
   label: string;
   description: string;
   scope?: string;
@@ -144,6 +202,10 @@ type SearchResult = {
 type SettingIndexEntry = {
   id: string;
   tab: SettingsTab;
+  appearanceTab?: AppearanceTab;
+  generalTab?: GeneralTab;
+  providersTab?: ProvidersTab;
+  agentTab?: AgentTab;
   sectionKey: string;
   labelKey: string;
   descKey: string;
@@ -155,55 +217,61 @@ type SettingIndexEntry = {
 
 const SETTING_INDEX: SettingIndexEntry[] = [
   // Interface & Behavior
-  { id: "skill-startup-notices", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.skillStartupNotices", descKey: "settingsConfig.skillStartupNoticesDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Skill startup notices", fallbackDesc: "Show conflicts and redundant skill copies when an OMP session starts.", scope: "Native OMP" },
+  { id: "shortcuts", tab: "general", generalTab: "shortcuts", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.general.shortcuts", descKey: "shortcuts.summary", fallbackSection: "Interface & Behavior", fallbackLabel: "Keyboard Shortcuts", fallbackDesc: "Customize, disable, and restore application shortcuts", scope: "UI" },
   { id: "completion-sound", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.completionSound", descKey: "settingsConfig.completionSoundDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Completion sound", fallbackDesc: "Play a tone when the agent completes a run.", scope: "UI" },
-  { id: "keep-tool-calls-collapsed", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.keepToolCallsCollapsed", descKey: "settingsConfig.keepToolCallsCollapsedDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Keep tool calls collapsed", fallbackDesc: "Show only compact headers while tools execute.", scope: "UI" },
-  { id: "expand-thinking-by-default", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.expandThinkingByDefault", descKey: "settingsConfig.expandThinkingByDefaultDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Expand thinking blocks by default", fallbackDesc: "Open every thinking block as it appears, including while it streams, so reasoning is readable without clicking each one. Collapsing a block by hand still works.", scope: "UI" },
-  { id: "open-url-automatically", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.openUrlAutomatically", descKey: "settingsConfig.openUrlAutomaticallyDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Open agent links without asking", fallbackDesc: "Links the agent opens from the session you are viewing open in a new tab right away. Links from other sessions always ask first. Your browser may still block pop-ups.", scope: "UI" },
+  { id: "keep-tool-calls-collapsed", tab: "general", generalTab: "layout", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.keepToolCallsCollapsed", descKey: "settingsConfig.keepToolCallsCollapsedDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Keep tool calls collapsed", fallbackDesc: "Show only compact headers while tools execute.", scope: "UI" },
+  { id: "open-url-automatically", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.openUrlAutomatically", descKey: "settingsConfig.openUrlAutomaticallyDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Automatically open web links in the browser", fallbackDesc: "Links the agent opens from the session you are viewing open in a new tab right away. Links from other sessions always ask first. Your browser may still block pop-ups.", scope: "UI" },
+  { id: "open-file-automatically", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.openFileAutomatically", descKey: "settingsConfig.openFileAutomaticallyDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Allow background sessions to open files in the side panel", fallbackDesc: "Allow agents from any session to open files in the side panel, leaving Settings if needed. Off by default; saved in this browser. File access and editing permissions are unchanged.", scope: "UI" },
   { id: "scope-native-select-all", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.scopeNativeSelectAll", descKey: "settingsConfig.scopeNativeSelectAllDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Scope native Select All (experimental)", fallbackDesc: "Limit whole-page selections from browser or touch menus to the active message, chat, or file. May also narrow deliberate whole-page selections. Turn off if selection handles or menus misbehave. Keyboard shortcuts are unaffected.", scope: "UI" },
   { id: "tts-autoplay", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.ttsAutoplay", descKey: "settingsConfig.ttsAutoplayDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Auto-read assistant responses", fallbackDesc: "Automatically read aloud new assistant replies when completed.", scope: "UI" },
   { id: "tts-voice", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.ttsVoice", descKey: "settingsConfig.ttsVoiceDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Speech Voice", fallbackDesc: "Select the browser voice for text-to-speech reading.", scope: "UI" },
-  { id: "provider-usage", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.providerUsage", descKey: "settingsConfig.providerUsageDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Provider usage limits", fallbackDesc: "Show provider usage in the sidebar, above Settings.", scope: "UI" },
-  { id: "chat-font-size", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.chatFontSize", descKey: "settingsConfig.chatFontSizeDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Chat Font Size", fallbackDesc: "Adjust text size for conversation messages, code blocks, and markdown output.", scope: "UI" },
-  { id: "ui-scale", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.uiScale", descKey: "settingsConfig.uiScaleDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Interface Scale", fallbackDesc: "Adjust overall UI zoom and display density across sidebars, dialogs, buttons, and toolbars.", scope: "UI" },
-  { id: "touch-targets", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.touchTargets", descKey: "settingsConfig.touchTargetsDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Touch Targets", fallbackDesc: "Adjust interactive target sizes for buttons and toolbar controls.", scope: "UI" },
+  { id: "provider-usage", tab: "general", generalTab: "layout", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.providerUsage", descKey: "settingsConfig.providerUsageDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Provider usage limits", fallbackDesc: "Show provider usage in the sidebar, above Settings.", scope: "UI" },
+  { id: "chat-font-size", tab: "appearance", appearanceTab: "display", sectionKey: "settingsTabs.appearance.label", labelKey: "settingsConfig.chatFontSize", descKey: "settingsConfig.chatFontSizeDesc", fallbackSection: "Appearance & Personalization", fallbackLabel: "Chat Font Size", fallbackDesc: "Adjust text size for conversation messages, code blocks, and markdown output.", scope: "UI" },
+  { id: "ui-scale", tab: "appearance", appearanceTab: "display", sectionKey: "settingsTabs.appearance.label", labelKey: "settingsConfig.uiScale", descKey: "settingsConfig.uiScaleDesc", fallbackSection: "Appearance & Personalization", fallbackLabel: "Interface Scale", fallbackDesc: "Adjust overall UI zoom and display density across sidebars, dialogs, buttons, and toolbars.", scope: "UI" },
   { id: "message-during-active-run", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.messageDuringActiveRun", descKey: "settingsConfig.messageDuringActiveRunDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Message during active run", fallbackDesc: "What composer does on submit while agent runs. Steer interrupts; Queue follow-up delivers after finish.", scope: "UI" },
-  { id: "word-completion", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.wordCompletion", descKey: "settingsConfig.wordCompletionDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Word completion", fallbackDesc: "Ghost text from omp's word prediction; Tab or → accepts. Auto enables it only with a mouse or trackpad (not on touch keyboards).", scope: "UI" },
+  { id: "word-completion", tab: "general", sectionKey: "settingsConfig.interfaceBehavior", labelKey: "settingsConfig.wordCompletion", descKey: "settingsConfig.wordCompletionDesc", fallbackSection: "Interface & Behavior", fallbackLabel: "Word completion", fallbackDesc: "Ghost text from omp's word prediction; configure acceptance keys in Keyboard Shortcuts. Auto enables it only with a mouse or trackpad.", scope: "UI" },
+  { id: "whale-tail", tab: "appearance", appearanceTab: "motion", sectionKey: "settingsTabs.appearance.label", labelKey: "settingsConfig.whaleTail", descKey: "settingsConfig.whaleTailDesc", fallbackSection: "Appearance & Personalization", fallbackLabel: "Whale tail animation", fallbackDesc: "How the whale tail moves beside the running status and the live thinking row.", scope: "UI" },
+  { id: "theme", tab: "appearance", appearanceTab: "display", sectionKey: "settingsTabs.appearance.label", labelKey: "settingsConfig.theme", descKey: "settingsConfig.themeDesc", fallbackSection: "Appearance & Personalization", fallbackLabel: "Visual theme", fallbackDesc: "Choose a light or dark theme, or follow the system appearance.", scope: "UI" },
+  { id: "wallpapers", tab: "appearance", appearanceTab: "wallpapers", sectionKey: "settingsTabs.appearance.label", labelKey: "settingsConfig.appearance.wallpapers", descKey: "settingsConfig.wallpapersDesc", fallbackSection: "Appearance & Personalization", fallbackLabel: "Wallpapers & Glass", fallbackDesc: "Wallpaper images, videos, glass effects, colors, brightness, and background audio.", scope: "UI" },
+  { id: "pets", tab: "appearance", appearanceTab: "pets", sectionKey: "settingsTabs.appearance.label", labelKey: "settingsConfig.appearance.pets", descKey: "settingsConfig.petsDesc", fallbackSection: "Appearance & Personalization", fallbackLabel: "Pets", fallbackDesc: "Codex pet library, imports, size, pointer following, and animation previews.", scope: "UI" },
   // Tool Safety & Approvals
-  { id: "approval-mode", tab: "safety", sectionKey: "settingsConfig.toolSafetyApprovals", labelKey: "settingsConfig.approvalMode", descKey: "settingsConfig.approvalModeDesc", fallbackSection: "Tool Safety & Approvals", fallbackLabel: "Approval Mode", fallbackDesc: "Choose when OMP asks before tool calls.", scope: "Native OMP" },
-  { id: "bash-override", tab: "safety", sectionKey: "settingsConfig.toolSafetyApprovals", labelKey: "settingsConfig.bashOverride", descKey: "settingsConfig.bashOverrideDesc", fallbackSection: "Tool Safety & Approvals", fallbackLabel: "Bash Override", fallbackDesc: "Override default approval policy specifically for terminal commands.", scope: "Native OMP" },
-  { id: "extension-tool-requests", tab: "safety", sectionKey: "settingsConfig.toolSafetyApprovals", labelKey: "settingsConfig.extensionToolRequests", descKey: "settingsConfig.extensionToolRequestsDesc", fallbackSection: "Tool Safety & Approvals", fallbackLabel: "Extension Tool Requests", fallbackDesc: "Automatically approve extension tool authorization requests.", scope: "Native OMP" },
-  // AI Model Defaults
-  { id: "reasoning", tab: "models", sectionKey: "settingsConfig.modelDefaults", labelKey: "settingsConfig.reasoning", descKey: "settingsConfig.reasoningDesc", fallbackSection: "AI Model Defaults", fallbackLabel: "Reasoning", fallbackDesc: "Default effort level for thinking-capable models.", scope: "Native OMP" },
-  { id: "auto-thinking-source", tab: "models", sectionKey: "settingsConfig.modelDefaults", labelKey: "settingsConfig.autoThinkingSource", descKey: "settingsConfig.autoThinkingSourceDesc", fallbackSection: "AI Model Defaults", fallbackLabel: "Auto Thinking Source", fallbackDesc: "Choose prompt classification or the publisher default with omp fallback.", scope: "Native OMP" },
-  { id: "verbosity", tab: "models", sectionKey: "settingsConfig.modelDefaults", labelKey: "settingsConfig.verbosity", descKey: "settingsConfig.verbosityDesc", fallbackSection: "AI Model Defaults", fallbackLabel: "Verbosity", fallbackDesc: "Response detail level for supporting providers.", scope: "Native OMP" },
-  { id: "personality", tab: "models", sectionKey: "settingsConfig.modelDefaults", labelKey: "settingsConfig.personality", descKey: "settingsConfig.personalityDesc", fallbackSection: "AI Model Defaults", fallbackLabel: "Personality", fallbackDesc: "Style included in OMP's system prompt.", scope: "Native OMP" },
-  { id: "thinking-blocks", tab: "models", sectionKey: "settingsConfig.modelDefaults", labelKey: "settingsConfig.thinkingBlocks", descKey: "settingsConfig.thinkingBlocksDesc", fallbackSection: "AI Model Defaults", fallbackLabel: "Hide Thinking Blocks", fallbackDesc: "Hide model reasoning from output view.", scope: "Native OMP" },
-  { id: "external-thinking", tab: "models", sectionKey: "settingsConfig.modelDefaults", labelKey: "settingsConfig.externalThinking", descKey: "settingsConfig.externalThinkingDesc", fallbackSection: "AI Model Defaults", fallbackLabel: "External Thinking", fallbackDesc: "Private scratchpad reasoning via think tool.", scope: "Native OMP" },
+  { id: "approval-mode", tab: "agents", agentTab: "approvals", sectionKey: "settingsConfig.toolSafetyApprovals", labelKey: "settingsConfig.approvalMode", descKey: "settingsConfig.approvalModeDesc", fallbackSection: "Tool Safety & Approvals", fallbackLabel: "Approval Mode", fallbackDesc: "Choose when OMP asks before tool calls.", scope: "Native OMP" },
+  { id: "bash-override", tab: "agents", agentTab: "approvals", sectionKey: "settingsConfig.toolSafetyApprovals", labelKey: "settingsConfig.bashOverride", descKey: "settingsConfig.bashOverrideDesc", fallbackSection: "Tool Safety & Approvals", fallbackLabel: "Bash Override", fallbackDesc: "Override default approval policy specifically for terminal commands.", scope: "Native OMP" },
+  { id: "extension-tool-requests", tab: "agents", agentTab: "approvals", sectionKey: "settingsConfig.toolSafetyApprovals", labelKey: "settingsConfig.extensionToolRequests", descKey: "settingsConfig.extensionToolRequestsDesc", fallbackSection: "Tool Safety & Approvals", fallbackLabel: "Extension Tool Requests", fallbackDesc: "Automatically approve extension tool authorization requests.", scope: "Native OMP" },
+  // Global model defaults
+  { id: "reasoning", tab: "providers", providersTab: "defaults", sectionKey: "settingsConfig.modelDefaults", labelKey: "settingsConfig.reasoning", descKey: "settingsConfig.reasoningDesc", fallbackSection: "Global model defaults", fallbackLabel: "Reasoning", fallbackDesc: "Default effort level for thinking-capable models.", scope: "Native OMP" },
+  { id: "verbosity", tab: "providers", providersTab: "defaults", sectionKey: "settingsConfig.modelDefaults", labelKey: "settingsConfig.verbosity", descKey: "settingsConfig.verbosityDesc", fallbackSection: "Global model defaults", fallbackLabel: "Verbosity", fallbackDesc: "Response detail level for supporting providers.", scope: "Native OMP" },
+  { id: "personality", tab: "providers", providersTab: "defaults", sectionKey: "settingsConfig.modelDefaults", labelKey: "settingsConfig.personality", descKey: "settingsConfig.personalityDesc", fallbackSection: "Global model defaults", fallbackLabel: "Personality", fallbackDesc: "Style included in OMP's system prompt.", scope: "Native OMP" },
+  { id: "thinking-blocks", tab: "providers", providersTab: "defaults", sectionKey: "settingsConfig.modelDefaults", labelKey: "settingsConfig.thinkingBlocks", descKey: "settingsConfig.thinkingBlocksDesc", fallbackSection: "Global model defaults", fallbackLabel: "Thinking Blocks", fallbackDesc: "Hide model reasoning from output view.", scope: "Native OMP" },
+  { id: "external-thinking", tab: "providers", providersTab: "defaults", sectionKey: "settingsConfig.modelDefaults", labelKey: "settingsConfig.externalThinking", descKey: "settingsConfig.externalThinkingDesc", fallbackSection: "Global model defaults", fallbackLabel: "External Thinking", fallbackDesc: "Private scratchpad reasoning via think tool.", scope: "Native OMP" },
   // Context Compaction
-  { id: "automatic-compaction", tab: "intelligence", sectionKey: "settingsConfig.contextCompaction", labelKey: "settingsConfig.automaticCompaction", descKey: "settingsConfig.automaticCompactionDesc", fallbackSection: "Context Compaction", fallbackLabel: "Automatic Compaction", fallbackDesc: "Compact context before model context limit is hit.", scope: "Native OMP" },
-  { id: "continue-after-compaction", tab: "intelligence", sectionKey: "settingsConfig.contextCompaction", labelKey: "settingsConfig.continueAfterCompaction", descKey: "settingsConfig.continueAfterCompactionDesc", fallbackSection: "Context Compaction", fallbackLabel: "Continue After Compaction", fallbackDesc: "Resume task execution after compaction completes.", scope: "Native OMP" },
-  { id: "compaction-method-order", tab: "intelligence", sectionKey: "settingsConfig.contextCompaction", labelKey: "settingsConfig.compactionMethodOrder", descKey: "settingsConfig.compactionMethodOrderDesc", fallbackSection: "Context Compaction", fallbackLabel: "Compaction Method Order", fallbackDesc: "Preferred fallback order for automatic context maintenance; unavailable or failed methods advance to the next choice.", scope: "Native OMP" },
-  { id: "compact-mid-turn", tab: "intelligence", sectionKey: "settingsConfig.contextCompaction", labelKey: "settingsConfig.compactMidTurn", descKey: "settingsConfig.compactMidTurnDesc", fallbackSection: "Context Compaction", fallbackLabel: "Compact Mid-Turn", fallbackDesc: "Check context limits between tool execution steps.", scope: "Native OMP" },
+  { id: "automatic-compaction", tab: "agents", agentTab: "runtime", sectionKey: "settingsConfig.contextCompaction", labelKey: "settingsConfig.automaticCompaction", descKey: "settingsConfig.automaticCompactionDesc", fallbackSection: "Context Compaction", fallbackLabel: "Automatic Compaction", fallbackDesc: "Compact context before model context limit is hit.", scope: "Native OMP" },
+  { id: "continue-after-compaction", tab: "agents", agentTab: "runtime", sectionKey: "settingsConfig.contextCompaction", labelKey: "settingsConfig.continueAfterCompaction", descKey: "settingsConfig.continueAfterCompactionDesc", fallbackSection: "Context Compaction", fallbackLabel: "Continue After Compaction", fallbackDesc: "Resume task execution after compaction completes.", scope: "Native OMP" },
+  { id: "compaction-method-order", tab: "agents", agentTab: "runtime", sectionKey: "settingsConfig.contextCompaction", labelKey: "settingsConfig.compactionMethodOrder", descKey: "settingsConfig.compactionMethodOrderDesc", fallbackSection: "Context Compaction", fallbackLabel: "Compaction Method Order", fallbackDesc: "Preferred fallback order for automatic context maintenance; unavailable or failed methods advance to the next choice.", scope: "Native OMP" },
+  { id: "compact-mid-turn", tab: "agents", agentTab: "runtime", sectionKey: "settingsConfig.contextCompaction", labelKey: "settingsConfig.compactMidTurn", descKey: "settingsConfig.compactMidTurnDesc", fallbackSection: "Context Compaction", fallbackLabel: "Compact Mid-Turn", fallbackDesc: "Check context limits between tool execution steps.", scope: "Native OMP" },
   // Memory & Auto-Learn
-  { id: "memory-backend", tab: "intelligence", sectionKey: "settingsConfig.memoryAutoLearn", labelKey: "settingsConfig.memoryBackend", descKey: "settingsConfig.memoryBackendDesc", fallbackSection: "Memory & Auto-Learn", fallbackLabel: "Memory Backend", fallbackDesc: "Where durable knowledge is stored across sessions.", scope: "Native OMP" },
-  { id: "enable-auto-learn", tab: "intelligence", sectionKey: "settingsConfig.memoryAutoLearn", labelKey: "settingsConfig.enableAutoLearn", descKey: "settingsConfig.enableAutoLearnDesc", fallbackSection: "Memory & Auto-Learn", fallbackLabel: "Enable Auto-Learn", fallbackDesc: "Capture reusable lessons after completed runs.", scope: "Native OMP" },
-  { id: "private-capture-turn", tab: "intelligence", sectionKey: "settingsConfig.memoryAutoLearn", labelKey: "settingsConfig.privateCaptureTurn", descKey: "settingsConfig.privateCaptureTurnDesc", fallbackSection: "Memory & Auto-Learn", fallbackLabel: "Private Capture Turn", fallbackDesc: "Run private lesson-capture turn at completion.", scope: "Native OMP" },
-  { id: "memory-scope", tab: "intelligence", sectionKey: "settingsConfig.memoryAutoLearn", labelKey: "settingsConfig.memoryScope", descKey: "settingsConfig.memoryScopeDesc", fallbackSection: "Memory & Auto-Learn", fallbackLabel: "Memory Scope", fallbackDesc: "Scoping for Mnemopi knowledge storage.", scope: "Native OMP" },
-  { id: "recall-on-session-start", tab: "intelligence", sectionKey: "settingsConfig.memoryAutoLearn", labelKey: "settingsConfig.recallOnSessionStart", descKey: "settingsConfig.recallOnSessionStartDesc", fallbackSection: "Memory & Auto-Learn", fallbackLabel: "Recall on Session Start", fallbackDesc: "Load relevant memories into first turn.", scope: "Native OMP" },
-  { id: "retain-completed-turns", tab: "intelligence", sectionKey: "settingsConfig.memoryAutoLearn", labelKey: "settingsConfig.retainCompletedTurns", descKey: "settingsConfig.retainCompletedTurnsDesc", fallbackSection: "Memory & Auto-Learn", fallbackLabel: "Retain Completed Turns", fallbackDesc: "Store completed conversation turns in memory.", scope: "Native OMP" },
+  { id: "memory-backend", tab: "agents", agentTab: "runtime", sectionKey: "settingsConfig.memoryAutoLearn", labelKey: "settingsConfig.memoryBackend", descKey: "settingsConfig.memoryBackendDesc", fallbackSection: "Memory & Auto-Learn", fallbackLabel: "Memory Backend", fallbackDesc: "Where durable knowledge is stored across sessions.", scope: "Native OMP" },
+  { id: "enable-auto-learn", tab: "agents", agentTab: "runtime", sectionKey: "settingsConfig.memoryAutoLearn", labelKey: "settingsConfig.enableAutoLearn", descKey: "settingsConfig.enableAutoLearnDesc", fallbackSection: "Memory & Auto-Learn", fallbackLabel: "Enable Auto-Learn", fallbackDesc: "Capture reusable lessons after completed runs.", scope: "Native OMP" },
+  { id: "private-capture-turn", tab: "agents", agentTab: "runtime", sectionKey: "settingsConfig.memoryAutoLearn", labelKey: "settingsConfig.privateCaptureTurn", descKey: "settingsConfig.privateCaptureTurnDesc", fallbackSection: "Memory & Auto-Learn", fallbackLabel: "Private Capture Turn", fallbackDesc: "Run private lesson-capture turn at completion.", scope: "Native OMP" },
+  { id: "memory-scope", tab: "agents", agentTab: "runtime", sectionKey: "settingsConfig.memoryAutoLearn", labelKey: "settingsConfig.memoryScope", descKey: "settingsConfig.memoryScopeDesc", fallbackSection: "Memory & Auto-Learn", fallbackLabel: "Memory Scope", fallbackDesc: "Scoping for Mnemopi knowledge storage.", scope: "Native OMP" },
+  { id: "recall-on-session-start", tab: "agents", agentTab: "runtime", sectionKey: "settingsConfig.memoryAutoLearn", labelKey: "settingsConfig.recallOnSessionStart", descKey: "settingsConfig.recallOnSessionStartDesc", fallbackSection: "Memory & Auto-Learn", fallbackLabel: "Recall on Session Start", fallbackDesc: "Load relevant memories into first turn.", scope: "Native OMP" },
+  { id: "retain-completed-turns", tab: "agents", agentTab: "runtime", sectionKey: "settingsConfig.memoryAutoLearn", labelKey: "settingsConfig.retainCompletedTurns", descKey: "settingsConfig.retainCompletedTurnsDesc", fallbackSection: "Memory & Auto-Learn", fallbackLabel: "Retain Completed Turns", fallbackDesc: "Store completed conversation turns in memory.", scope: "Native OMP" },
   // Automatic Retry
-  { id: "automatic-retry", tab: "intelligence", sectionKey: "settingsConfig.automaticRetry", labelKey: "settingsConfig.retryToggle", descKey: "settingsConfig.retryToggleDesc", fallbackSection: "Automatic Retry", fallbackLabel: "Automatic Retry", fallbackDesc: "Retry failed turns automatically.", scope: "Native OMP" },
-  { id: "max-attempts", tab: "intelligence", sectionKey: "settingsConfig.automaticRetry", labelKey: "settingsConfig.maxAttempts", descKey: "settingsConfig.maxAttemptsDesc", fallbackSection: "Automatic Retry", fallbackLabel: "Max Attempts", fallbackDesc: "Retry limit before giving up.", scope: "Native OMP" },
-  { id: "model-fallback", tab: "intelligence", sectionKey: "settingsConfig.automaticRetry", labelKey: "settingsConfig.modelFallback", descKey: "settingsConfig.modelFallbackDesc", fallbackSection: "Automatic Retry", fallbackLabel: "Model Fallback", fallbackDesc: "Fall back to alternative model when retries exhaust.", scope: "Native OMP" },
+  { id: "automatic-retry", tab: "agents", agentTab: "runtime", sectionKey: "settingsConfig.automaticRetry", labelKey: "settingsConfig.retryToggle", descKey: "settingsConfig.retryToggleDesc", fallbackSection: "Automatic Retry", fallbackLabel: "Automatic Retry", fallbackDesc: "Retry failed turns automatically.", scope: "Native OMP" },
+  { id: "max-attempts", tab: "agents", agentTab: "runtime", sectionKey: "settingsConfig.automaticRetry", labelKey: "settingsConfig.maxAttempts", descKey: "settingsConfig.maxAttemptsDesc", fallbackSection: "Automatic Retry", fallbackLabel: "Max Attempts", fallbackDesc: "Retry limit before giving up.", scope: "Native OMP" },
+  { id: "model-fallback", tab: "agents", agentTab: "runtime", sectionKey: "settingsConfig.automaticRetry", labelKey: "settingsConfig.modelFallback", descKey: "settingsConfig.modelFallbackDesc", fallbackSection: "Automatic Retry", fallbackLabel: "Model Fallback", fallbackDesc: "Fall back to alternative model when retries exhaust.", scope: "Native OMP" },
   // Agents
-  { id: "agent-roster", tab: "agents", sectionKey: "settingsConfig.agentsTitle", labelKey: "settingsTabs.agents.label", descKey: "settingsTabs.agents.description", fallbackSection: "Agents", fallbackLabel: "Agent roster", fallbackDesc: "Browse enabled agents filtered by name and source.", scope: "Native OMP" },
-  { id: "agent-model", tab: "agents", sectionKey: "settingsConfig.agentsTitle", labelKey: "agentsConfig.modelRoles", descKey: "modelsConfig.modelRolesDesc", fallbackSection: "Agents", fallbackLabel: "Agent model", fallbackDesc: "Model mapping and reasoning effort per agent role.", scope: "Native OMP" },
-  { id: "agent-tools", tab: "agents", sectionKey: "settingsConfig.agentsTitle", labelKey: "agentsConfig.tools", descKey: "settingsTabs.agents.description", fallbackSection: "Agents", fallbackLabel: "Agent tools", fallbackDesc: "Allowed tools and delegated task prompt per agent.", scope: "Native OMP" },
-  // Extensions & Tools
-  { id: "load-project-mcp-servers", tab: "mcp", sectionKey: "settingsConfig.extensionsTools", labelKey: "settingsConfig.loadProjectMcp", descKey: "settingsConfig.loadProjectMcpDesc", fallbackSection: "Extensions & Tools", fallbackLabel: "Load Project MCP Servers", fallbackDesc: "Allow project-root MCP configuration to be discovered.", scope: "Native OMP" },
-  { id: "render-mcp-markdown", tab: "mcp", sectionKey: "settingsConfig.extensionsTools", labelKey: "settingsConfig.renderMcpMarkdown", descKey: "settingsConfig.renderMcpMarkdownDesc", fallbackSection: "Extensions & Tools", fallbackLabel: "Render MCP Markdown", fallbackDesc: "Render non-JSON MCP results as Markdown in transcript.", scope: "Native OMP" },
-  { id: "mcp-resource-updates", tab: "mcp", sectionKey: "settingsConfig.extensionsTools", labelKey: "settingsConfig.mcpResourceUpdates", descKey: "settingsConfig.mcpResourceUpdatesDesc", fallbackSection: "Extensions & Tools", fallbackLabel: "MCP Resource Updates", fallbackDesc: "Inject server resource updates into conversation.", scope: "Native OMP" },
+  { id: "agent-instructions", tab: "agents", agentTab: "instructions", sectionKey: "settingsTabs.agents.label", labelKey: "agentInstructions.title", descKey: "agentInstructions.description", fallbackSection: "Agents & Policies", fallbackLabel: "Custom instructions", fallbackDesc: "System prompt rules: model overrides provider overrides global.", scope: "UI" },
+  { id: "agent-roster", tab: "agents", agentTab: "subagents", sectionKey: "settingsTabs.agents.label", labelKey: "settingsConfig.agents.subagents", descKey: "settingsConfig.agentsDesc", fallbackSection: "Agents & Policies", fallbackLabel: "Subagents", fallbackDesc: "Browse enabled agents filtered by name and source.", scope: "Native OMP" },
+  { id: "agent-model", tab: "agents", agentTab: "subagents", sectionKey: "settingsTabs.agents.label", labelKey: "agentsConfig.modelRoles", descKey: "modelsConfig.modelRolesDesc", fallbackSection: "Agents & Policies", fallbackLabel: "Agent model", fallbackDesc: "Model mapping and reasoning effort per agent role.", scope: "Native OMP" },
+  { id: "agent-tools", tab: "agents", agentTab: "subagents", sectionKey: "settingsTabs.agents.label", labelKey: "agentsConfig.tools", descKey: "settingsConfig.agentsDesc", fallbackSection: "Agents & Policies", fallbackLabel: "Agent tools", fallbackDesc: "Allowed tools and delegated task prompt per agent.", scope: "Native OMP" },
+  // Extensions & Skills
+  { id: "generate-image", tab: "extensions", sectionKey: "settingsConfig.extensionsSkills", labelKey: "settingsConfig.generateImage", descKey: "settingsConfig.generateImageDesc", fallbackSection: "Extensions & Skills", fallbackLabel: "Image generation", fallbackDesc: "Let the agent create and edit images with the generate_image tool.", scope: "Native OMP" },
+  { id: "mcp-servers", tab: "extensions", sectionKey: "settingsConfig.extensionsSkills", labelKey: "settingsConfig.mcpServers", descKey: "settingsConfig.mcpServersDesc", fallbackSection: "Extensions & Skills", fallbackLabel: "MCP servers", fallbackDesc: "View MCP servers and manage the selected workspace's project configuration.", scope: "Workspace" },
+  { id: "load-project-mcp-servers", tab: "extensions", sectionKey: "settingsConfig.extensionsSkills", labelKey: "settingsConfig.loadProjectMcp", descKey: "settingsConfig.loadProjectMcpDesc", fallbackSection: "Extensions & Skills", fallbackLabel: "Load Project MCP Servers", fallbackDesc: "Allow project-root MCP configuration to be discovered.", scope: "Native OMP" },
+  { id: "render-mcp-markdown", tab: "extensions", sectionKey: "settingsConfig.extensionsSkills", labelKey: "settingsConfig.renderMcpMarkdown", descKey: "settingsConfig.renderMcpMarkdownDesc", fallbackSection: "Extensions & Skills", fallbackLabel: "Render MCP Markdown", fallbackDesc: "Render non-JSON MCP results as Markdown in transcript.", scope: "Native OMP" },
+  { id: "mcp-resource-updates", tab: "extensions", sectionKey: "settingsConfig.extensionsSkills", labelKey: "settingsConfig.mcpResourceUpdates", descKey: "settingsConfig.mcpResourceUpdatesDesc", fallbackSection: "Extensions & Skills", fallbackLabel: "MCP Resource Updates", fallbackDesc: "Inject server resource updates into conversation.", scope: "Native OMP" },
+  { id: "skills-library", tab: "extensions", sectionKey: "settingsConfig.extensionsSkills", labelKey: "settingsConfig.skillsLibrary", descKey: "settingsConfig.skillsLibraryDesc", fallbackSection: "Extensions & Skills", fallbackLabel: "Skills library", fallbackDesc: "Manage loaded skills, sources, visibility, installation, and updates.", scope: "Workspace" },
   // Usage & Analytics
   { id: "usage-summary", tab: "usage", sectionKey: "settingsTabs.usage.label", labelKey: "usageConfig.title", descKey: "settingsTabs.usage.description", fallbackSection: "Usage", fallbackLabel: "Usage & Analytics", fallbackDesc: "Tokens, costs, cache analytics, and model breakdown", scope: "UI" },
   { id: "token-cost", tab: "usage", sectionKey: "settingsTabs.usage.label", labelKey: "usageConfig.rawTokenCost", descKey: "usageConfig.billedAtFullRate", fallbackSection: "Usage", fallbackLabel: "Raw Token Cost", fallbackDesc: "Token expenditure across providers and models", scope: "UI" },
@@ -774,8 +842,10 @@ function CompactionMethodOrder({ value, onChange, ...aria }: { value: readonly C
   );
 }
 
-export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCallsDefaultCollapsedChange, expandThinkingByDefault, onExpandThinkingByDefaultChange, onHideThinkingBlockChange, providerUsageVisible, onProviderUsageVisibleChange, scopeNativeSelectAll, onScopeNativeSelectAllChange, openUrlAutomatically, onOpenUrlAutomaticallyChange, cwd, sessionId, onModelsSaved, onPluginsReloaded, appUpdate, ompUpdateAvailable, ompUpdatesDisabled, onRefreshAppUpdate, onOmpUpdateAvailabilityChange, onRequestAppUpdate, onSelectTab, onClose }: {
+export function SettingsConfig({ activeTab, appearanceTab, onAppearanceTabChange, toolCallsDefaultCollapsed, onToolCallsDefaultCollapsedChange, providerUsageVisible, onProviderUsageVisibleChange, scopeNativeSelectAll, onScopeNativeSelectAllChange, openUrlAutomatically, onOpenUrlAutomaticallyChange, openFileAutomatically, onOpenFileAutomaticallyChange, cwd, sessionId, onModelsSaved, appUpdate, ompUpdateAvailable, ompUpdatesDisabled, onRefreshAppUpdate, onOmpUpdateAvailabilityChange, onRequestAppUpdate, onSelectTab, onClose }: {
   activeTab: SettingsTab;
+  appearanceTab: AppearanceTab;
+  onAppearanceTabChange: (tab: AppearanceTab) => void;
   toolCallsDefaultCollapsed: boolean;
   onToolCallsDefaultCollapsedChange: (collapsed: boolean) => void;
   expandThinkingByDefault: boolean;
@@ -787,10 +857,11 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
   onScopeNativeSelectAllChange: (enabled: boolean) => void;
   openUrlAutomatically: boolean;
   onOpenUrlAutomaticallyChange: (enabled: boolean) => void;
+  openFileAutomatically: boolean;
+  onOpenFileAutomaticallyChange: (enabled: boolean) => void;
   cwd: string | null;
   sessionId: string | null;
   onModelsSaved: () => void;
-  onPluginsReloaded: () => void;
   appUpdate: AppUpdateInfo | null;
   ompUpdateAvailable?: boolean;
   ompUpdatesDisabled?: boolean;
@@ -806,6 +877,7 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
   const { fontSize, setFontSize } = useFontSize();
   const { uiScale, setUiScale } = useUiScale();
   const { touchTargets, setTouchTargets } = useTouchTargets();
+  const { preference: themePreference, setTheme } = useTheme();
   const {
     isSupported: ttsSupported,
     autoPlayEnabled: ttsAutoPlay,
@@ -816,8 +888,12 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
   } = useSpeechSynthesis();
   const [searchQuery, setSearchQuery] = useState("");
   const [highlightId, setHighlightId] = useState<string | null>(null);
+  const [generalTab, setGeneralTab] = useState<GeneralTab>("layout");
+  const [providersTab, setProvidersTab] = useState<ProvidersTab>("connected");
+  const [agentTab, setAgentTab] = useState<AgentTab>("instructions");
   const [submitBehavior, setSubmitBehavior] = useState<SubmitDuringRunBehavior>(() => getSubmitDuringRunBehavior());
   const [wordCompletion, setWordCompletion] = useState<WordCompletionMode>(() => getWordCompletionMode());
+  const [whaleTail, setWhaleTail] = useState<WhaleTailMotion>(() => getWhaleTailMotion());
   const [soundEnabled, setSoundEnabled] = useState<boolean>(() => {
     if (typeof window === "undefined") return true;
     try {
@@ -905,18 +981,13 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
     nativeSettingsMutatedRef.current = false;
     setNativeSettingsLoading(true);
     setNativeSettingsError(null);
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 12000);
-    fetch("/api/omp-settings", { signal: controller.signal })
+    fetch("/api/omp-settings", { signal: AbortSignal.timeout(12000) })
       .then((response) => (response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`))))
       .then((data: { settings?: NativeSettings }) => {
         if (!nativeSettingsMutatedRef.current) setNativeSettings(data.settings ?? {});
       })
       .catch((error) => setNativeSettingsError(error instanceof Error ? error.message : String(error)))
-      .finally(() => {
-        clearTimeout(timeout);
-        setNativeSettingsLoading(false);
-      });
+      .finally(() => setNativeSettingsLoading(false));
   }, []);
 
   useEffect(() => {
@@ -961,8 +1032,8 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
   }, [currentSettings, saveNativeSettings]);
 
   const patchSection = useCallback(<K extends keyof NativeSettings,>(key: K, patch: Partial<NonNullable<NativeSettings[K]>>) => {
-    const base = latestNativeSettingsRef.current;
-    const section = ((base ?? nativeSettings)?.[key] ?? {}) as object;
+    // Merge into the latest copy of this section (an unsaved edit may be in flight).
+    const section = ((latestNativeSettingsRef.current ?? nativeSettings)?.[key] ?? {}) as object;
     void saveNativeSettings({ ...currentSettings(), [key]: { ...section, ...patch } });
   }, [currentSettings, nativeSettings, saveNativeSettings]);
 
@@ -1034,9 +1105,10 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
         const status = (await statusRes.json()) as { state?: string; error?: string } | null;
         if (!status) break;
         if (status.state === "succeeded") {
+          // Running agents keep the old binary; each session moves to the new
+          // one at its next prompt (rpc-manager restarts idle children lazily).
           setMessage(t("settingsConfig.ompUpdateSuccess"));
           await checkForUpdate(true);
-          try { await restartSessions(); } catch {}
           break;
         }
         if (status.state === "failed") throw new Error(status.error || t("settingsConfig.ompUpdateFailed"));
@@ -1046,11 +1118,11 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
     } finally {
       setOmpUpdating(false);
     }
-  }, [ompUpdating, t, checkForUpdate, restartSessions]);
+  }, [ompUpdating, t, checkForUpdate]);
 
 
-  const currentTab = activeTab === "skills" ? activeTab : getNormalizedActive(activeTab);
-  const nativeSettingsRequired = currentTab === "general" || currentTab === "safety" || currentTab === "models" || currentTab === "intelligence" || currentTab === "mcp";
+  const currentTab = getNormalizedActive(activeTab);
+  const nativeSettingsRequired = currentTab === "extensions" || currentTab === "agents";
   useEffect(() => {
     if (currentTab === "system") {
       void fetchWindowsServiceStatus();
@@ -1065,6 +1137,13 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
 
   const trimmedQuery = searchQuery.trim().toLowerCase();
   const searchActive = trimmedQuery.length > 0;
+
+  useEffect(() => {
+    if (searchActive || currentTab !== "extensions" || nativeSettingsLoading) return;
+    if (highlightId === "mcp-servers" || highlightId === "skills-library") {
+      document.getElementById(`settings-${highlightId}`)?.scrollIntoView({ block: "start" });
+    }
+  }, [highlightId, currentTab, nativeSettingsLoading, searchActive]);
 
   const searchResults = useMemo<SearchResult[]>(() => {
     if (!trimmedQuery) return [];
@@ -1091,17 +1170,23 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
       const localizedSection = trSection !== setting.sectionKey ? trSection : setting.fallbackSection;
       const haystack = `${localizedLabel} ${localizedDesc} ${localizedSection} ${setting.fallbackLabel} ${setting.fallbackDesc} ${setting.fallbackSection}`.toLowerCase();
       if (haystack.includes(trimmedQuery)) {
-        results.push({ id: setting.id, kind: "setting", tab: setting.tab, label: localizedLabel, description: localizedDesc, scope: setting.scope, section: localizedSection });
+        results.push({ id: setting.id, kind: "setting", tab: setting.tab, appearanceTab: setting.appearanceTab, generalTab: setting.generalTab, providersTab: setting.providersTab, agentTab: setting.agentTab, label: localizedLabel, description: localizedDesc, scope: setting.scope, section: localizedSection });
       }
     }
     return results;
   }, [trimmedQuery, t, nativeSettings?.defaultThinkingLevel]);
 
   const openSearchResult = useCallback((result: SearchResult) => {
-    startTransition(() => onSelectTab(result.tab));
+    startTransition(() => {
+      if (result.tab === "appearance") onAppearanceTabChange(result.appearanceTab ?? "display");
+      if (result.tab === "general") setGeneralTab(result.generalTab ?? (result.kind === "category" ? "layout" : "behavior"));
+      if (result.tab === "providers") setProvidersTab(result.providersTab ?? "connected");
+      if (result.tab === "agents") setAgentTab(result.agentTab ?? "instructions");
+      onSelectTab(result.tab);
+    });
     setHighlightId(result.kind === "setting" ? result.id : null);
     setSearchQuery("");
-  }, [onSelectTab]);
+  }, [onSelectTab, onAppearanceTabChange]);
 
   const handleSelectTab = useCallback((tab: SettingsTab) => {
     startTransition(() => onSelectTab(tab));
@@ -1120,10 +1205,9 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") {
-        // Keep Escape for clearing a filled field; a checkbox's DOM value is always "on".
-        const target = e.target;
-        if (target instanceof HTMLInputElement && target.type !== "checkbox" && target.value) return;
+      if (e.key === "Escape" && !e.defaultPrevented) {
+        const target = e.target as HTMLElement | null;
+        if (target?.tagName === "INPUT" && (target as HTMLInputElement).value) return;
         onClose();
       }
     };
@@ -1243,27 +1327,111 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
               </div>
             )}
 
-            {/* GENERAL & UI TAB */}
-            {currentTab === "pets" && <PetsConfig />}
-            {currentTab === "wallpapers" && <WallpapersConfig />}
+            {currentTab === "appearance" && (
+              <div role="tabpanel" id="settings-panel-appearance" aria-labelledby="settings-tab-appearance" className="settings-panel-inner" style={{ padding: isMobile ? "16px 14px 32px" : "32px 24px 64px", gap: 16, width: "100%", maxWidth: 1080 }}>
+                <div>
+                  <h2 className="display-serif" style={{ fontSize: "var(--text-2xl)", fontWeight: 600, margin: 0, color: "var(--text)" }}>{t("settingsTabs.appearance.label")}</h2>
+                  <p className="settings-content-subtitle" style={{ margin: "4px 0 0", fontSize: "var(--text-md)", color: "var(--text-muted)" }}>{t("settingsTabs.appearance.description")}</p>
+                </div>
+                <SettingsSubTabs
+                  id="appearance" label={t("settingsTabs.appearance.label")}
+                  tabs={APPEARANCE_TABS} value={appearanceTab}
+                  onChange={(tab) => { setHighlightId(null); onAppearanceTabChange(tab); }}
+                  labelFor={(tab) => t(`settingsConfig.appearance.${tab}`)}
+                />
+                <div role="tabpanel" id={`appearance-panel-${appearanceTab}`} aria-labelledby={`appearance-tab-${appearanceTab}`} style={{ minWidth: 0 }}>
+                  {appearanceTab === "display" && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                      <NativeSetting searchId="theme" label={t("settingsConfig.theme")} description={t("settingsConfig.themeDesc")} scope="UI">
+                        <Select
+                          style={selectStyle}
+                          value={themePreference}
+                          onChange={(value) => setTheme(value as ThemePreference)}
+                          options={[
+                            { value: "system", label: t("appShell.themeSystem") },
+                            ...ALL_THEMES.map((theme) => ({ value: theme.id, label: theme.name })),
+                          ]}
+                        />
+                      </NativeSetting>
+                      <NativeSetting searchId="chat-font-size" label={t("settingsConfig.chatFontSize")} description={t("settingsConfig.chatFontSizeDesc")} scope="UI">
+                        <Select
+                          style={selectStyle}
+                          value={fontSize}
+                          onChange={(nextValue) => setFontSize(nextValue as FontSizePreference)}
+                          options={[
+                            { value: "sm", label: t("settingsConfig.fontSizeSmall") },
+                            { value: "md", label: t("settingsConfig.fontSizeMedium") },
+                            { value: "lg", label: t("settingsConfig.fontSizeLarge") },
+                            { value: "xl", label: t("settingsConfig.fontSizeXLarge") },
+                          ]}
+                        />
+                      </NativeSetting>
+                      <NativeSetting searchId="ui-scale" label={t("settingsConfig.uiScale")} description={t("settingsConfig.uiScaleDesc")} scope="UI">
+                        <Select
+                          style={selectStyle}
+                          value={uiScale}
+                          onChange={(nextValue) => setUiScale(nextValue as UiScalePreference)}
+                          options={[
+                            { value: "compact", label: t("settingsConfig.uiScaleCompact") },
+                            { value: "standard", label: t("settingsConfig.uiScaleStandard") },
+                            { value: "comfortable", label: t("settingsConfig.uiScaleComfortable") },
+                            { value: "large", label: t("settingsConfig.uiScaleLarge") },
+                          ]}
+                        />
+                      </NativeSetting>
+                    </div>
+                  )}
+                  {appearanceTab === "wallpapers" && <WallpapersConfig />}
+                  {appearanceTab === "pets" && <PetsConfig />}
+                  {appearanceTab === "motion" && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                      <NativeSetting searchId="whale-tail" label={t("settingsConfig.whaleTail")} description={t("settingsConfig.whaleTailDesc")} scope="UI">
+                        <WhaleTailPicker
+                          value={whaleTail}
+                          labelFor={(motion) => t(`settingsConfig.whaleTail.${motion}`)}
+                          onChange={(next) => {
+                            setWhaleTailMotion(next);
+                            setWhaleTail(next);
+                          }}
+                        />
+                      </NativeSetting>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
             {currentTab === "general" && (
-              <div role="tabpanel" id="settings-panel-general" aria-labelledby="settings-tab-general" className="settings-panel-inner" style={{ padding: isMobile ? "16px 14px 32px" : "32px 24px 64px", gap: 16 }}>
+              <div role="tabpanel" id="settings-panel-general" aria-labelledby="settings-tab-general" className="settings-panel-inner" style={{ padding: isMobile ? "16px 14px 32px" : "32px 24px 64px", gap: 16, width: "100%", maxWidth: 1080 }}>
                 <div style={{ marginBottom: 4 }}>
                   <h2 className="display-serif" style={{ fontSize: "var(--text-2xl)", fontWeight: 600, margin: 0, color: "var(--text)", letterSpacing: "-0.01em" }}>{t("settingsConfig.interfaceBehavior")}</h2>
-                  <p className="settings-content-subtitle" style={{ margin: "4px 0 16px", fontSize: "var(--text-md)", color: "var(--text-muted)", lineHeight: 1.45 }}>{t("settingsConfig.interfaceBehaviorDesc")}</p>
+                  <p className="settings-content-subtitle" style={{ margin: "4px 0 0", fontSize: "var(--text-md)", color: "var(--text-muted)", lineHeight: 1.45 }}>{t("settingsConfig.interfaceBehaviorDesc")}</p>
                 </div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%" }}>
+                <SettingsSubTabs
+                  id="general" label={t("settingsTabs.general.label")}
+                  tabs={GENERAL_TABS} value={generalTab}
+                  onChange={(tab) => { setHighlightId(null); setGeneralTab(tab); }}
+                  labelFor={(tab) => t(`settingsConfig.general.${tab}`)}
+                />
+                {generalTab === "layout" && (
+                <div role="tabpanel" id="general-panel-layout" aria-labelledby="general-tab-layout" style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%" }}>
                   <NativeSetting searchId="keep-tool-calls-collapsed" label={t("settingsConfig.keepToolCallsCollapsed")} description={t("settingsConfig.keepToolCallsCollapsedDesc")} scope="UI">
                     <ToggleSwitch checked={toolCallsDefaultCollapsed} onChange={onToolCallsDefaultCollapsedChange} />
                   </NativeSetting>
-                  <NativeSetting searchId="expand-thinking-by-default" label={t("settingsConfig.expandThinkingByDefault")} description={t("settingsConfig.expandThinkingByDefaultDesc")} scope="UI">
-                    <ToggleSwitch checked={expandThinkingByDefault} onChange={onExpandThinkingByDefaultChange} />
+                  <NativeSetting searchId="provider-usage" label={t("settingsConfig.providerUsage")} description={t("settingsConfig.providerUsageDesc")} scope="UI">
+                    <ToggleSwitch checked={providerUsageVisible} onChange={onProviderUsageVisibleChange} />
                   </NativeSetting>
+                </div>
+                )}
+                {generalTab === "behavior" && (
+                <div role="tabpanel" id="general-panel-behavior" aria-labelledby="general-tab-behavior" style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%" }}>
                   <NativeSetting searchId="scope-native-select-all" label={t("settingsConfig.scopeNativeSelectAll")} description={t("settingsConfig.scopeNativeSelectAllDesc")} scope="UI">
                     <ToggleSwitch checked={scopeNativeSelectAll} onChange={onScopeNativeSelectAllChange} />
                   </NativeSetting>
                   <NativeSetting searchId="open-url-automatically" label={t("settingsConfig.openUrlAutomatically")} description={t("settingsConfig.openUrlAutomaticallyDesc")} scope="UI">
                     <ToggleSwitch checked={openUrlAutomatically} onChange={onOpenUrlAutomaticallyChange} />
+                  </NativeSetting>
+                  <NativeSetting searchId="open-file-automatically" label={t("settingsConfig.openFileAutomatically")} description={t("settingsConfig.openFileAutomaticallyDesc")} scope="UI">
+                    <ToggleSwitch checked={openFileAutomatically} onChange={onOpenFileAutomaticallyChange} />
                   </NativeSetting>
                   <NativeSetting searchId="completion-sound" label={t("settingsConfig.completionSound")} description={t("settingsConfig.completionSoundDesc")} scope="UI">
                     <ToggleSwitch
@@ -1293,49 +1461,18 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                     description={ttsSupported ? (t("settingsConfig.ttsVoiceDesc") || "Select the browser voice for text-to-speech reading.") : `${t("settingsConfig.ttsVoiceDesc") || "Select the browser voice for text-to-speech reading."} (${t("settingsConfig.ttsNotSupported") || "Not supported in this browser"})`}
                     scope="UI"
                   >
-                    <select
-                      style={nativeSelectStyle}
+                    <Select
+                      style={selectStyle}
                       value={ttsVoiceURI || ""}
                       disabled={!ttsSupported || ttsVoices.length === 0}
-                      onChange={(e) => setTtsVoiceURI(e.target.value || null)}
-                    >
-                      <option value="">{t("settingsConfig.defaultVoice") || "Default system voice"}</option>
-                      {ttsVoices.map((v) => (
-                        <option key={v.voiceURI} value={v.voiceURI}>
-                          {v.name} ({v.lang})
-                        </option>
-                      ))}
-                    </select>
-                  </NativeSetting>
-                  <NativeSetting searchId="provider-usage" label={t("settingsConfig.providerUsage")} description={t("settingsConfig.providerUsageDesc")} scope="UI">
-                    <ToggleSwitch checked={providerUsageVisible} onChange={onProviderUsageVisibleChange} />
-                  </NativeSetting>
-                  <NativeSetting searchId="skill-startup-notices" label={t("settingsConfig.skillStartupNotices")} description={t("settingsConfig.skillStartupNoticesDesc")} scope="Native OMP">
-                    <ToggleSwitch checked={nativeSettings?.skills?.showStartupDiagnostics !== false} disabled={nativeSettingsLoading} onChange={(enabled) => patchSection("skills", { showStartupDiagnostics: enabled })} />
-                  </NativeSetting>
-                  <NativeSetting searchId="chat-font-size" label={t("settingsConfig.chatFontSize")} description={t("settingsConfig.chatFontSizeDesc")} scope="UI">
-                    <select
-                      style={nativeSelectStyle}
-                      value={fontSize}
-                      onChange={(event) => setFontSize(event.target.value as FontSizePreference)}
-                    >
-                      <option value="sm" style={nativeOptionStyle}>{t("settingsConfig.fontSizeSmall")}</option>
-                      <option value="md" style={nativeOptionStyle}>{t("settingsConfig.fontSizeMedium")}</option>
-                      <option value="lg" style={nativeOptionStyle}>{t("settingsConfig.fontSizeLarge")}</option>
-                      <option value="xl" style={nativeOptionStyle}>{t("settingsConfig.fontSizeXLarge")}</option>
-                    </select>
-                  </NativeSetting>
-                  <NativeSetting searchId="ui-scale" label={t("settingsConfig.uiScale")} description={t("settingsConfig.uiScaleDesc")} scope="UI">
-                    <select
-                      style={nativeSelectStyle}
-                      value={uiScale}
-                      onChange={(event) => setUiScale(event.target.value as UiScalePreference)}
-                    >
-                      <option value="compact" style={nativeOptionStyle}>{t("settingsConfig.uiScaleCompact")}</option>
-                      <option value="standard" style={nativeOptionStyle}>{t("settingsConfig.uiScaleStandard")}</option>
-                      <option value="comfortable" style={nativeOptionStyle}>{t("settingsConfig.uiScaleComfortable")}</option>
-                      <option value="large" style={nativeOptionStyle}>{t("settingsConfig.uiScaleLarge")}</option>
-                    </select>
+                      onChange={(nextValue) => setTtsVoiceURI(nextValue || null)}
+                      options={[
+                        { value: "", label: t("settingsConfig.defaultVoice") || "Default system voice" },
+                        ...ttsVoices.map((v) => (
+                        ({ value: v.voiceURI, label: <>{v.name} ({v.lang})</> })
+                      )),
+                      ]}
+                    />
                   </NativeSetting>
                   <NativeSetting searchId="touch-targets" label={t("settingsConfig.touchTargets")} description={t("settingsConfig.touchTargetsDesc")} scope="UI">
                     <select
@@ -1349,162 +1486,112 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                     </select>
                   </NativeSetting>
                   <NativeSetting searchId="message-during-active-run" label={t("settingsConfig.messageDuringActiveRun")} description={t("settingsConfig.messageDuringActiveRunDesc")} scope="UI">
-                    <select
-                      style={nativeSelectStyle}
+                    <Select
+                      style={selectStyle}
                       value={submitBehavior}
-                      onChange={(event) => {
-                        const next = event.target.value as SubmitDuringRunBehavior;
+                      onChange={(nextValue) => {
+                        const next = nextValue as SubmitDuringRunBehavior;
                         setSubmitDuringRunBehavior(next);
                         setSubmitBehavior(next);
                       }}
-                    >
-                      <option value="steer" style={nativeOptionStyle}>{t("chatInput.steer")}</option>
-                      <option value="queue" style={nativeOptionStyle}>{t("settingsConfig.queueFollowUp")}</option>
-                    </select>
+                      options={[
+                        { value: "steer", label: t("settingsConfig.steerCurrentRun") },
+                        { value: "queue", label: t("settingsConfig.queueFollowUp") },
+                      ]}
+                    />
                   </NativeSetting>
                   <NativeSetting searchId="word-completion" label={t("settingsConfig.wordCompletion")} description={t("settingsConfig.wordCompletionDesc")} scope="UI">
-                    <select
-                      style={nativeSelectStyle}
+                    <Select
+                      style={selectStyle}
                       value={wordCompletion}
-                      onChange={(event) => {
-                        const next = event.target.value as WordCompletionMode;
+                      onChange={(nextValue) => {
+                        const next = nextValue as WordCompletionMode;
                         setWordCompletionMode(next);
                         setWordCompletion(next);
                       }}
-                    >
-                      <option value="auto" style={nativeOptionStyle}>{t("settingsConfig.wordCompletionAuto")}</option>
-                      <option value="on" style={nativeOptionStyle}>{t("settingsConfig.wordCompletionOn")}</option>
-                      <option value="off" style={nativeOptionStyle}>{t("settingsConfig.wordCompletionOff")}</option>
-                    </select>
-                  </NativeSetting>
-                </div>
-              </div>
-            )}
-
-            {/* SAFETY & APPROVALS TAB */}
-            {currentTab === "safety" && (
-              <div role="tabpanel" id="settings-panel-safety" aria-labelledby="settings-tab-safety" className="settings-panel-inner" style={{ padding: isMobile ? "16px 14px 32px" : "32px 24px 64px", gap: 16 }}>
-                <div style={{ marginBottom: 4 }}>
-                  <h2 className="display-serif" style={{ fontSize: "var(--text-2xl)", fontWeight: 600, margin: 0, color: "var(--text)", letterSpacing: "-0.01em" }}>{t("settingsConfig.toolSafetyApprovals")}</h2>
-                  <p className="settings-content-subtitle" style={{ margin: "4px 0 16px", fontSize: "var(--text-md)", color: "var(--text-muted)", lineHeight: 1.45 }}>{t("settingsConfig.toolSafetyApprovalsDesc")}</p>
-                </div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%" }}>
-                  <NativeSetting searchId="approval-mode" label={t("settingsConfig.approvalMode")} description={t("settingsConfig.approvalModeDesc")} scope="Native OMP">
-                    <select
-                      style={nativeSelectStyle}
-                      value={nativeSettings?.tools?.approvalMode ?? "yolo"}
-                      onChange={(event) => patchSection("tools", { approvalMode: event.target.value as "always-ask" | "write" | "yolo" })}
-                    >
-                      <option value="always-ask" style={nativeOptionStyle}>{t("settingsConfig.alwaysAsk")}</option>
-                      <option value="write" style={nativeOptionStyle}>{t("settingsConfig.allowWrites")}</option>
-                      <option value="yolo" style={nativeOptionStyle}>{t("settingsConfig.autoApproveYolo")}</option>
-                    </select>
-                  </NativeSetting>
-                  <NativeSetting searchId="bash-override" label={t("settingsConfig.bashOverride")} description={t("settingsConfig.bashOverrideDesc")} scope="Native OMP">
-                    <select
-                      style={nativeSelectStyle}
-                      value={nativeSettings?.tools?.approval?.bash ?? "prompt"}
-                      onChange={(event) => patchApproval({ bash: event.target.value as "allow" | "prompt" | "deny" })}
-                    >
-                      <option value="allow" style={nativeOptionStyle}>{t("settingsConfig.allow")}</option>
-                      <option value="prompt" style={nativeOptionStyle}>{t("settingsConfig.alwaysAsk")}</option>
-                      <option value="deny" style={nativeOptionStyle}>{t("settingsConfig.deny")}</option>
-                    </select>
-                  </NativeSetting>
-                  <NativeSetting searchId="extension-tool-requests" label={t("settingsConfig.extensionToolRequests")} description={t("settingsConfig.extensionToolRequestsDesc")} scope="Native OMP">
-                    <select
-                      style={nativeSelectStyle}
-                      value={nativeSettings?.tools?.approval?.extension ?? "prompt"}
-                      onChange={(event) => patchApproval({ extension: event.target.value as "allow" | "prompt" })}
-                    >
-                      <option value="prompt" style={nativeOptionStyle}>{t("settingsConfig.askEveryTime")}</option>
-                      <option value="allow" style={nativeOptionStyle}>{t("settingsConfig.autoApprove")}</option>
-                    </select>
-                  </NativeSetting>
-                </div>
-              </div>
-            )}
-
-            {/* AI MODEL DEFAULTS TAB */}
-            {currentTab === "models" && (
-              <div role="tabpanel" id="settings-panel-models" aria-labelledby="settings-tab-models" className="settings-panel-inner" style={{ padding: isMobile ? "16px 14px 32px" : "32px 24px 64px", gap: 16 }}>
-                <div style={{ marginBottom: 4 }}>
-                  <h2 className="display-serif" style={{ fontSize: "var(--text-2xl)", fontWeight: 600, margin: 0, color: "var(--text)", letterSpacing: "-0.01em" }}>{t("settingsConfig.modelDefaults")}</h2>
-                  <p className="settings-content-subtitle" style={{ margin: "4px 0 16px", fontSize: "var(--text-md)", color: "var(--text-muted)", lineHeight: 1.45 }}>{t("settingsConfig.modelDefaultsDesc")}</p>
-                </div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%" }}>
-                  <NativeSetting searchId="reasoning" label={t("settingsConfig.reasoning")} description={t("settingsConfig.reasoningDesc")} scope="Native OMP">
-                    <select
-                      style={nativeSelectStyle}
-                      value={nativeSettings?.defaultThinkingLevel ?? "high"}
-                      onChange={(e) => patchSettings({ defaultThinkingLevel: e.target.value as NativeSettings["defaultThinkingLevel"] })}
-                    >
-                      {["auto", "minimal", "low", "medium", "high", "xhigh", "max"].map((l) => (
-                        <option key={l} value={l} style={nativeOptionStyle}>{l}</option>
-                      ))}
-                    </select>
-                  </NativeSetting>
-                  {nativeSettings?.defaultThinkingLevel === "auto" && (
-                    <NativeSetting searchId="auto-thinking-source" label={t("settingsConfig.autoThinkingSource")} description={t("settingsConfig.autoThinkingSourceDesc")} scope="Native OMP">
-                      <select
-                        style={nativeSelectStyle}
-                        value={nativeSettings.providers?.autoThinkingSource ?? "classifier"}
-                        onChange={(e) => patchSection("providers", {
-                          autoThinkingSource: e.target.value === "vendor" ? "vendor" : "classifier",
-                        })}
-                      >
-                        <option value="classifier" style={nativeOptionStyle}>{t("settingsConfig.autoThinkingClassifier")}</option>
-                        <option value="vendor" style={nativeOptionStyle}>{t("settingsConfig.autoThinkingVendor")}</option>
-                      </select>
-                    </NativeSetting>
-                  )}
-                  <NativeSetting searchId="verbosity" label={t("settingsConfig.verbosity")} description={t("settingsConfig.verbosityDesc")} scope="Native OMP">
-                    <select
-                      style={nativeSelectStyle}
-                      value={nativeSettings?.textVerbosity ?? "medium"}
-                      onChange={(e) => patchSettings({ textVerbosity: e.target.value as NativeSettings["textVerbosity"] })}
-                    >
-                      <option value="low" style={nativeOptionStyle}>{t("settingsConfig.verbosityLow")}</option>
-                      <option value="medium" style={nativeOptionStyle}>{t("settingsConfig.verbosityMedium")}</option>
-                      <option value="high" style={nativeOptionStyle}>{t("settingsConfig.verbosityHigh")}</option>
-                    </select>
-                  </NativeSetting>
-                  <NativeSetting searchId="personality" label={t("settingsConfig.personality")} description={t("settingsConfig.personalityDesc")} scope="Native OMP">
-                    <select
-                      style={nativeSelectStyle}
-                      value={nativeSettings?.personality ?? "default"}
-                      onChange={(e) => patchSettings({ personality: e.target.value as NativeSettings["personality"] })}
-                    >
-                      <option value="default" style={nativeOptionStyle}>{t("settingsConfig.personalityDefault")}</option>
-                      <option value="friendly" style={nativeOptionStyle}>{t("settingsConfig.personalityFriendly")}</option>
-                      <option value="pragmatic" style={nativeOptionStyle}>{t("settingsConfig.personalityPragmatic")}</option>
-                      <option value="none" style={nativeOptionStyle}>{t("settingsConfig.personalityNone")}</option>
-                    </select>
-                  </NativeSetting>
-                  <NativeSetting searchId="thinking-blocks" label={t("settingsConfig.thinkingBlocks")} description={t("settingsConfig.thinkingBlocksDesc")} scope="Native OMP">
-                    <ToggleSwitch
-                      checked={nativeSettings?.hideThinkingBlock ?? false}
-                      onChange={(checked) => { patchSettings({ hideThinkingBlock: checked }); onHideThinkingBlockChange?.(checked); }}
-                    />
-                  </NativeSetting>
-                  <NativeSetting searchId="external-thinking" label={t("settingsConfig.externalThinking")} description={t("settingsConfig.externalThinkingDesc")} scope="Native OMP">
-                    <ToggleSwitch
-                      checked={nativeSettings?.externalThinking ?? false}
-                      onChange={(checked) => patchSettings({ externalThinking: checked })}
+                      options={[
+                        { value: "auto", label: t("settingsConfig.wordCompletionAuto") },
+                        { value: "on", label: t("settingsConfig.wordCompletionOn") },
+                        { value: "off", label: t("settingsConfig.wordCompletionOff") },
+                      ]}
                     />
                   </NativeSetting>
                 </div>
+                )}
+                {generalTab === "shortcuts" && (
+                  <div role="tabpanel" id="general-panel-shortcuts" aria-labelledby="general-tab-shortcuts" style={{ minWidth: 0 }}>
+                    <KeyboardShortcutsConfig />
+                  </div>
+                )}
               </div>
             )}
 
-            {/* API KEYS & PROVIDERS TAB */}
+
             {currentTab === "providers" && (
-              <div role="tabpanel" id="settings-panel-providers" aria-labelledby="settings-tab-providers" className="settings-panel-inner" style={{ display: currentTab === "providers" ? "flex" : "none", width: "100%", maxWidth: 940, minHeight: 0, flexDirection: "column", padding: isMobile ? "16px 14px 32px" : "32px 24px 64px" }}>
+              <div role="tabpanel" id="settings-panel-providers" aria-labelledby="settings-tab-providers" className="settings-panel-inner" style={{ width: "100%", maxWidth: 1080, minHeight: 0, flexDirection: "column", padding: isMobile ? "16px 14px 32px" : "32px 24px 64px" }}>
                 <div style={{ marginBottom: 12 }}>
                   <h2 className="display-serif" style={{ fontSize: 22, fontWeight: 600, margin: 0, color: "var(--text)", letterSpacing: "-0.01em" }}>{t("settingsTabs.providers.label")}</h2>
                   <p className="settings-content-subtitle" style={{ margin: "4px 0 16px", fontSize: 13, color: "var(--text-muted)", lineHeight: 1.45 }}>{t("settingsTabs.providers.description")}</p>
                 </div>
-                <ModelsConfig embedded onClose={onClose} onSaved={onModelsSaved} />
+                <ModelsConfig
+                  embedded onClose={onClose} onSaved={onModelsSaved}
+                  subTab={providersTab}
+                  onSubTabChange={(tab) => { setHighlightId(null); setProvidersTab(tab); }}
+                  defaultsPanel={
+                    <section aria-labelledby="model-defaults-heading" style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                      <h3 id="model-defaults-heading" className="display-serif" style={{ fontSize: 19, margin: 0 }}>{t("settingsConfig.modelDefaults")}</h3>
+                      <p className="settings-content-subtitle" style={{ margin: "0 0 6px" }}>{t("settingsConfig.modelDefaultsDesc")}</p>
+                      {nativeSettingsLoading ? <SettingsTabLoading /> : nativeSettingsError ? (
+                        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                          <Alert variant="error" description={nativeSettingsError} />
+                          <button type="button" className="settings-back" onClick={() => void loadNativeSettings()}>{t("chatWindow.retry")}</button>
+                        </div>
+                      ) : (
+                        <>
+                          <NativeSetting searchId="reasoning" label={t("settingsConfig.reasoning")} description={t("settingsConfig.reasoningDesc")} scope="Native OMP">
+                            <Select
+                              style={selectStyle}
+                              value={nativeSettings?.defaultThinkingLevel ?? "high"}
+                              onChange={(nextValue) => patchSettings({ defaultThinkingLevel: nextValue as NativeSettings["defaultThinkingLevel"] })}
+                              options={["auto", "minimal", "low", "medium", "high", "xhigh", "max"].map((level) => ({ value: level, label: level }))}
+                            />
+                          </NativeSetting>
+                          <NativeSetting searchId="verbosity" label={t("settingsConfig.verbosity")} description={t("settingsConfig.verbosityDesc")} scope="Native OMP">
+                            <Select
+                              style={selectStyle}
+                              value={nativeSettings?.textVerbosity ?? "medium"}
+                              onChange={(nextValue) => patchSettings({ textVerbosity: nextValue as NativeSettings["textVerbosity"] })}
+                              options={[
+                                { value: "low", label: t("settingsConfig.verbosityLow") },
+                                { value: "medium", label: t("settingsConfig.verbosityMedium") },
+                                { value: "high", label: t("settingsConfig.verbosityHigh") },
+                              ]}
+                            />
+                          </NativeSetting>
+                          <NativeSetting searchId="personality" label={t("settingsConfig.personality")} description={t("settingsConfig.personalityDesc")} scope="Native OMP">
+                            <Select
+                              style={selectStyle}
+                              value={nativeSettings?.personality ?? "default"}
+                              onChange={(nextValue) => patchSettings({ personality: nextValue as NativeSettings["personality"] })}
+                              options={[
+                                { value: "default", label: t("settingsConfig.personalityDefault") },
+                                { value: "friendly", label: t("settingsConfig.personalityFriendly") },
+                                { value: "pragmatic", label: t("settingsConfig.personalityPragmatic") },
+                                { value: "none", label: t("settingsConfig.personalityNone") },
+                              ]}
+                            />
+                          </NativeSetting>
+                          <NativeSetting searchId="thinking-blocks" label={t("settingsConfig.thinkingBlocks")} description={t("settingsConfig.thinkingBlocksDesc")} scope="Native OMP">
+                            <ToggleSwitch checked={nativeSettings?.hideThinkingBlock ?? false} onChange={(checked) => patchSettings({ hideThinkingBlock: checked })} />
+                          </NativeSetting>
+                          <NativeSetting searchId="external-thinking" label={t("settingsConfig.externalThinking")} description={t("settingsConfig.externalThinkingDesc")} scope="Native OMP">
+                            <ToggleSwitch checked={nativeSettings?.externalThinking ?? false} onChange={(checked) => patchSettings({ externalThinking: checked })} />
+                          </NativeSetting>
+                        </>
+                      )}
+                    </section>
+                  }
+                />
               </div>
             )}
 
@@ -1528,13 +1615,92 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
               </div>
             )}
 
-            {/* AGENT INTELLIGENCE TAB */}
-            {currentTab === "intelligence" && (
-              <div role="tabpanel" id="settings-panel-intelligence" aria-labelledby="settings-tab-intelligence" className="settings-panel-inner" style={{ padding: isMobile ? "16px 14px 32px" : "32px 24px 64px", gap: 20 }}>
+
+            {/* EXTENSIONS & SKILLS */}
+            {currentTab === "extensions" && (
+              <div role="tabpanel" id="settings-panel-extensions" aria-labelledby="settings-tab-extensions" className="settings-panel-inner" style={{ display: "flex", width: "100%", maxWidth: 940, minHeight: 0, flexDirection: "column", padding: isMobile ? "16px 14px 32px" : "32px 24px 64px", gap: 16 }}>
                 <div style={{ marginBottom: 4 }}>
-                  <h2 className="display-serif" style={{ fontSize: 22, fontWeight: 600, margin: 0, color: "var(--text)", letterSpacing: "-0.01em" }}>{t("settingsTabs.intelligence.label")}</h2>
-                  <p className="settings-content-subtitle" style={{ margin: "4px 0 16px", fontSize: 13, color: "var(--text-muted)", lineHeight: 1.45 }}>{t("settingsTabs.intelligence.description")}</p>
+                  <h2 className="display-serif" style={{ fontSize: 22, fontWeight: 600, margin: 0, color: "var(--text)", letterSpacing: "-0.01em" }}>{t("settingsConfig.extensionsSkills")}</h2>
+                  <p className="settings-content-subtitle" style={{ margin: "4px 0 16px", fontSize: 13, color: "var(--text-muted)", lineHeight: 1.45 }}>{t("settingsConfig.extensionsSkillsDesc")}</p>
                 </div>
+                <NativeSetting searchId="generate-image" label={t("settingsConfig.generateImage")} description={t("settingsConfig.generateImageDesc")} scope="Native OMP">
+                  <ToggleSwitch
+                    checked={nativeSettings?.generate_image?.enabled ?? true}
+                    onChange={(checked) => patchSection("generate_image", { enabled: checked })}
+                  />
+                </NativeSetting>
+                <section id="settings-mcp-servers" aria-labelledby="settings-mcp-heading" style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%", borderTop: "1px solid var(--border)", paddingTop: 18 }}>
+                  <h3 id="settings-mcp-heading" style={{ margin: 0, fontSize: 16, color: "var(--text)" }}>{t("settingsConfig.mcpServers")}</h3>
+                  <p className="settings-content-subtitle" style={{ margin: 0, fontSize: 13, color: "var(--text-muted)" }}>{t("settingsConfig.mcpServersDesc")}</p>
+                  {cwd && (
+                    <div style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%" }}>
+                      <NativeSetting searchId="load-project-mcp-servers" label={t("settingsConfig.loadProjectMcp")} description={t("settingsConfig.loadProjectMcpDesc")} scope="Native OMP">
+                        <ToggleSwitch
+                          checked={nativeSettings?.mcp?.enableProjectConfig ?? true}
+                          onChange={(checked) => patchSection("mcp", { enableProjectConfig: checked })}
+                        />
+                      </NativeSetting>
+                      <NativeSetting searchId="render-mcp-markdown" label={t("settingsConfig.renderMcpMarkdown")} description={t("settingsConfig.renderMcpMarkdownDesc")} scope="Native OMP">
+                        <ToggleSwitch
+                          checked={nativeSettings?.mcp?.renderMarkdownResults ?? true}
+                          onChange={(checked) => patchSection("mcp", { renderMarkdownResults: checked })}
+                        />
+                      </NativeSetting>
+                      <NativeSetting searchId="mcp-resource-updates" label={t("settingsConfig.mcpResourceUpdates")} description={t("settingsConfig.mcpResourceUpdatesDesc")} scope="Native OMP">
+                        <ToggleSwitch
+                          checked={nativeSettings?.mcp?.notifications ?? false}
+                          onChange={(checked) => patchSection("mcp", { notifications: checked })}
+                        />
+                      </NativeSetting>
+                    </div>
+                  )}
+                  <McpConfig cwd={cwd} sessionId={sessionId} />
+                  {!cwd && <p style={{ margin: 0, color: "var(--text-muted)", fontSize: 12 }}>{t("settingsConfig.selectWorkspaceForMcp")}</p>}
+                </section>
+                <section id="settings-skills-library" aria-labelledby="settings-skills-heading" style={{ display: "flex", flexDirection: "column", gap: 12, width: "100%", minWidth: 0, borderTop: "1px solid var(--border)", paddingTop: 18 }}>
+                  <h3 id="settings-skills-heading" style={{ margin: 0, fontSize: 16, color: "var(--text)" }}>{t("settingsConfig.skillsLibrary")}</h3>
+                  <p className="settings-content-subtitle" style={{ margin: 0, fontSize: 13, color: "var(--text-muted)" }}>{t("settingsConfig.skillsLibraryDesc")}</p>
+                  {cwd ? (
+                    <div style={{ display: "flex", flexDirection: "column", minHeight: isMobile ? undefined : 600, minWidth: 0 }}>
+                      <SkillsConfig key={cwd} embedded cwd={cwd} onClose={onClose} />
+                    </div>
+                  ) : (
+                    <p style={{ margin: 0, color: "var(--text-muted)", fontSize: 12 }}>{t("settingsConfig.selectWorkspaceForSkills")}</p>
+                  )}
+                </section>
+              </div>
+            )}
+
+            {currentTab === "agents" && (
+              <div role="tabpanel" id="settings-panel-agents" aria-labelledby="settings-tab-agents" className="settings-panel-inner" style={{ width: "100%", maxWidth: 1080, padding: isMobile ? "16px 14px 32px" : "32px 24px 64px", gap: 16 }}>
+                <div>
+                  <h2 className="display-serif" style={{ fontSize: 22, fontWeight: 600, margin: 0, color: "var(--text)" }}>{t("settingsTabs.agents.label")}</h2>
+                  <p className="settings-content-subtitle" style={{ margin: "4px 0 0", fontSize: 13, color: "var(--text-muted)" }}>{t("settingsTabs.agents.description")}</p>
+                </div>
+                <SettingsSubTabs
+                  id="agents" label={t("settingsTabs.agents.label")}
+                  tabs={AGENT_TABS} value={agentTab}
+                  onChange={(tab) => { setHighlightId(null); setAgentTab(tab); }}
+                  labelFor={(tab) => t(`settingsConfig.agents.${tab}`)}
+                />
+                <div role="tabpanel" id="agents-panel-instructions" aria-labelledby="agents-tab-instructions" hidden={agentTab !== "instructions"} style={{ display: agentTab === "instructions" ? "block" : "none", minWidth: 0 }}>
+                  <AgentInstructionsConfig />
+                </div>
+                <div role="tabpanel" id="agents-panel-subagents" aria-labelledby="agents-tab-subagents" hidden={agentTab !== "subagents"} style={{ display: agentTab === "subagents" ? "block" : "none", minWidth: 0 }}>
+                  <p className="settings-content-subtitle" style={{ margin: "0 0 12px" }}>{t("settingsConfig.agentsDesc")}</p>
+                  <AgentsConfig cwd={cwd} />
+                </div>
+                {(agentTab === "runtime" || agentTab === "approvals") && (
+                  <div role="tabpanel" id={`agents-panel-${agentTab}`} aria-labelledby={`agents-tab-${agentTab}`} style={{ minWidth: 0 }}>
+                    {nativeSettingsLoading ? <SettingsTabLoading /> : nativeSettingsError ? (
+                      <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                        <Alert variant="error" description={nativeSettingsError} />
+                        <button type="button" className="settings-back" onClick={() => void loadNativeSettings()}>{t("chatWindow.retry")}</button>
+                      </div>
+                    ) : (
+                      <>
+                        {agentTab === "runtime" && (
+              <div style={{ display: "flex", flexDirection: "column", gap: 20 }}>
                 {/* Context Compaction Section */}
                 <section style={{ display: "flex", flexDirection: "column", gap: 10, borderTop: "1px solid var(--border)", paddingTop: 18, width: "100%" }}>
                   <div className="settings-section-title" style={{ fontSize: 13.5, fontWeight: 600, margin: 0 }}>{t("settingsConfig.contextCompaction")}</div>
@@ -1573,16 +1739,17 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                   <p style={{ margin: 0, color: "var(--text-muted)", fontSize: 12.5, lineHeight: 1.45 }}>{t("settingsConfig.memoryAutoLearnDesc")}</p>
                   <div style={{ display: "flex", flexDirection: "column", gap: 10, marginTop: 4, width: "100%" }}>
                     <NativeSetting searchId="memory-backend" label={t("settingsConfig.memoryBackend")} description={t("settingsConfig.memoryBackendDesc")} scope="Native OMP">
-                      <select
-                        style={nativeSelectStyle}
+                      <Select
+                        style={selectStyle}
                         value={nativeSettings?.memory?.backend ?? "mnemopi"}
-                        onChange={(e) => patchSection("memory", { backend: e.target.value as NonNullable<NativeSettings["memory"]>["backend"] })}
-                      >
-                        <option value="off" style={nativeOptionStyle}>{t("settingsConfig.memoryBackendOff")}</option>
-                        <option value="local" style={nativeOptionStyle}>{t("settingsConfig.memoryBackendLocal")}</option>
-                        <option value="mnemopi" style={nativeOptionStyle}>{t("settingsConfig.memoryBackendMnemopi")}</option>
-                        <option value="hindsight" style={nativeOptionStyle}>{t("settingsConfig.memoryBackendHindsight")}</option>
-                      </select>
+                        onChange={(nextValue) => patchSection("memory", { backend: nextValue as NonNullable<NativeSettings["memory"]>["backend"] })}
+                        options={[
+                          { value: "off", label: t("settingsConfig.memoryBackendOff") },
+                          { value: "local", label: t("settingsConfig.memoryBackendLocal") },
+                          { value: "mnemopi", label: t("settingsConfig.memoryBackendMnemopi") },
+                          { value: "hindsight", label: t("settingsConfig.memoryBackendHindsight") },
+                        ]}
+                      />
                     </NativeSetting>
                     <NativeSetting searchId="enable-auto-learn" label={t("settingsConfig.enableAutoLearn")} description={t("settingsConfig.enableAutoLearnDesc")} scope="Native OMP">
                       <ToggleSwitch
@@ -1597,15 +1764,16 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                       />
                     </NativeSetting>
                     <NativeSetting searchId="memory-scope" label={t("settingsConfig.memoryScope")} description={t("settingsConfig.memoryScopeDesc")} scope="Native OMP">
-                      <select
-                        style={nativeSelectStyle}
+                      <Select
+                        style={selectStyle}
                         value={nativeSettings?.mnemopi?.scoping ?? "per-project"}
-                        onChange={(e) => patchSection("mnemopi", { scoping: e.target.value as NonNullable<NativeSettings["mnemopi"]>["scoping"] })}
-                      >
-                        <option value="per-project" style={nativeOptionStyle}>{t("settingsConfig.memoryScopePerProject")}</option>
-                        <option value="per-project-tagged" style={nativeOptionStyle}>{t("settingsConfig.memoryScopePerProjectTagged")}</option>
-                        <option value="global" style={nativeOptionStyle}>{t("settingsConfig.memoryScopeGlobal")}</option>
-                      </select>
+                        onChange={(nextValue) => patchSection("mnemopi", { scoping: nextValue as NonNullable<NativeSettings["mnemopi"]>["scoping"] })}
+                        options={[
+                          { value: "per-project", label: t("settingsConfig.memoryScopePerProject") },
+                          { value: "per-project-tagged", label: t("settingsConfig.memoryScopePerProjectTagged") },
+                          { value: "global", label: t("settingsConfig.memoryScopeGlobal") },
+                        ]}
+                      />
                     </NativeSetting>
                     <NativeSetting searchId="recall-on-session-start" label={t("settingsConfig.recallOnSessionStart")} description={t("settingsConfig.recallOnSessionStartDesc")} scope="Native OMP">
                       <ToggleSwitch
@@ -1634,15 +1802,16 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                       />
                     </NativeSetting>
                     <NativeSetting searchId="max-attempts" label={t("settingsConfig.maxAttempts")} description={t("settingsConfig.maxAttemptsDesc")} scope="Native OMP">
-                      <select
-                        style={nativeSelectStyle}
+                      <Select
+                        style={selectStyle}
                         value={String(nativeSettings?.retry?.maxRetries ?? 2)}
-                        onChange={(e) => patchSection("retry", { maxRetries: Number(e.target.value) })}
-                      >
-                        {[0, 1, 2, 3, 4, 5].map((n) => (
-                          <option key={n} value={n} style={nativeOptionStyle}>{n}</option>
-                        ))}
-                      </select>
+                        onChange={(nextValue) => patchSection("retry", { maxRetries: Number(nextValue) })}
+                        options={[
+                          ...[0, 1, 2, 3, 4, 5].map((n) => (
+                          ({ value: n, label: n })
+                        )),
+                        ]}
+                      />
                     </NativeSetting>
                     <NativeSetting searchId="model-fallback" label={t("settingsConfig.modelFallback")} description={t("settingsConfig.modelFallbackDesc")} scope="Native OMP">
                       <ToggleSwitch
@@ -1653,84 +1822,55 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                   </div>
                 </section>
               </div>
-            )}
-
-            {/* EXTENSIONS & TOOLS TAB (MCP, SKILLS, PLUGINS) */}
-            {currentTab === "mcp" && (
-              <div role="tabpanel" id="settings-panel-mcp" aria-labelledby="settings-tab-mcp" className="settings-panel-inner" style={{ display: currentTab === "mcp" ? "flex" : "none", width: "100%", maxWidth: 940, minHeight: 0, flexDirection: "column", padding: isMobile ? "16px 14px 32px" : "32px 24px 64px", gap: 16 }}>
-                <div style={{ marginBottom: 4 }}>
-                  <h2 className="display-serif" style={{ fontSize: 22, fontWeight: 600, margin: 0, color: "var(--text)", letterSpacing: "-0.01em" }}>{t("settingsConfig.extensionsTools")}</h2>
-                  <p className="settings-content-subtitle" style={{ margin: "4px 0 16px", fontSize: 13, color: "var(--text-muted)", lineHeight: 1.45 }}>{t("settingsConfig.extensionsToolsDesc")}</p>
-                  {cwd && <button type="button" className="settings-back ui-focus-ring" onClick={() => handleSelectTab("skills")}>{t("skillsConfig.title")}</button>}
+                        )}
+                        {agentTab === "approvals" && (
+              <section style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                <h3 className="display-serif" style={{ fontSize: 19, margin: 0 }}>{t("settingsConfig.toolSafetyApprovals")}</h3>
+                <p className="settings-content-subtitle" style={{ margin: "0 0 6px" }}>{t("settingsConfig.toolSafetyApprovalsDesc")}</p>
+                <div style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%" }}>
+                  <NativeSetting searchId="approval-mode" label={t("settingsConfig.approvalMode")} description={t("settingsConfig.approvalModeDesc")} scope="Native OMP">
+                    <Select
+                      style={selectStyle}
+                      value={nativeSettings?.tools?.approvalMode ?? "yolo"}
+                      onChange={(nextValue) => patchSection("tools", { approvalMode: nextValue as "always-ask" | "write" | "yolo" })}
+                      options={[
+                        { value: "always-ask", label: t("settingsConfig.alwaysAsk") },
+                        { value: "write", label: t("settingsConfig.allowWrites") },
+                        { value: "yolo", label: t("settingsConfig.autoApproveYolo") },
+                      ]}
+                    />
+                  </NativeSetting>
+                  <NativeSetting searchId="bash-override" label={t("settingsConfig.bashOverride")} description={t("settingsConfig.bashOverrideDesc")} scope="Native OMP">
+                    <Select
+                      style={selectStyle}
+                      value={nativeSettings?.tools?.approval?.bash ?? "prompt"}
+                      onChange={(nextValue) => patchApproval({ bash: nextValue as "allow" | "prompt" | "deny" })}
+                      options={[
+                        { value: "allow", label: t("settingsConfig.allow") },
+                        { value: "prompt", label: t("settingsConfig.alwaysAsk") },
+                        { value: "deny", label: t("settingsConfig.deny") },
+                      ]}
+                    />
+                  </NativeSetting>
+                  <NativeSetting searchId="extension-tool-requests" label={t("settingsConfig.extensionToolRequests")} description={t("settingsConfig.extensionToolRequestsDesc")} scope="Native OMP">
+                    <Select
+                      style={selectStyle}
+                      value={nativeSettings?.tools?.approval?.extension ?? "prompt"}
+                      onChange={(nextValue) => patchApproval({ extension: nextValue as "allow" | "prompt" })}
+                      options={[
+                        { value: "prompt", label: t("settingsConfig.askEveryTime") },
+                        { value: "allow", label: t("settingsConfig.autoApprove") },
+                      ]}
+                    />
+                  </NativeSetting>
                 </div>
-                {cwd && (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 10, width: "100%" }}>
-                    <NativeSetting searchId="load-project-mcp-servers" label={t("settingsConfig.loadProjectMcp")} description={t("settingsConfig.loadProjectMcpDesc")} scope="Native OMP">
-                      <ToggleSwitch
-                        checked={nativeSettings?.mcp?.enableProjectConfig ?? true}
-                        onChange={(checked) => patchSection("mcp", { enableProjectConfig: checked })}
-                      />
-                    </NativeSetting>
-                    <NativeSetting searchId="render-mcp-markdown" label={t("settingsConfig.renderMcpMarkdown")} description={t("settingsConfig.renderMcpMarkdownDesc")} scope="Native OMP">
-                      <ToggleSwitch
-                        checked={nativeSettings?.mcp?.renderMarkdownResults ?? true}
-                        onChange={(checked) => patchSection("mcp", { renderMarkdownResults: checked })}
-                      />
-                    </NativeSetting>
-                    <NativeSetting searchId="mcp-resource-updates" label={t("settingsConfig.mcpResourceUpdates")} description={t("settingsConfig.mcpResourceUpdatesDesc")} scope="Native OMP">
-                      <ToggleSwitch
-                        checked={nativeSettings?.mcp?.notifications ?? false}
-                        onChange={(checked) => patchSection("mcp", { notifications: checked })}
-                      />
-                    </NativeSetting>
+              </section>
+                        )}
+                      </>
+                    )}
                   </div>
                 )}
-                <McpConfig cwd={cwd} sessionId={sessionId} />
-                {!cwd && <p style={{ margin: 0, color: "var(--text-muted)", fontSize: 12 }}>{t("settingsConfig.selectWorkspaceForMcp")}</p>}
-              </div>
-            )}
 
-            {/* SKILLS SUB-PANEL CONTRACT MATCH */}
-            {cwd && currentTab === "skills" && (
-              <div role="tabpanel" id="settings-panel-skills" aria-labelledby="settings-tab-mcp" className="settings-panel-inner" style={{ display: currentTab === "skills" ? "flex" : "none", width: "100%", maxWidth: 940, minHeight: isMobile ? undefined : 600, flexDirection: "column", padding: isMobile ? "16px 14px 32px" : "32px 24px 64px" }}>
-                <SkillsConfig embedded cwd={cwd} sessionId={sessionId} onClose={onClose} />
-              </div>
-            )}
-
-            {/* PLUGINS SUB-PANEL CONTRACT MATCH */}
-            {cwd && currentTab === "plugins" && (
-              <div role="tabpanel" id="settings-panel-plugins" aria-labelledby="settings-tab-plugins" className="settings-panel-inner" style={{ display: currentTab === "plugins" ? "flex" : "none", width: "100%", maxWidth: 940, minHeight: isMobile ? undefined : 600, flexDirection: "column", padding: isMobile ? "16px 14px 32px" : "32px 24px 64px" }}>
-                <PluginsConfig embedded cwd={cwd} sessionId={sessionId} onClose={onClose} onReloaded={onPluginsReloaded} />
-              </div>
-            )}
-
-            {/* AGENTS TAB */}
-            {currentTab === "agents" && (
-              <div
-                role="tabpanel"
-                id="settings-panel-agents"
-                aria-labelledby="settings-tab-agents"
-                className="settings-panel-inner"
-                style={{
-                  display: currentTab === "agents" ? "flex" : "none",
-                  width: "100%",
-                  maxWidth: 940,
-                  minHeight: 0,
-                  flexDirection: "column",
-                  padding: isMobile ? "16px 14px 32px" : "32px 24px 64px",
-                  gap: 16,
-                  ...(highlightId && ["agent-roster", "agent-model", "agent-tools"].includes(highlightId)
-                    ? { border: "1px solid var(--accent)", boxShadow: "0 0 0 2px var(--accent)" }
-                    : {}),
-                }}
-              >
-                <div style={{ marginBottom: 4 }}>
-                  <h2 className="display-serif" style={{ fontSize: 22, fontWeight: 600, margin: 0, color: "var(--text)", letterSpacing: "-0.01em" }}>{t("settingsConfig.agentsTitle")}</h2>
-                  <p className="settings-content-subtitle" style={{ margin: "4px 0 16px", fontSize: 13, color: "var(--text-muted)", lineHeight: 1.45 }}>
-                    {t("settingsConfig.agentsDesc")}
-                  </p>
-                </div>
-                <AgentsConfig cwd={cwd} />
               </div>
             )}
 
@@ -1758,7 +1898,6 @@ export function SettingsConfig({ activeTab, toolCallsDefaultCollapsed, onToolCal
                 <AutoResumeSessionsSetting />
 
                 <AgentEnvSetting />
-
                 {/* ompweb app update card */}
                 <section style={{ padding: 14, border: appUpdateIsAvailable ? "1px solid color-mix(in srgb, var(--accent) 45%, var(--border))" : "1px solid var(--border)", borderRadius: "var(--radius-card)", background: "var(--bg-panel)", display: "flex", flexDirection: "column", gap: 10 }}>
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>

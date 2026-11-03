@@ -43,7 +43,7 @@ export function audioUniformSpectrum(name: string, stereo: readonly number[]) {
   });
 }
 
-type Track = { media: HTMLMediaElement; owned: boolean; sound?: SceneSound; enabled: boolean; volume: number; gain?: GainNode; index: number; timer?: ReturnType<typeof setTimeout>; failed: boolean; ended: () => void; error: () => void };
+type Track = { media: HTMLMediaElement; owned: boolean; sound?: SceneSound; enabled: boolean; volume: number; source?: MediaElementAudioSourceNode; gain?: GainNode; index: number; timer?: ReturnType<typeof setTimeout>; loading?: Promise<void>; needsSource?: boolean; loadVersion: number; failed: boolean; ended: () => void; error: () => void };
 export class WallpaperAudio {
   readonly state: WallpaperAudioState = { ...initial };
   private context?: AudioContext;
@@ -58,17 +58,19 @@ export class WallpaperAudio {
   private bins = new Uint8Array(1024);
   private zeros = Array<number>(128).fill(0);
   private settings: WallpaperAudioSettings;
-  constructor(sounds: SceneSound[], settings: WallpaperAudioSettings, media?: HTMLMediaElement) {
+  private replacement?: Track;
+  private replacementUrl: string | null = null;
+  constructor(sounds: SceneSound[], settings: WallpaperAudioSettings, media?: HTMLMediaElement, replacementUrl?: string | null, private resolveFile?: (file: SceneSound["files"][number]) => Promise<string>) {
     this.settings = settings;
     for (const sound of sounds) {
-      const el = new Audio(); el.preload = "auto"; el.src = sound.files[0].url;
-      this.add(el, true, sound);
+      const el = new Audio(); el.preload = replacementUrl ? "none" : "auto";
+      this.setSource(this.add(el, true, sound));
     }
     if (media) this.add(media, false);
     document.addEventListener("visibilitychange", this.sync);
     window.addEventListener("pointerdown", this.unlock, true);
     window.addEventListener("keydown", this.unlock, true);
-    this.sync();
+    if (replacementUrl) this.setReplacement(replacementUrl); else this.sync();
   }
   private ensureContext() {
     if (this.context) return this.context;
@@ -87,30 +89,70 @@ export class WallpaperAudio {
   }
   private connect(track: Track) {
     const source = this.context!.createMediaElementSource(track.media), gain = this.context!.createGain();
-    track.gain = gain; gain.gain.value = track.volume; source.connect(gain); gain.connect(this.mix!);
+    track.source = source;
+    track.gain = gain; gain.gain.value = this.suppressed(track) ? 0 : track.volume; source.connect(gain); gain.connect(this.mix!);
     track.media.volume = 1; track.media.muted = false;
   }
   private add(media: HTMLMediaElement, owned: boolean, sound?: SceneSound) {
-    const track: Track = { media, owned, sound, enabled: !sound?.startSilent, volume: sound?.volume ?? 1, index: 0, failed: false, ended: () => {
+    const track: Track = { media, owned, sound, enabled: !sound?.startSilent, volume: sound?.volume ?? 1, index: 0, loadVersion: 0, failed: false, ended: () => {
       if (!sound || !track.enabled || sound.mode === "single" || this.disposed) return;
       const advance = () => {
         track.timer = undefined;
         track.index = (track.index + 1) % sound.files.length;
-        media.src = sound.files[track.index].url;
+        this.setSource(track);
         if (this.playing) void this.play(track);
       };
       if (sound.mode === "random") track.timer = setTimeout(advance, 1000 * (sound.minTime + Math.random() * (sound.maxTime - sound.minTime)));
       else advance();
-    }, error: () => { track.failed = true; this.state.error = "Wallpaper audio could not be decoded or loaded"; publish(this); } };
+    }, error: () => { track.failed = true; if (!this.suppressed(track)) { this.state.error = "Wallpaper audio could not be decoded or loaded"; publish(this); } } };
     media.loop = !sound || (sound.mode === "loop" && sound.files.length === 1);
     media.addEventListener("ended", track.ended); media.addEventListener("error", track.error);
     this.tracks.push(track);
+    return track;
+  }
+  private suppressed(track: Track) { return !!this.replacement && track !== this.replacement; }
+  private setSource(track: Track) {
+    const file = track.sound!.files[track.index]; track.loadVersion++; track.loading = undefined;
+    if (!this.resolveFile) { track.media.src = file.url; return; }
+    track.needsSource = true;
+  }
+  private release(track: Track) {
+    track.loadVersion++; clearTimeout(track.timer); track.media.pause(); track.source?.disconnect(); track.gain?.disconnect();
+    track.media.removeEventListener("ended", track.ended); track.media.removeEventListener("error", track.error);
+    if (track.owned) { track.media.removeAttribute("src"); track.media.load(); }
+  }
+  setReplacement(url: string | null) {
+    if (this.disposed || url === this.replacementUrl) return;
+    if (this.replacement) { this.release(this.replacement); this.tracks = this.tracks.filter(t => t !== this.replacement); }
+    this.replacement = undefined; this.replacementUrl = url; this.state.error = "";
+    if (url) {
+      const media = new Audio(); media.preload = "auto"; media.src = url;
+      this.replacement = this.add(media, true);
+      if (this.context) this.connect(this.replacement);
+    }
+    for (const track of this.tracks) {
+      if (track.gain) track.gain.gain.value = this.suppressed(track) ? 0 : track.volume;
+      if (this.suppressed(track)) { clearTimeout(track.timer); track.timer = undefined; track.media.pause(); }
+    }
+    publish(this); this.sync();
   }
   private async play(track: Track) {
-    if (track.failed || !track.enabled || track.timer || (track.sound?.mode === "single" && track.media.ended)) return;
-    try { await track.media.play(); }
+    if (this.suppressed(track) || track.failed || !track.enabled || track.timer || (track.sound?.mode === "single" && track.media.ended)) return;
+    try {
+      const version = track.loadVersion;
+      if (track.needsSource) {
+        track.needsSource = false;
+        const file = track.sound!.files[track.index];
+        track.loading = this.resolveFile!(file).catch(() => file.url).then(url => {
+          if (!this.disposed && version === track.loadVersion && this.tracks.includes(track)) track.media.src = url;
+        });
+      }
+      if (track.loading) await track.loading;
+      if (this.disposed || !this.playing || !track.enabled || this.suppressed(track) || version !== track.loadVersion || !this.tracks.includes(track)) return;
+      await track.media.play(); if (this.disposed || !this.playing || this.suppressed(track) || !this.tracks.includes(track)) track.media.pause();
+    }
     catch (e) {
-      if (this.disposed || !this.playing || (e as Error).name === "AbortError") return;
+      if (this.disposed || !this.playing || this.suppressed(track) || !this.tracks.includes(track) || (e as Error).name === "AbortError") return;
       if ((e as Error).name === "NotAllowedError") this.state.blocked = true;
       else { track.failed = true; this.state.error = `Wallpaper audio: ${(e as Error).message}`; }
       publish(this);
@@ -136,7 +178,7 @@ export class WallpaperAudio {
     const changed = settings.paused !== this.settings.paused;
     this.settings = settings; this.applyVolume(); if (changed) this.sync();
   }
-  get hasSource() { return !!this.capture || this.tracks.some(t => !t.failed && t.enabled); }
+  get hasSource() { return !!this.capture || this.tracks.some(t => !this.suppressed(t) && !t.failed && t.enabled); }
   soundStates() { return this.tracks.filter(t => t.sound).map(t => ({ id: t.sound!.id, playing: !t.media.paused && !t.media.ended && !t.failed, volume: t.volume })); }
   command(command: SceneSoundCommand) {
     if (this.disposed) return;
@@ -144,9 +186,9 @@ export class WallpaperAudio {
     if (!track) throw new Error("Scene sound is unavailable");
     if (command.action === "volume") {
       if (!Number.isFinite(command.value) || command.value! < 0 || command.value! > 1) throw new Error("Invalid sound volume");
-      track.volume = command.value!; if (track.gain) track.gain.gain.value = track.volume;
+      track.volume = command.value!; if (track.gain) track.gain.gain.value = this.suppressed(track) ? 0 : track.volume;
     } else if (command.action === "play") {
-      if (track.media.ended) { track.index = (track.index + 1) % track.sound!.files.length; track.media.src = track.sound!.files[track.index].url; track.media.currentTime = 0; }
+      if (track.media.ended) { track.index = (track.index + 1) % track.sound!.files.length; this.setSource(track); track.media.currentTime = 0; }
       track.enabled = true; this.sync();
     } else if (command.action === "pause" || command.action === "stop") {
       track.enabled = false; clearTimeout(track.timer); track.timer = undefined; track.media.pause();
@@ -192,10 +234,7 @@ export class WallpaperAudio {
     this.disposed = true; this.stopCapture();
     document.removeEventListener("visibilitychange", this.sync);
     window.removeEventListener("pointerdown", this.unlock, true); window.removeEventListener("keydown", this.unlock, true);
-    for (const t of this.tracks) {
-      clearTimeout(t.timer); t.media.pause(); t.media.removeEventListener("ended", t.ended); t.media.removeEventListener("error", t.error);
-      if (t.owned) { t.media.removeAttribute("src"); t.media.load(); }
-    }
+    for (const t of this.tracks) this.release(t);
     void this.context?.close();
     if (active === this) { active = undefined; state = initial; listeners.forEach(fn => fn()); }
   }

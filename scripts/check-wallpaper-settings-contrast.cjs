@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-require-imports -- Node-only browser QA runner. */
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const sharp = require('sharp');
 const assert = require('node:assert/strict');
@@ -86,14 +85,17 @@ async function measure(page) {
             assert.ok(changed.every(x => x.ink === 'global'));
             assert.equal(new Set(changed.map(x => x.color)).size, 1);
           }
-          await page.locator('#settings-tab-wallpapers').click();
+          await page.locator('#settings-tab-appearance').click();
+          await page.locator('#appearance-tab-wallpapers').click();
           const mode = page.getByRole('combobox', { name: '文字配色模式' });
-          await mode.selectOption('fixed');
+          await mode.click();
+          await page.getByRole('option', { name: '固定颜色', exact: true }).click();
           const hex = page.getByRole('textbox', { name: '文字颜色 HEX' });
           await hex.fill('#c7c4dc'); await hex.press('Enter');
           await page.waitForFunction(() => document.documentElement.style.getPropertyValue('--wallpaper-unified-text') === '#c7c4dc');
           for (const choice of ['auto', 'material']) {
-            await mode.selectOption(choice);
+            await mode.click();
+            await page.getByRole('option', { name: choice === 'auto' ? '自动黑白' : 'Material 配色', exact: true }).click();
             await page.waitForFunction(choice => document.documentElement.dataset.wallpaperText === choice, choice);
           }
           await page.waitForTimeout(800);

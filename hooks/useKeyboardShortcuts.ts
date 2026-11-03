@@ -2,15 +2,16 @@
 
 import { useEffect } from "react";
 import { isMacPlatform, navigateShortcutDirection } from "@/lib/navigation-history";
+import { matchesShortcut } from "@/lib/keyboard-shortcuts";
 
 // ---------------------------------------------------------------------------
 // Module-level registry — ChatWindow registers the abort handler here so that
-// the global Esc listener in AppShell can call it without prop-drilling.
+// the global stop shortcut in AppShell can call it without prop-drilling.
 // ---------------------------------------------------------------------------
 let globalAbortHandler: (() => void) | null = null;
 
 /**
- * Register (or clear) the abort handler for the global Esc shortcut.
+ * Register (or clear) the abort handler for the configured stop shortcut.
  * Call this from ChatWindow whenever agentRunning or handleAbort changes.
  */
 export function registerAbortHandler(handler: (() => void) | null): void {
@@ -22,7 +23,7 @@ export function registerAbortHandler(handler: (() => void) | null): void {
 // ---------------------------------------------------------------------------
 
 interface UseGlobalKeyboardShortcutsOptions {
-  /** Called when Ctrl+Alt+N is pressed. Receives current cwd. */
+  /** Called by the new-session shortcut. Receives current cwd. */
   onNewSession?: (cwd: string) => void;
   /**
    * Navigate back/forward through visited chat views. The keystroke is always
@@ -41,17 +42,15 @@ interface UseGlobalKeyboardShortcutsOptions {
 /**
  * Register global keyboard shortcuts for the application.
  *
+ * Uses the shared configurable bindings. Inputs own their context-specific
+ * actions; dialogs, menus and terminals must never abort the agent behind them.
+ *
  * Shortcuts handled here:
  *   Esc          – stop the running agent (via module-level abort handler)
- *   Ctrl+Alt+N   – create a new session in the active project directory
+ *   Ctrl+Alt+N   – create a new session in the active project directory (matchesShortcut)
  *   Ctrl/Cmd+A   – select the active message, transcript, or file contents
  *   ⌘[/⌘] (Alt+←/→ on Windows/Linux, plus the mouse back/forward buttons)
  *                – in-app navigate back/forward (see lib/navigation-history.ts)
- *
- * Note: Esc inside <textarea> or <input> is deliberately NOT handled here.
- * ChatInput manages its own Esc logic (closing slash / @ file menus, stopping
- * the agent when no menu is open) because it needs intimate knowledge of menu
- * state that is local to that component.
  */
 export function useGlobalKeyboardShortcuts(
   options: UseGlobalKeyboardShortcutsOptions,
@@ -156,8 +155,7 @@ export function useGlobalKeyboardShortcuts(
     const onCompositionStart = () => { composing = true; };
     const onCompositionEnd = () => { composing = false; };
     const selectAll = (event: KeyboardEvent) => {
-      if (event.defaultPrevented || event.isComposing || event.keyCode === 229 || event.key.toLowerCase() !== "a"
-        || (!event.ctrlKey && !event.metaKey) || event.altKey || event.shiftKey) return;
+      if (!matchesShortcut("selectAll", event)) return;
 
       const target = event.target;
       if (target instanceof Element && (
@@ -211,13 +209,12 @@ export function useGlobalKeyboardShortcuts(
 
   useEffect(() => {
     const handler = (e: KeyboardEvent): void => {
-      // ---- Esc: stop agent ----
-      if (e.key === "Escape") {
+      if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
+      const target = e.target instanceof Element ? e.target : null;
+      if (target?.closest('[role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"], .settings-view, [data-native-context-menu]')) return;
+      if (matchesShortcut("abort", e)) {
         if (!globalAbortHandler) return;
-
-        const tag = (e.target as HTMLElement)?.tagName;
-        // Let textarea/input handle Esc internally (ChatInput menus / stop).
-        if (tag === "TEXTAREA" || tag === "INPUT") return;
+        if (target?.closest('input, textarea, select, [contenteditable]:not([contenteditable="false"])')) return;
 
         e.preventDefault();
         globalAbortHandler();
@@ -241,8 +238,8 @@ export function useGlobalKeyboardShortcuts(
         }
       }
 
-      // ---- Ctrl+Alt+N: new session ----
-      if (e.key === "n" && e.ctrlKey && e.altKey) {
+      // ---- new session ----
+      if (matchesShortcut("newSession", e)) {
         if (!activeCwd || !onNewSession) return;
         e.preventDefault();
         onNewSession(activeCwd);

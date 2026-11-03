@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { sendAgentCommand } from "@/lib/agent-client";
 import { useI18n } from "@/lib/i18n";
 import { formatCost, formatDuration, formatTokens, fullModel, modelEffort } from "@/lib/subagent-format";
-import { MarkdownBody } from "./MarkdownBody";
+import { FileSessionContext, MarkdownBody } from "./MarkdownBody";
 import { Dialog, DialogContent, DialogTitle, DialogClose } from "./ui/primitives";
 import type { SubagentInfo } from "@/hooks/useAgentSession";
 import { parseSubagentProgress } from "@/lib/subagent-types";
@@ -225,31 +225,33 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
   const open = subagent !== null;
   const fromDisk = subagent?.source === "history";
   const live = !fromDisk;
+  const subagentId = subagent?.id;
+  const subagentSessionFile = subagent?.sessionFile;
 
   const fetchCompletion = useCallback(async (): Promise<{ completion: string | null; truncated: boolean }> => {
-    if (!sessionId || !subagent?.id) throw new Error("No session");
-    const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/subagents/${encodeURIComponent(subagent.id)}?mode=completion`);
+    if (!sessionId || !subagentId) throw new Error("No session");
+    const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/subagents/${encodeURIComponent(subagentId)}?mode=completion`);
     if (res.status === 404) return { completion: null, truncated: false };
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     return await res.json() as { completion: string | null; truncated: boolean };
-  }, [sessionId, subagent?.id]);
+  }, [sessionId, subagentId]);
 
   // Full transcript page (RPC registry first, disk fallback) — mirrors the
   // get_subagent_messages response shape so both sources are interchangeable.
   const fetchTranscriptPage = useCallback(async (startByte: number, preferDisk: boolean): Promise<SubagentMessagesPage> => {
-    if (!sessionId || !subagent?.id) throw new Error("No session");
+    if (!sessionId || !subagentId) throw new Error("No session");
     if (preferDisk) {
-      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/subagents/${encodeURIComponent(subagent.id)}?fromByte=${startByte}`);
+      const res = await fetch(`/api/sessions/${encodeURIComponent(sessionId)}/subagents/${encodeURIComponent(subagentId)}?fromByte=${startByte}`);
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       return await res.json() as SubagentMessagesPage;
     }
     return await sendAgentCommand<SubagentMessagesPage>(sessionId, {
       type: "get_subagent_messages",
-      subagentId: subagent.id,
-      sessionFile: subagent.sessionFile,
+      subagentId,
+      sessionFile: subagentSessionFile,
       fromByte: startByte,
     });
-  }, [sessionId, subagent?.id, subagent?.sessionFile]);
+  }, [sessionId, subagentId, subagentSessionFile]);
 
   const loadTranscriptPage = useCallback(async (startByte: number) => {
     if (!sessionId || !subagent?.id) return;
@@ -399,7 +401,7 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
           ariaLabel={t("subagentTranscript.title")}
           style={{ width: "min(94vw, 920px)", maxWidth: "min(94vw, 920px)" }}
         >
-          <>
+          <FileSessionContext value={sessionId ?? undefined}>
             <div style={{ display: "flex", alignItems: "flex-start", gap: 10, marginBottom: 12 }}>
               <div style={{ minWidth: 0, flex: 1 }}>
                 <DialogTitle style={{ marginBottom: 2, fontSize: 16, lineHeight: 1.3 }}>
@@ -534,7 +536,7 @@ export function SubagentTranscriptDialog({ subagent, sessionId, transcriptVersio
                 )}
               </div>
             )}
-          </>
+          </FileSessionContext>
         </DialogContent>
       )}
     </Dialog>

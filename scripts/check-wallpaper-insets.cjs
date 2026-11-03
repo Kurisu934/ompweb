@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-require-imports -- Node-only browser QA runner. */
 const { chromium } = require(process.env.PLAYWRIGHT_MODULE || 'playwright');
 const sharp = require('sharp');
 const assert = require('node:assert/strict');

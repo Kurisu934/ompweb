@@ -1,5 +1,5 @@
 import type { Link, Nodes, Root } from "mdast";
-import { normalizeFilePathSlashes } from "./file-paths";
+import { normalizeFilePathSlashes, resolveWorkspaceFilePath } from "./file-paths";
 
 function safeDecode(value: string): string {
   try {
@@ -39,14 +39,6 @@ function normalizeLocalPath(filePath: string): string {
   return leadingSlash ? `/${joined}` : joined;
 }
 
-function isPathInside(candidate: string, root: string): boolean {
-  const normalizedCandidate = normalizeLocalPath(candidate).replace(/\/+$/, "");
-  const normalizedRoot = normalizeLocalPath(root).replace(/\/+$/, "");
-  const useCaseInsensitive = /^[a-zA-Z]:\//.test(normalizedCandidate) || /^[a-zA-Z]:\//.test(normalizedRoot);
-  const filePath = useCaseInsensitive ? normalizedCandidate.toLowerCase() : normalizedCandidate;
-  const rootPath = useCaseInsensitive ? normalizedRoot.toLowerCase() : normalizedRoot;
-  return filePath === rootPath || filePath.startsWith(`${rootPath}/`);
-}
 
 function looksLikeRelativeFileHref(href: string): boolean {
   if (href.startsWith("#") || href.startsWith("?")) return false;
@@ -70,19 +62,21 @@ function fileUrlToPath(href: string): string | null {
   }
 }
 
+/** Resolution is not authorization: the file API checks roots/session references. */
 export function resolveLocalFileHref(
   href: string | undefined,
   baseDir?: string,
-  relativeRoot = baseDir,
 ): string | null {
   if (!href) return null;
+  const artifactId = parseArtifactHref(href);
+  if (artifactId) return `artifact://${artifactId}`;
 
   const cleanHref = href.split("#", 1)[0].split("?", 1)[0].trim();
   if (!cleanHref) return null;
 
   let candidate: string | null = null;
-  let candidateKind: "absolute" | "relative" | null = null;
   const decodedHref = safeDecode(cleanHref);
+  if (decodedHref.includes("\0")) return null;
   const isBackslashUncPath = decodedHref.startsWith("\\\\");
   const normalizedHref = normalizeFilePathSlashes(decodedHref);
   const lowerHref = normalizedHref.toLowerCase();
@@ -94,30 +88,42 @@ export function resolveLocalFileHref(
   }
 
   if (lowerHref.startsWith("file:")) {
-    candidate = fileUrlToPath(normalizedHref);
-    candidateKind = candidate ? "absolute" : null;
+    candidate = fileUrlToPath(cleanHref);
   } else if (/^[a-zA-Z]:\//.test(normalizedHref)) {
     candidate = normalizedHref;
-    candidateKind = "absolute";
   } else if (normalizedHref.startsWith("/")) {
     candidate = normalizedHref;
-    candidateKind = "absolute";
   } else if (normalizedHref.startsWith("~/")) {
     // Kept as `~/…`: the file API expands it to the server user's home.
     candidate = normalizedHref;
-    candidateKind = "absolute";
   } else if (baseDir && looksLikeRelativeFileHref(normalizedHref)) {
     candidate = `${normalizeFilePathSlashes(baseDir).replace(/\/+$/, "")}/${normalizedHref}`;
-    candidateKind = "relative";
   }
 
   if (!candidate) return null;
 
   const filePath = stripLineSuffix(normalizeLocalPath(candidate));
-  if (candidateKind === "relative" && relativeRoot && !isPathInside(filePath, relativeRoot)) return null;
   // `~/../x` normalizes out of the home dir; it no longer names a home path.
   if (normalizedHref.startsWith("~/") && !filePath.startsWith("~/")) return null;
   return filePath;
+}
+
+/**
+ * Tool paths are raw filesystem strings, so retain literal %, # and ?.
+ * Strip read selectors at the end, preserving drive letters and filename colons.
+ */
+export function resolveToolFilePath(filePath: string, cwd?: string): string | null {
+  const raw = filePath.trim();
+  const artifactId = parseArtifactHref(raw);
+  if (artifactId) return `artifact://${artifactId}`;
+  const path = raw.replace(/(?::(?:raw|img|conflicts|-\d+|\d+(?:[-+]\d*)?(?:,\d+(?:[-+]\d*)?)*))+$/, "");
+  const resolved = resolveWorkspaceFilePath(path, cwd);
+  return resolved ? normalizeLocalPath(resolved) : null;
+}
+
+/** Persisted omp artifact IDs, optionally followed by a read-tool line selector. */
+export function parseArtifactHref(href: string): string | null {
+  return /^artifact:\/\/([A-Za-z0-9_-]{1,80})(?::(?:raw|[0-9,+-]+)(?::raw)?)?$/.exec(href)?.[1] ?? null;
 }
 
 const PATH_SEGMENT = String.raw`[\w.@+~\[\]-]+`;

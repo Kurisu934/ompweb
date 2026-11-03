@@ -249,8 +249,11 @@ if (passwordHash !== undefined) {
 }
 const passwordEnabled = passwordHash !== undefined;
 
-
 const nextArgs = ["start", "-p", port, "-H", hostname];
+const serverArgs = [
+  nextBin,
+  ...nextArgs,
+];
 const restartDescriptor = JSON.stringify({
   launcherPath: path.join(pkgDir, "bin", "omp-web.js"),
   hostname: String(hostname),
@@ -512,7 +515,7 @@ function trackServer(child) {
 }
 
 function spawnServer() {
-  return trackServer(spawn(process.execPath, [nextBin, ...nextArgs], {
+  return trackServer(spawn(process.execPath, serverArgs, {
     cwd: pkgDir,
     stdio: ["inherit", "pipe", "inherit", "ipc"],
     env: serverEnvironment(),
@@ -595,7 +598,7 @@ async function waitForRestartRequest(control) {
         && Number.isInteger(request.generation)
         && request.generation === currentGeneration + 1) {
         const child = trackServer(spawnRestartGate());
-        if (await acknowledgeAndStartRestart(control, request, child, [nextBin, ...nextArgs])) return;
+        if (await acknowledgeAndStartRestart(control, request, child, serverArgs)) return;
       }
       await new Promise((resolve) => setTimeout(resolve, 100));
     }

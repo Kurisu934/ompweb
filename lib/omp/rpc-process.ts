@@ -1,7 +1,9 @@
 import { type ChildProcessWithoutNullStreams, spawn } from "child_process";
 import { createInterface } from "readline";
 import { sanitizeProjectCommandEnvironment } from "../project-command-env";
+import { preferForOomKill } from "../system-stats";
 import { resolveOmpBin, wrapWindowsScript } from "./omp-cli";
+import { enforceSingleAgentPolicy } from "./single-agent-policy";
 import { encodeRpcCommand, RpcFrameDecoder, type RpcFrameRecord, type RpcProtocolVersion } from "./rpc-frame";
 
 /**
@@ -112,7 +114,7 @@ export class RpcProcess implements RpcTransport {
     this.cwd = options.cwd;
     if (options.onFrame) this.frameListeners.add(options.onFrame);
 
-    const args = ["--mode", "rpc-ui", "--cwd", options.cwd, ...(options.extraArgs ?? [])];
+    const args = enforceSingleAgentPolicy(["--mode", "rpc-ui", "--cwd", options.cwd, ...(options.extraArgs ?? [])]);
     // omp-web ignores named profiles (OMP_PROFILE/PI_PROFILE): strip them so the
     // child resolves the same default agent dir. An explicit options.env entry
     // still wins (used to force the default profile for isolated test runs).
@@ -131,6 +133,9 @@ export class RpcProcess implements RpcTransport {
       // Windows uses taskkill /t instead, so detaching would only create a console.
       detached: process.platform !== "win32",
     });
+    // Agent work (omp and every command it runs, which inherit this) is what
+    // the kernel OOM killer should pick before the omp-web server itself.
+    if (this.child.pid) preferForOomKill(this.child.pid);
 
     // A write queued when the child dies fails both the write callback and an
     // 'error' event on the pipe. Without a listener that event becomes an
@@ -218,6 +223,10 @@ export class RpcProcess implements RpcTransport {
 
   get isAlive(): boolean {
     return !this.exited;
+  }
+
+  get pid(): number | undefined {
+    return this.child.pid;
   }
 
   get exitDetails(): { code: number | null; signal: NodeJS.Signals | null; stderrTail: string } | null {

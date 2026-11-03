@@ -85,6 +85,10 @@ export interface AssistantMessage {
   stopReason?: string;
   errorMessage?: string;
   timestamp?: number;
+  /** Request wall time in ms, from sending the request to the end of the stream (omp). */
+  duration?: number;
+  /** Time to first token in ms (omp; absent on some providers). */
+  ttft?: number;
   usage?: {
     input: number;
     output: number;
@@ -489,6 +493,8 @@ export interface ManagedProject {
   alias?: string;
   /** Explicit sidebar position for registered projects. */
   sortOrder?: number;
+  /** Pinned workspaces render in the sidebar's pinned section, above the rest. */
+  pinned?: boolean;
   /** Workspace-level omp launch configuration. */
   launchConfig?: ProjectLaunchConfig;
 }
@@ -506,6 +512,7 @@ export interface SessionContext {
 /** A host tool call for a session no tab is watching, sent to every open tab. */
 export interface CrossSessionHostToolCall {
   sessionId: string;
+  cwd?: string;
   id: string;
   toolName: string;
   arguments: Record<string, unknown>;

@@ -2,15 +2,18 @@
 import { useEffect, useRef, type CSSProperties } from "react";
 import type { BrowserSceneRenderer } from "@/lib/wallpaper-scene-renderer";
 import { WallpaperAudio, activateWallpaperAudio } from "@/lib/wallpaper-audio";
+import { sceneAudioCache, sceneManifest } from "@/lib/wallpaper-client-cache";
 
-export function SceneWallpaper({ id, paused, volume = 50, muted = false, style, onReady, onError }: {
-  id: string; paused: boolean; volume?: number; muted?: boolean; style: CSSProperties; onReady: () => void; onError: (message: string) => void;
+export function SceneWallpaper({ id, paused, volume = 50, muted = false, bgm = null, style, onReady, onError }: {
+  id: string; paused: boolean; volume?: number; muted?: boolean; bgm?: string | null; style: CSSProperties; onReady: () => void; onError: (message: string) => void;
 }) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const renderer = useRef<BrowserSceneRenderer | null>(null);
   const pause = useRef(paused);
   const audio = useRef<WallpaperAudio | null>(null);
   const audioSettings = useRef({ paused, volume, muted });
+  const replacement = useRef(bgm);
+  useEffect(() => { replacement.current = bgm; audio.current?.setReplacement(bgm); }, [bgm]);
   useEffect(() => { audioSettings.current = { paused, volume, muted }; audio.current?.configure(audioSettings.current); }, [paused, volume, muted]);
   const callbacks = useRef({ onReady, onError });
   useEffect(() => { callbacks.current = { onReady, onError }; }, [onReady, onError]);
@@ -19,16 +22,16 @@ export function SceneWallpaper({ id, paused, volume = 50, muted = false, style, 
     let disposed = false;
     async function load() {
       try {
-        const response = await fetch(`/api/wallpapers/${encodeURIComponent(id)}/scene`, { signal: controller.signal });
-        if (!response.ok) throw new Error((await response.json()).error || "Scene renderer unavailable");
-        const data = await response.json();
+        const [data, { BrowserSceneRenderer }] = await Promise.all([
+          sceneManifest(id, controller.signal),
+          import("@/lib/wallpaper-scene-renderer"),
+        ]);
         if (canvas.current) canvas.current.dataset.compatibilityWarnings = JSON.stringify(data.warnings || []);
-        const { BrowserSceneRenderer } = await import("@/lib/wallpaper-scene-renderer");
         if (disposed || !canvas.current) return;
         const engine = await BrowserSceneRenderer.create(canvas.current, data, controller.signal, message => callbacks.current.onError(message));
         if (disposed) { engine.dispose(); return; }
         renderer.current = engine;
-        audio.current = new WallpaperAudio(data.sounds || [], audioSettings.current);
+        audio.current = new WallpaperAudio(data.sounds || [], audioSettings.current, undefined, replacement.current, sceneAudioCache(controller.signal));
         activateWallpaperAudio(audio.current);
         engine.setAudio(audio.current);
         engine.setPaused(pause.current);

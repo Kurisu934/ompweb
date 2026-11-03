@@ -23,6 +23,7 @@ export function usageTone(percent: number): string {
 export function formatProviderUsageReport(report: ProviderUsageReport, noLimitsLabel: string): string {
   if (report.noLimits) return noLimitsLabel;
   const parts: string[] = [];
+  if (report.pool) parts.push(report.pool);
   if (report.tier) parts.push(report.tier);
   if (report.credits) {
     const { remaining, limit, limitSource } = report.credits;
@@ -55,54 +56,103 @@ export type ProviderUsageState = {
   error: boolean;
 };
 
-export function useProviderUsage(query: string | null, refreshMs?: number): ProviderUsageState & { refresh: () => Promise<boolean> } {
+export function useProviderUsage(query: string | null, refreshMs = 60_000): ProviderUsageState & { refresh: () => Promise<boolean> } {
   const [state, setState] = useState<ProviderUsageState>({ snapshot: null, loading: false, error: false });
-  const refreshRef = useRef<() => Promise<boolean>>(async () => false);
-  const refresh = useCallback(() => refreshRef.current(), []);
+  const refreshRef = useRef<() => Promise<boolean>>(() => Promise.resolve(false));
   useEffect(() => {
     if (query === null) {
       setState({ snapshot: null, loading: false, error: false });
       return;
     }
-    const controller = new AbortController();
+    const polling = Number.isFinite(refreshMs) && refreshMs > 0;
+    let disposed = false;
+    let inFlight = false;
+    // Asked for while a request runs: that answer may predate the change.
+    let forceRefreshPending = false;
+    let refreshWaiters: Array<(success: boolean) => void> = [];
+    let nextRefreshAt = 0;
+    let controller: AbortController | undefined;
+    let refreshTimer: number | undefined;
+    let requestTimer: number | undefined;
+    const canLoad = () => document.visibilityState !== "hidden" && navigator.onLine !== false;
+    const clearRefreshTimer = () => {
+      window.clearTimeout(refreshTimer);
+      refreshTimer = undefined;
+    };
+    const schedule = () => {
+      clearRefreshTimer();
+      if (disposed || inFlight || !polling || !canLoad()) return;
+      refreshTimer = window.setTimeout(() => void load(), Math.max(0, nextRefreshAt - Date.now()));
+    };
     setState({ snapshot: null, loading: true, error: false });
-    let inFlight: Promise<boolean> | undefined;
-    let inFlightForced = false;
-    const load = (force = false): Promise<boolean> => {
-      if (controller.signal.aborted) return Promise.resolve(false);
-      if (inFlight) {
-        return force && !inFlightForced ? inFlight.then(() => load(true)) : inFlight;
-      }
+    const load = async (force = false) => {
+      if (disposed || inFlight || !canLoad()) return;
+      clearRefreshTimer();
+      inFlight = true;
+      if (force) forceRefreshPending = false;
+      const waiters = force ? refreshWaiters.splice(0) : [];
+      let succeeded = false;
+      const request = new AbortController();
+      controller = request;
+      requestTimer = window.setTimeout(() => request.abort(), 35_000);
       if (force) setState((previous) => ({ ...previous, loading: true, error: false }));
-      const params = new URLSearchParams(query);
+      const params = new URLSearchParams(query ?? "");
       if (force) params.set("refresh", "true");
       const queryString = params.toString();
-      inFlightForced = force;
-      inFlight = (async () => {
-        try {
-          const response = await fetch(`/api/provider-usage${queryString ? `?${queryString}` : ""}`, { signal: controller.signal });
-          if (!response.ok) throw new Error(`HTTP ${response.status}`);
-          const snapshot = await response.json() as ProviderUsageSnapshot;
-          if (controller.signal.aborted) return false;
+      try {
+        const response = await fetch(`/api/provider-usage${queryString ? `?${queryString}` : ""}`, {
+          signal: request.signal,
+          cache: "no-store",
+        });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const snapshot = await response.json() as ProviderUsageSnapshot;
+        if (!disposed && !request.signal.aborted) {
           setState({ snapshot, loading: false, error: false });
-          return true;
-        } catch {
-          if (!controller.signal.aborted) setState({ snapshot: null, loading: false, error: true });
-          return false;
-        } finally {
-          inFlight = undefined;
+          succeeded = true;
         }
-      })();
-      return inFlight;
+      } catch {
+        if (!disposed) setState((previous) => ({ ...previous, loading: false, error: true }));
+      } finally {
+        window.clearTimeout(requestTimer);
+        inFlight = false;
+        for (const resolve of waiters) resolve(succeeded);
+        // Count from completion so slow requests neither overlap nor race the server cache TTL.
+        nextRefreshAt = forceRefreshPending ? Date.now() : polling ? Date.now() + refreshMs : Infinity;
+        if (forceRefreshPending && canLoad()) void load(true);
+        else schedule();
+      }
     };
-    refreshRef.current = () => load(true);
+    const resume = () => {
+      if (!canLoad()) clearRefreshTimer();
+      else if (forceRefreshPending || Date.now() >= nextRefreshAt) void load(forceRefreshPending);
+      else schedule();
+    };
     void load();
-    const interval = refreshMs ? window.setInterval(() => void load(), refreshMs) : undefined;
+    refreshRef.current = () => {
+      const { promise, resolve } = Promise.withResolvers<boolean>();
+      refreshWaiters.push(resolve);
+      forceRefreshPending = true;
+      if (!inFlight) void load(true);
+      return promise;
+    };
+    document.addEventListener("visibilitychange", resume);
+    window.addEventListener("focus", resume);
+    window.addEventListener("online", resume);
+    window.addEventListener("offline", resume);
     return () => {
-      refreshRef.current = async () => false;
-      controller.abort();
-      if (interval !== undefined) window.clearInterval(interval);
+      disposed = true;
+      controller?.abort();
+      clearRefreshTimer();
+      window.clearTimeout(requestTimer);
+      document.removeEventListener("visibilitychange", resume);
+      window.removeEventListener("focus", resume);
+      window.removeEventListener("online", resume);
+      window.removeEventListener("offline", resume);
+      for (const resolve of refreshWaiters) resolve(false);
+      refreshWaiters = [];
+      refreshRef.current = () => Promise.resolve(false);
     };
   }, [query, refreshMs]);
+  const refresh = useCallback(() => refreshRef.current(), []);
   return { ...state, refresh };
 }

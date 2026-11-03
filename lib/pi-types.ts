@@ -4,6 +4,8 @@ import type { SkillDiagnosticsSnapshot } from "./skill-diagnostics";
 // Bun-only, so these types are hand-maintained against
 // oh-my-pi/packages/coding-agent/src/modes/rpc/rpc-types.ts (protocol v1).
 
+import type { GenerationSpeedSample } from "./generation-speed";
+
 export interface ContextUsage {
   percent: number | null;
   contextWindow: number;
@@ -62,6 +64,13 @@ export interface QueuedMessages {
   steering: string[];
   followUp: string[];
 }
+
+/** Server-observed enqueue times aligned with each OMP-owned queue list. */
+export interface QueuedMessageTimestamps {
+  steering: number[];
+  followUp: number[];
+}
+
 
 /** Mirror of omp's RpcSessionState (the raw `get_state` payload). */
 export interface RpcSessionState {
@@ -123,6 +132,8 @@ export interface WebSessionState {
   messageCount: number;
   queuedMessageCount: number;
   queuedMessages: QueuedMessages;
+  /** Server-observed queue item times, aligned with `queuedMessages`. */
+  queuedMessageTimestamps: QueuedMessageTimestamps;
   contextUsage: ContextUsage | null;
   systemPrompt: string;
   thinkingLevel: string;
@@ -175,8 +186,12 @@ export interface BashResultInfo {
 }
 
 export interface GenerationSpeedInfo {
+  /** omp's live get_state.tokensPerSecond while a run is active. */
   current: number | null;
+  /** Mean of the last GENERATION_SPEED_AVERAGE_WINDOW samples. */
   average: number | null;
+  /** Completed requests in session order (lib/generation-speed.ts). */
+  samples: GenerationSpeedSample[];
 }
 
 export interface SessionStatsInfo {

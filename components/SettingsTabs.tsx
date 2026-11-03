@@ -1,25 +1,21 @@
 "use client";
 
 import { useI18n } from "@/lib/i18n";
-import { BarChart3, Bell, Bot, Cable, Cpu, Image, KeyRound, PawPrint, RefreshCw, Settings2, ShieldCheck, Sparkles } from "lucide-react";
+import { BarChart3, Bell, Bot, Cable, KeyRound, Palette, RefreshCw, Settings2 } from "lucide-react";
 import type { ComponentType, CSSProperties } from "react";
 
 export type SettingsTab =
   | "general"
-  | "pets"
-  | "wallpapers"
-  | "safety"
-  | "models"
+  | "appearance"
   | "providers"
   | "usage"
-  | "intelligence"
   | "agents"
   | "extensions"
-  | "mcp"
-  | "skills"
-  | "plugins"
   | "notifications"
   | "system";
+
+export type AppearanceTab = "display" | "wallpapers" | "pets" | "motion";
+export type ProvidersTab = "connected" | "custom" | "system" | "defaults";
 
 export interface TabItem {
   id: SettingsTab;
@@ -30,23 +26,21 @@ export interface TabItem {
 }
 
 export const SETTINGS_CATEGORIES: TabItem[] = [
-  { id: "general", label: "Interface & Behavior", description: "UI preferences, completion sound, submission mode", Icon: Settings2 },
-  { id: "pets", label: "Pets", description: "Codex pet library and animation", Icon: PawPrint },
-  { id: "wallpapers", label: "Wallpapers", description: "Images, videos and glass", Icon: Image },
-  { id: "safety", label: "Safety & Approvals", description: "Tool safety rules, YOLO mode, terminal permissions", Icon: ShieldCheck },
-  { id: "models", label: "AI Model Defaults", description: "Reasoning budget, verbosity, personality, scratchpad", Icon: Cpu },
-  { id: "providers", label: "API Keys & Providers", description: "Connected OAuth accounts, API keys, and model registry", Icon: KeyRound },
+  { id: "general", label: "Interface & Behavior", description: "UI preferences, keyboard shortcuts, and submission behavior", Icon: Settings2 },
+  { id: "appearance", label: "Appearance & Personalization", description: "Themes, wallpapers, glass, pets, motion, and text size", Icon: Palette },
+  { id: "providers", label: "Models & Providers", description: "Accounts, model registry, and global model defaults", Icon: KeyRound },
   { id: "usage", label: "Usage", description: "Tokens, costs, cache analytics, and model breakdown", Icon: BarChart3 },
-  { id: "intelligence", label: "Agent & Intelligence", description: "Advisor, memory, autolearn, compaction and retry", Icon: Sparkles },
-  { id: "agents", label: "Agents", description: "Task agents, model settings, and tool policy", Icon: Bot },
-  { id: "mcp", label: "Extensions & Tools", description: "MCP servers, managed skills, and OMP plugins", Icon: Cable },
+  { id: "agents", label: "Agents & Policies", description: "Instructions, subagents, context, memory, retries, and tool approvals", Icon: Bot },
+  { id: "extensions", label: "Extensions & Skills", description: "Built-in image generation, MCP servers, and the Skills library", Icon: Cable },
   { id: "notifications", label: "Notifications", description: "Desktop and mobile notifications for your sessions", Icon: Bell },
   { id: "system", label: "System & Updates", description: "App updates, runtime version, and active session restart", Icon: RefreshCw },
 ];
-
-export const getNormalizedActive = (tab: SettingsTab): SettingsTab => {
-  if (tab === "skills" || tab === "plugins" || tab === "extensions") return "mcp";
-  return tab;
+export const getNormalizedActive = (tab: string): SettingsTab => {
+  if (tab === "skills" || tab === "plugins" || tab === "mcp") return "extensions";
+  if (tab === "wallpapers" || tab === "pets") return "appearance";
+  if (tab === "models") return "providers";
+  if (tab === "intelligence") return "agents";
+  return tab as SettingsTab;
 };
 
 export function SettingsTabs({

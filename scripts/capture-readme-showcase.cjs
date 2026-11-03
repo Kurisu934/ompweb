@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-require-imports -- Node-only documentation capture. */
 const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
@@ -84,6 +83,7 @@ async function setup(page, artwork, theme = 'dark') {
     if (p === `/api/wallpapers/${wid}/media`) return route.fulfill({ contentType: 'image/png', body: artwork });
     if (p === '/api/wallpapers') return reply({ wallpapers: [{ id: wid, title: 'Alpine dusk (demo)', kind: 'image', source: 'folder', preview: true }], roots: [], warnings: [] });
     if (p === '/api/wallpapers/scene-status') return reply({ available: true });
+    if (p === '/api/wallpapers/bgm') return reply({ tracks: [] });
     if (p === '/api/provider-usage') return reply({ generatedAt: Date.now(), reports: [{ provider: 'charm-hyper', accountLabel: 'Demo account', accountIndex: 0, credits: { remaining: 175, limit: 250, limitSource: 'fallback', percent: 30 } }] });
     if (p === '/api/worktrees') return reply({ worktrees: [] });
     if (p === '/api/git/status') return reply({ isGitRepo: false, files: [] });
@@ -134,7 +134,8 @@ async function capture(page, name) {
     await page.getByRole('textbox').filter({ visible: true }).first().waitFor();
     await page.waitForFunction(() => [...document.querySelectorAll('textarea')].some(el => el.value === 'A synthetic transcription for the public demo.'));
     await page.locator('.sidebar-settings-row').click();
-    await page.locator('#settings-tab-wallpapers').click();
+    await page.locator('#settings-tab-appearance').click();
+    await page.locator('#appearance-tab-wallpapers').click();
     await page.locator('.wallpaper-thumbnail img').waitFor();
     await page.waitForTimeout(800);
     await capture(page, 'wallpaper-settings.png');

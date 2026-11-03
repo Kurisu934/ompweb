@@ -1,4 +1,4 @@
-import { getExitedRpcSessions, getRunningRpcSessions, subscribeHostToolCalls, subscribeRunningSessions } from "@/lib/rpc-manager";
+import { getAttentionItems, getExitedRpcSessions, getRunningRpcSessions, subscribeHostToolCalls, subscribeRunningSessions } from "@/lib/rpc-manager";
 import { isValidNotificationId } from "@/lib/notification-events";
 import { attachNotificationClient } from "@/lib/notification-hub";
 import { subscribeSessionFileChanges } from "@/lib/session-watcher";
@@ -74,12 +74,13 @@ export async function GET(req: Request) {
 
       // Subscribe BEFORE taking the initial snapshot so no state change can slip
       // through the gap between snapshot and subscription.
-      unsubscribeRunning = subscribeRunningSessions(({ ids, runningSessions, exitedSessions, refreshSessionList }) => {
+      unsubscribeRunning = subscribeRunningSessions(({ ids, runningSessions, exitedSessions, attention, refreshSessionList }) => {
         encode({
           type: "running",
           runningSessionIds: ids,
           runningSessions,
           exitedSessions,
+          attention,
           ...(refreshSessionList ? { refreshSessionList: true } : {}),
         });
       });
@@ -99,6 +100,7 @@ export async function GET(req: Request) {
         type: "running",
         runningSessionIds: initialRunning.map((s) => s.id),
         runningSessions: initialRunning,
+        attention: getAttentionItems(),
         exitedSessions: getExitedRpcSessions(),
       });
       // Heartbeat to keep the connection alive through proxies/timeouts.

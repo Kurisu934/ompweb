@@ -8,19 +8,8 @@ const jiti = createJiti(import.meta.url, {
   jsx: { runtime: "automatic" },
   tsconfigPaths: true,
 });
-const { SettingsTabs, SETTINGS_CATEGORIES } = await jiti.import("./SettingsTabs.tsx");
+const { SettingsTabs } = await jiti.import("./SettingsTabs.tsx");
 
-test("horizontal settings tabs expose every category description", () => {
-  const html = renderToStaticMarkup(React.createElement(SettingsTabs, {
-    active: "general",
-    onSelect: () => {},
-    layout: "horizontal",
-  }));
-
-  for (const category of SETTINGS_CATEGORIES) {
-    assert.ok(html.includes(`>${category.description}<`), `description is not visibly rendered for ${category.id}`);
-  }
-});
 
 test("settings tabs render attention indicator when tab needs attention", () => {
   const verticalHtml = renderToStaticMarkup(React.createElement(SettingsTabs, {

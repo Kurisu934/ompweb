@@ -1,5 +1,8 @@
 # Local wallpapers
 
+Open **Settings → Appearance & Personalization → Wallpapers & Glass**, or use
+the topbar's **Wallpaper settings** shortcut to open that subtab directly.
+
 The Wallpapers settings page supports local PNG, JPEG, WebP, GIF, AVIF, MP4 and
 WebM assets. Browser codec support still applies. Wallpapers default to playing
 with 50% volume; existing saved pause and mute choices are preserved. Video
@@ -17,6 +20,20 @@ requests or render sessions. Only cropped axes are adjustable; contain mode
 keeps the complete wallpaper. Crop position persists on reload in this browser
 and resets to center when a different wallpaper is selected. Existing saved
 preferences default to centered positioning. Source files are never cropped.
+
+The library combines title search, wallpaper type and orientation filters with
+natural name, added-time and modified-time sorting (each ascending/descending).
+The initial order is newest added first. **Auto** shows landscape wallpapers
+on desktop and portrait wallpapers below the app's mobile breakpoint; explicit
+landscape, portrait, square, unknown-size and all-direction choices override it.
+Search and filters compose, and filter/sort choices persist in this browser.
+Dimensions come from scene projection metadata or media display dimensions,
+including image EXIF and MP4 rotation. Package and video metadata reads skip
+large media payloads. Web wallpapers and unrecognized dimensions remain
+available through **Unknown size** or **All directions**. Added time uses the
+source file's filesystem creation time (modification time when unavailable);
+modified time uses its filesystem modification time. Copying files between
+filesystems can therefore change their apparent added order.
 
 Import uploads are streamed into `<agent-dir>/web-wallpapers/imports` with a
 512 MiB limit. Larger files can be read in place by adding their server folder.
@@ -52,17 +69,57 @@ the same `guardApiRequest` origin/session check directly. Other endpoints use
 the proxy normally. Assets are served only by catalog ID, with path containment,
 media type/signature checks and HTTP range support. Application wallpapers
 are not executed. Supported SceneScript bindings run in a bounded QuickJS WASM
-guest, never as host JavaScript. Scene resources are parsed only after selection
-and unsupported operations produce an explicit error.
+guest, never as host JavaScript. Listing reads bounded dimension metadata;
+full scene compilation starts after selection. Unsupported operations produce
+an explicit error.
 
 ## Browser-native scenes
 
 Scenes no longer use the Windows capture helper or frame streaming. The server
 parses `scene.pkg` (or a loose scene), decodes full-resolution TEX textures and
 serves a scene manifest plus content-addressed PNG assets and original embedded
-MP4 texture payloads (with HTTP range support). The browser
+MP4, WebM and Matroska texture payloads (with HTTP range support). The browser
 downloads them once and runs a Three.js/WebGL renderer on its own GPU. Animation
 does not make frame requests. Legacy POST stream requests return HTTP 410.
+
+Images and fonts load with bounded concurrency. Embedded videos are requested
+only when a visible layer, an effect input, a particle, or an explicit play
+command needs them. Time-of-day scenes therefore do not preload every 4K clip
+before their first frame. A first-time clip switch retains the last complete
+frame until the new clip can render; subsequent switches reuse the loaded media.
+Video responses yield bounded chunks rather than copying a whole clip per range
+request. TTF/OTF transfers use negotiated, cached, lossless gzip compression.
+These changes do not resize or transcode any video or image asset.
+
+### Persistent scene caches
+
+The server saves compiled manifests, converted textures, extracted original
+media and compressed fonts under `~/.omp/agent/web-wallpapers/scene-cache`.
+Subsequent loads, including after a server restart, reuse these files instead
+of unpacking and converting the original project again. Source file changes,
+scene property overrides and compiler cache revisions invalidate the result.
+Incomplete or damaged cache entries are rebuilt automatically. The default
+disk budget is 4096 MiB; `OMP_WEB_WALLPAPER_CACHE_MB` changes it (`0` disables it).
+Least-recently-used generated scenes are evicted when space is needed. A full
+or unwritable cache falls back to normal rendering; original projects are untouched.
+
+Each browser also keeps up to 256 MiB of scene resources in IndexedDB, including
+images, fonts, the requested video clips and native scene audio. This works on
+plain HTTP LAN addresses as well as HTTPS. After closing and reopening the
+browser, complete cached resources use local Blob URLs instead of downloading
+again. A small conditional manifest request still checks for server-side changes.
+Initial video/audio playback streams normally; after a short delay, a background
+download stores a complete local copy, reusing the browser HTTP cache where
+possible. An initial visit can therefore transfer extra bytes. Cancelled partial
+downloads are not saved, and individual files larger than the local budget are
+not persisted. Videos for unused times of day are not eagerly downloaded.
+
+Browser cache storage is per site address: a hostname, IP address or port change
+uses a different cache. Private browsing, OS storage pressure or clearing site
+data may remove it. This is not an offline copy of the entire app. Browser GPU
+textures and shader programs still need to be created for each renderer context;
+there is no portable GPU binary cache. These persistent caches currently cover
+browser-native scenes, not web wallpapers or the custom BGM library.
 
 The canvas keeps the original scene aspect ratio for the existing crop controls.
 Its resolution matches the displayed device pixels (including offscreen cropped
@@ -85,7 +142,8 @@ effect/workshop shaders, ordered passes and named/downsampled framebuffers;
 masks and GLSL uniform/combo parameters;
 camera parallax, shake and thresholded bloom. Sprite particles support lifetime,
 size, color, velocity, rotation, alpha fades, turbulence, position/alpha/size
-oscillation, control-point attraction, size changes and sprite/rope trails.
+oscillation, control-point attraction, sequence placement around control points,
+vortex forces, size changes and sprite/rope trails.
 Child systems support static, follow, spawn and death events, independent
 instance quotas, probability, offsets, 2D rotation/scale and one-shot bursts.
 Instances of the same child definition share an instanced draw. Supported
@@ -93,6 +151,25 @@ normal-map refraction samples the previously drawn framebuffer locally.
 Texture formats: RGBA8888, RG88, R8, DXT1/3/5 and encoded image payloads;
 single-image sprite atlases also animate image layers. Original shader
 resources are adapted to GLSL ES rather than substituted with CSS motion.
+Shader adaptation also handles HLSL floating remainder, scalar/vector assignment
+and function-argument conversions, plus narrower fragment inputs matched to
+their vertex outputs. Program-link failures include the linker diagnostic.
+
+The newly added Qingxiao, Phoebe, beach-party, Wuthering Waves 86/187, MyGO and
+Elaina scenes were checked in the browser. Qingxiao's embedded Matroska clip
+plays through the browser decoder. Elaina loads its active time-of-day 4K clip
+on demand; its system-media widget retains the existing unavailable-metadata
+warning, and the authored `myLayer.visible` script using `scene.on(...)`
+retains an explicit unsupported-script warning. The scene and its active video
+continue rendering.
+
+PKGV package versions 1–24 use bounded directory parsing, including UTF-8 names,
+path containment, duplicate detection, and payload bounds. Background-copy
+composition layers (including the default when `copybackground` is omitted)
+sample the already-rendered scene through the existing projected framebuffer
+path and then run their authored effect passes. Explicit `copybackground: false`
+retains isolated child composition; post-effects on that isolated mode remain
+unsupported.
 
 Scene user controls can be overridden locally without changing workshop files.
 Create `~/.omp/agent/web-wallpapers/scene-properties/<wallpaper-id>.json` with
@@ -102,8 +179,8 @@ from `project.json`'s `general.properties`. Only declared properties with matchi
 value types are applied, both to direct bindings and `applyUserProperties`.
 Scripts and animation wrappers are retained. These server-local settings apply
 to all OMPWeb clients using that wallpaper, not to Wallpaper Engine itself.
-Restart OMPWeb to apply changes immediately; otherwise the scene cache expires
-after five minutes and the client must reload the wallpaper.
+Reload the wallpaper to apply changes; manifest requests validate the source and
+override files even when a persistent cache exists. No server restart is required.
 
 When camera parallax is enabled, layer anchors receive the native static offset
 `(origin - sceneCenter) * cameraAmount * layerDepth` independently on each axis,
@@ -111,6 +188,11 @@ before mouse/shake displacement. This does not scale the layer geometry and
 still applies when mouse influence is zero. It prevents small animated overlays
 from drifting away from centered full-scene layers (for example, animated eyes).
 The implementation is parameter-based, not a per-wallpaper pixel correction.
+Parented layers that inherit parallax also share their ancestor's parallax
+anchor. Their local offsets remain fixed as the parent moves, including
+nested rotated/scaled hierarchies. An explicitly configured child depth starts
+its own anchor for its descendants. This keeps the Aemeath(R-18) eyes on the
+face while preserving their bone animation and authored eye effects.
 Property scripts support origin, scale, angle, color, alpha, visibility and
 parallax depth. Vec2/Vec3 layer values are copied on read/write; script angles
 use degrees and scene JSON angles use radians. A shared isolated runtime
@@ -161,13 +243,33 @@ with no host DOM, network, filesystem or module loader. Date and saved script
 properties are available. Other SceneScript APIs are not generally implemented.
 Text effects use the same render-target pipeline as image effects.
 
-MDLV0013 supports static triangle meshes and weighted bone animation with one
-non-additive clip, loop/once playback, speed and blend weight. MDLV0019/0023,
-clipping metadata and layered/additive clips remain unsupported. Image/text
-parenting uses composed local affine transforms, preserving rotation, shear,
-negative scale, inherited visibility and parallax depth. Invalid/cyclic parent
-graphs fail explicitly. Parented particle systems and bone attachments remain
-unsupported. Timeline-bound properties retain their saved values with warnings.
+MDLV0013 supports static triangle meshes and weighted bone animation.
+MDLV0019/0023 decode extended normal/tangent vertices, both unskinned (48-byte)
+and skinned (80-byte), plus the supported skeleton, attachment, clipping and
+layered/additive animation sections. The unskinned MDLV0023 path validates its
+empty edit/group/clipping metadata. Spring-enabled bones use an analytically
+integrated damped-spring simulation with authored translation/rotation axes,
+stiffness, friction, inertia, gravity, displacement and angular limits. Animated
+parent bones excite secondary motion. Scripted bone dragging updates the
+simulation pose; releasing it restores spring motion. SceneScript supports
+`applyBonePhysicsImpulse` and `resetBonePhysicsSimulation`, including a named
+bone or all physics bones. Impulses are consumed once and transformed from
+world space; pause preserves state and timeline discontinuities reset it.
+This browser implementation targets these spring behaviors; native IK and
+pixel-identical proprietary-engine physics remain outside its compatibility
+contract.
+
+The two Aemeath projects exercise these paths: the eye-tracking project uses
+an unskinned MDLV0023 mesh, while the other uses PKGV0024, skinned animation and
+background composition effects. Browser verification covers loading,
+pointer-driven changes, advancing animation frames, shader linking, and actual
+bone displacement followed by spring return after releasing a drag.
+
+Image/text parenting uses composed local affine transforms, preserving rotation,
+shear, negative scale, inherited visibility and parallax depth. Invalid/cyclic
+parent graphs fail explicitly. Parented particle systems remain unsupported.
+Supported timeline bindings animate; unsupported bindings retain saved values
+with warnings.
 System media metadata is unavailable; media widgets receive a stopped state,
 not fabricated track metadata or playback events.
 Connected-particle `rope` ribbons and per-particle `ropetrail` are distinct;
@@ -292,6 +394,41 @@ accent buttons preserve their contrasting foreground. Readability over arbitrary
 transparent wallpaper backgrounds still depends on glass and adaptive text.
 Disabling the checkbox or wallpaper, load failure and unmount remove the palette
 overrides and restore the selected theme. The preference is local to each browser.
+
+## Custom background music
+
+The wallpaper settings include a BGM library. Import an audio or video file and
+select it to replace the wallpaper soundtrack. Video imports keep only the first
+audio track; no video is played or retained in the BGM cache. Supported audio
+codecs are copied without re-encoding; other codecs are converted to AAC. Limits
+are 512 MiB per upload and four hours per track, with two concurrent extractions.
+Playlists and remote media URLs are not accepted.
+
+Install FFmpeg and ffprobe on the server, including inside a container when
+applicable. Both must be on PATH, or use `OMP_WEB_FFMPEG_BIN` and
+`OMP_WEB_FFPROBE_BIN` to set executable paths. No audio leaves the OMPWeb server.
+Completed imports live under the agent directory's `web-wallpapers/bgm/`, keyed
+by the original file's SHA-256. Selecting a cached track requires no extraction;
+uploading identical bytes also reuses that cache. Original videos are not kept.
+Deleting a cached track affects all browsers using that server but never deletes
+the source file on the user's computer. Back up this directory to preserve BGM
+when moving the server.
+
+The choice is persisted per browser and works with image, video, web and scene
+wallpapers. Selecting the original soundtrack restores native audio. Volume,
+mute and pause use the wallpaper toolbar, and scene audio-reactive effects use
+the replacement track. Browser autoplay rules still apply: a click or keypress
+may be needed to unlock sound after opening the page.
+
+## Long-running scene scripts
+
+Property scripts retain the 8 ms frame budget and bounded QuickJS sandbox.
+An interrupted frame restores the last validated layer state and retries on the
+next frame. A binding that repeatedly times out is disabled with a compatibility
+warning. An unrecoverable guest failure stops property scripting, not the whole
+renderer: the last valid picture, native videos and particles remain available.
+Script-driven transitions may then stay at their last state until reloading the
+wallpaper. GPU/context failures are separate and are not hidden by this fallback.
 
 ## Safe deployment
 

@@ -1,9 +1,11 @@
 "use client";
+import { matchesShortcut } from "@/lib/keyboard-shortcuts";
 
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { Command } from "cmdk";
-import { Check, MessageSquare, Monitor, Moon, Plus, Sparkles, Sun } from "lucide-react";
+import { Check, MessageSquare, Monitor, Moon, Plus, Sparkles, StickyNote, Sun } from "lucide-react";
+import { openMemos } from "@/lib/memos";
 import type { SessionInfo } from "@/lib/types";
 import { useI18n } from "@/lib/i18n";
 import { ALL_THEMES, useTheme } from "@/hooks/useTheme";
@@ -62,7 +64,7 @@ export const CommandPalette = memo(function CommandPalette({ onSelectSession, on
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+      if (matchesShortcut("commandPalette", event)) {
         event.preventDefault();
         setOpen((value) => !value);
       }
@@ -100,6 +102,7 @@ export const CommandPalette = memo(function CommandPalette({ onSelectSession, on
             {sessions.map((session) => <Command.Item key={session.id} value={`${session.name ?? session.id} ${session.cwd}`} onSelect={() => choose(() => onSelectSession(session))} style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 10px", borderRadius: "var(--radius-control)", color: "var(--text)", cursor: "pointer" }}><MessageSquare size={15} color="var(--accent)" /><span style={{ flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{session.name || session.id}</span><span style={{ color: "var(--text-dim)", fontSize: 11 }}>{relativeTime(session.modified, locale)}</span></Command.Item>)}
           </Command.Group>
           <Command.Group heading={t("commandPalette.actions")}>
+            <Command.Item value={t("memos.title")} onSelect={() => choose(openMemos)} style={{ display: "flex", gap: 10, padding: "9px 10px", borderRadius: "var(--radius-control)", color: "var(--text)", cursor: "pointer" }}><StickyNote size={15} color="var(--accent)" />{t("memos.title")}</Command.Item>
             <Command.Item value={t("commandPalette.newSession")} onSelect={() => choose(onNewSession)} style={{ display: "flex", gap: 10, padding: "9px 10px", borderRadius: "var(--radius-control)", color: "var(--text)", cursor: "pointer" }}><Plus size={15} color="var(--accent)" />{t("commandPalette.newSession")}</Command.Item>
             <Command.Item value={t("commandPalette.toggleTheme")} onSelect={() => choose(toggleTheme)} style={{ display: "flex", gap: 10, padding: "9px 10px", borderRadius: "var(--radius-control)", color: "var(--text)", cursor: "pointer" }}>{isDark ? <Sun size={15} color="var(--accent)" /> : <Moon size={15} color="var(--accent)" />}{t("commandPalette.toggleTheme")}</Command.Item>
           </Command.Group>

@@ -75,6 +75,7 @@ test("attachment-only drafts stay protected across live draft-key changes and re
     ref.current.addFiles([new File(["important attachment"], "notes.txt", { type: "text/plain" })]);
   });
   await waitFor(() => assert.equal(getDraft("draft-a")?.files[0]?.content, "important attachment"));
+  assert.ok(document.querySelector(".composer-file-attachment.wallpaper-surface"));
   assert.equal(warnsOnExit(), true);
   rerender(React.createElement(Shell, { session: "draft-b" }));
   assert.equal(screen.getByRole("textbox").value, "");

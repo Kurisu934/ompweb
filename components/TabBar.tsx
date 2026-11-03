@@ -1,9 +1,12 @@
 "use client";
 
 import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
-import { Bell, Folder, GitBranch, GitFork, X } from "lucide-react";
+import { Activity, AtSign, Bell, Copy, Download, Folder, GitBranch, GitFork, LocateFixed, SquareTerminal, X } from "lucide-react";
 import { useI18n } from "@/lib/i18n";
+import { contributeContextMenu, type ContextMenuItem } from "@/lib/context-menu";
 import { getFileIcon } from "./FileIcons";
+import { useShortcuts } from "@/hooks/useShortcuts";
+import { shortcutAria, shortcutHint } from "@/lib/keyboard-shortcuts";
 
 export interface Tab {
   id: string;
@@ -35,6 +38,21 @@ interface Props {
   /** Pinned Worktrees tab rendered after Git. */
   worktreesSelected?: boolean;
   onSelectWorktrees?: () => void;
+  /** Pinned Terminal tab rendered after Git. */
+  terminalSelected?: boolean;
+  onSelectTerminal?: () => void;
+  /** Pinned System (resource dashboard) tab rendered after Terminal. */
+  systemSelected?: boolean;
+  onSelectSystem?: () => void;
+  /** Amber dot on the System tab: available memory is in the warning band. */
+  systemWarning?: boolean;
+  /** File-tab right-click actions; each acts on the tab that was clicked. */
+  onCloseOtherTabs?: (id: string) => void;
+  onCloseAllTabs?: () => void;
+  onMentionTab?: (id: string) => void;
+  onCopyTabPath?: (id: string) => void;
+  onRevealTab?: (id: string) => void;
+  onDownloadTab?: (id: string) => void;
 }
 const badgeStyle = (color: string) => ({
   display: "inline-flex",
@@ -123,8 +141,9 @@ function PinnedTab({ id, panelId, label, title, icon, selected, badge, badgeColo
   );
 }
 
-export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, explorerSelected = false, onSelectExplorer, explorerBadge = 0, gitSelected = false, onSelectGit, gitBadge = 0, notificationsSelected = false, onSelectNotifications, notificationsBadge = 0, worktreesSelected = false, onSelectWorktrees }: Props) {
+export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, explorerSelected = false, onSelectExplorer, explorerBadge = 0, gitSelected = false, onSelectGit, gitBadge = 0, notificationsSelected = false, onSelectNotifications, notificationsBadge = 0, worktreesSelected = false, onSelectWorktrees, terminalSelected = false, onSelectTerminal, systemSelected = false, onSelectSystem, systemWarning = false, onCloseOtherTabs, onCloseAllTabs, onMentionTab, onCopyTabPath, onRevealTab, onDownloadTab }: Props) {
   const { t } = useI18n();
+  const shortcutBindings = useShortcuts();
   const [hoveredClose, setHoveredClose] = useState<string | null>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const orderedTabIds = [
@@ -132,6 +151,8 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, explorerSel
     ...(onSelectExplorer ? ["explorer"] : []),
     ...(onSelectGit ? ["git"] : []),
     ...(onSelectWorktrees ? ["worktrees"] : []),
+    ...(onSelectTerminal ? ["terminal"] : []),
+    ...(onSelectSystem ? ["system"] : []),
     ...tabs.map((tab) => tab.id),
   ];
 
@@ -140,6 +161,8 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, explorerSel
     else if (id === "git") onSelectGit?.();
     else if (id === "notifications") onSelectNotifications?.();
     else if (id === "worktrees") onSelectWorktrees?.();
+    else if (id === "terminal") onSelectTerminal?.();
+    else if (id === "system") onSelectSystem?.();
     else {
       const tab = tabs.find((item) => item.id === id);
       if (tab) onSelectTab(tab.id);
@@ -267,6 +290,107 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, explorerSel
           onKeyDown={handleTabKeyDown}
         />
       )}
+      {onSelectTerminal && (
+        <div
+          data-tab-id="terminal"
+          className="tabbar-tab ui-focus-ring"
+          onClick={onSelectTerminal}
+          role="tab"
+          tabIndex={terminalSelected ? 0 : -1}
+          aria-selected={terminalSelected}
+          aria-label={t("terminal.title")}
+          aria-controls="workspace-file-panel-terminal"
+          title={shortcutHint(t("terminal.title"), "toggleTerminal", shortcutBindings)}
+          aria-keyshortcuts={shortcutAria("toggleTerminal", shortcutBindings)}
+          onKeyDown={(event) => handleTabKeyDown(event, "terminal")}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            height: "var(--tab-height)",
+            paddingLeft: 12,
+            paddingRight: 10,
+            borderRight: "1px solid var(--border)",
+            background: terminalSelected ? "var(--bg)" : "var(--bg-panel)",
+            cursor: "pointer",
+            fontSize: "var(--text-sm)",
+            color: terminalSelected ? "var(--text)" : "var(--text-muted)",
+            whiteSpace: "nowrap",
+            flexShrink: 0,
+            userSelect: "none",
+            position: "relative",
+            transition: `background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)`,
+          }}
+        >
+          {terminalSelected && (
+            <span
+              aria-hidden="true"
+              style={{
+                position: "absolute",
+                left: 0,
+                right: 0,
+                bottom: 0,
+                height: 2,
+                background: "var(--accent)",
+                borderTopLeftRadius: "var(--radius-control)",
+                borderTopRightRadius: "var(--radius-control)",
+              }}
+            />
+          )}
+          <span style={{ flexShrink: 0, opacity: terminalSelected ? 1 : 0.7, display: "flex", alignItems: "center", color: terminalSelected ? "var(--accent)" : undefined }}>
+            <SquareTerminal size={13} strokeWidth={2} aria-hidden="true" />
+          </span>
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis", fontWeight: terminalSelected ? 500 : 400 }}>
+            {t("terminal.title")}
+          </span>
+        </div>
+      )}
+      {onSelectSystem && (
+        <div
+          data-tab-id="system"
+          className="tabbar-tab ui-focus-ring"
+          onClick={onSelectSystem}
+          role="tab"
+          tabIndex={systemSelected ? 0 : -1}
+          aria-selected={systemSelected}
+          aria-label={t("systemPanel.title")}
+          aria-controls="workspace-file-panel-system"
+          title={systemWarning ? t("systemPanel.lowMemoryTitle") : t("systemPanel.title")}
+          onKeyDown={(event) => handleTabKeyDown(event, "system")}
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 6,
+            height: "var(--tab-height)",
+            paddingLeft: 12,
+            paddingRight: 10,
+            borderRight: "1px solid var(--border)",
+            background: systemSelected ? "var(--bg)" : "var(--bg-panel)",
+            cursor: "pointer",
+            fontSize: "var(--text-sm)",
+            color: systemSelected ? "var(--text)" : "var(--text-muted)",
+            whiteSpace: "nowrap",
+            flexShrink: 0,
+            userSelect: "none",
+            position: "relative",
+            transition: `background var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm)`,
+          }}
+        >
+          {systemSelected && (
+            <span
+              aria-hidden="true"
+              style={{ position: "absolute", left: 0, right: 0, bottom: 0, height: 2, background: "var(--accent)", borderTopLeftRadius: "var(--radius-control)", borderTopRightRadius: "var(--radius-control)" }}
+            />
+          )}
+          <span style={{ flexShrink: 0, opacity: systemSelected ? 1 : 0.7, display: "flex", alignItems: "center", color: systemWarning ? "var(--status-warning)" : systemSelected ? "var(--accent)" : undefined }}>
+            <Activity size={13} strokeWidth={2} aria-hidden="true" />
+          </span>
+          <span style={{ overflow: "hidden", textOverflow: "ellipsis", fontWeight: systemSelected ? 500 : 400 }}>
+            {t("systemPanel.title")}
+          </span>
+          {systemWarning && <span aria-hidden="true" style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--status-warning)", flexShrink: 0 }} />}
+        </div>
+      )}
       {tabs.map((tab) => {
         const isActive = tab.id === activeTabId;
         return (
@@ -289,6 +413,18 @@ export function TabBar({ tabs, activeTabId, onSelectTab, onCloseTab, explorerSel
               e.preventDefault();
               e.stopPropagation();
               onCloseTab(tab.id);
+            }}
+            onContextMenu={(event) => {
+              const items: ContextMenuItem[] = [
+                { id: "close", label: t("contextMenu.close"), icon: X, onSelect: () => onCloseTab(tab.id) },
+              ];
+              if (onCloseOtherTabs) items.push({ id: "close-others", label: t("contextMenu.closeOthers"), disabled: tabs.length < 2, onSelect: () => onCloseOtherTabs(tab.id) });
+              if (onCloseAllTabs) items.push({ id: "close-all", label: t("contextMenu.closeAll"), onSelect: onCloseAllTabs });
+              if (onMentionTab) items.push({ id: "mention", label: t("contextMenu.mention"), icon: AtSign, onSelect: () => onMentionTab(tab.id) });
+              if (onCopyTabPath) items.push({ id: "copy-path", label: t("contextMenu.copyRelativePath"), icon: Copy, onSelect: () => onCopyTabPath(tab.id) });
+              if (onRevealTab) items.push({ id: "reveal", label: t("contextMenu.revealInExplorer"), icon: LocateFixed, onSelect: () => onRevealTab(tab.id) });
+              if (onDownloadTab) items.push({ id: "download", label: t("contextMenu.download"), icon: Download, onSelect: () => onDownloadTab(tab.id) });
+              contributeContextMenu(event, { id: "file-tab", title: tab.label, items });
             }}
             style={{
               display: "flex",

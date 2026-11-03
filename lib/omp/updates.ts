@@ -11,7 +11,9 @@ export interface OmpUpdateStatus {
   updatesDisabled?: boolean;
 }
 
-export const OMP_UPDATE_CHECK_TIMEOUT_MS = 15_000;
+// omp gives up on the npm registry after 30s and prints why; outlast that so
+// a slow registry or proxy surfaces omp's own reason instead of a bare kill.
+export const OMP_UPDATE_CHECK_TIMEOUT_MS = 45_000;
 export const OMP_UPDATE_CHECK_TTL_MS = 60 * 60 * 1000;
 
 /** Run a raw `omp update [args]` subcommand. Install durability
@@ -27,7 +29,11 @@ export function runOmpUpdate(args: string[], timeoutMs = OMP_UPDATE_CHECK_TIMEOU
     env: createChildProcessEnvironment({ FORCE_COLOR: "0", NO_COLOR: "1" }),
     windowsHide: true,
   }, (error, stdout, stderr) => {
-    if (error) reject(new Error((stderr || stdout || error.message).trim().slice(-1000)));
+    if (error) {
+      const detail = (stderr || stdout).trim();
+      const reason = detail || (error.killed ? `omp update timed out after ${Math.round(timeoutMs / 1000)}s` : error.message);
+      reject(new Error(reason.slice(-1000)));
+    }
     else resolve(`${stdout}\n${stderr}`.trim());
   });
   return promise;
@@ -78,6 +84,7 @@ export function createCachedOmpUpdateCheck(
 
 const defaultCachedOmpUpdateCheck = createCachedOmpUpdateCheck();
 
+/** When updates are disabled, skips the external check and returns updatesDisabled: true. */
 export async function checkOmpUpdate(force = false): Promise<OmpUpdateStatus> {
   if (isUpdateDisabled()) {
     return { currentVersion: null, availableVersion: null, updateAvailable: false, updateCommand: "omp update", updatesDisabled: true };

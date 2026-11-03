@@ -8,6 +8,8 @@ import { SceneWallpaper } from "./SceneWallpaper";
 import { WebWallpaper } from "./WebWallpaper";
 import { useWallpaperContrast } from "@/hooks/useWallpaperContrast";
 import { useWallpaperPalette } from "@/hooks/useWallpaperPalette";
+import { bgmUrl } from "@/lib/wallpaper-bgm";
+import { WallpaperAudio, activateWallpaperAudio } from "@/lib/wallpaper-audio";
 
 export function WallpaperBackground() {
   const { preferences: p, update } = useWallpaperPreferences();
@@ -16,6 +18,15 @@ export function WallpaperBackground() {
   const [failedId, setFailedId] = useState<string | null>(null);
   const [sceneError, setSceneError] = useState("");
   const video = useRef<HTMLVideoElement>(null);
+  const music = useRef<WallpaperAudio | null>(null);
+  const audioSettings = useRef({ paused: p.paused, volume: p.volume, muted: p.muted });
+  useEffect(() => { audioSettings.current = { paused: p.paused, volume: p.volume, muted: p.muted }; music.current?.configure(audioSettings.current); }, [p.paused, p.volume, p.muted]);
+  useEffect(() => {
+    if (!p.id || p.kind === "scene" || !p.bgmId) return;
+    const player = new WallpaperAudio([], audioSettings.current, undefined, bgmUrl(p.bgmId));
+    music.current = player; activateWallpaperAudio(player);
+    return () => { player.dispose(); music.current = null; };
+  }, [p.id, p.kind, p.bgmId]);
   useWallpaperContrast(p, loadedId === p.id && failedId !== p.id);
   useWallpaperPalette(p, loadedId === p.id && failedId !== p.id);
   useEffect(() => {
@@ -25,7 +36,7 @@ export function WallpaperBackground() {
     root.style.setProperty("--wallpaper-glass-opacity", `${p.glassOpacity}%`);
     return () => { delete root.dataset.wallpaper; delete root.dataset.glass; root.style.removeProperty("--wallpaper-glass-opacity"); };
   }, [p.id, p.glass, p.glassOpacity, loadedId, failedId]);
-  useEffect(() => { if (video.current) { video.current.volume = p.volume / 100; video.current.muted = p.muted; } }, [p.id, p.volume, p.muted]);
+  useEffect(() => { if (video.current) { video.current.volume = p.volume / 100; video.current.muted = p.muted || !!p.bgmId; } }, [p.id, p.volume, p.muted, p.bgmId]);
   useEffect(() => {
     const el = video.current;
     if (!el) return;
@@ -44,11 +55,11 @@ export function WallpaperBackground() {
   return <>
     <div className="wallpaper-backdrop" data-wallpaper-id={p.id} aria-hidden="true" style={{ opacity: loadedId === p.id && failedId !== p.id ? 1 : 0 }}>
       {p.kind === "web"
-        ? <WebWallpaper key={p.id} id={p.id} paused={p.paused} volume={p.volume} muted={p.muted} style={mediaStyle} onReady={ready} onError={message => { setSceneError(message); setFailedId(p.id); }} />
+        ? <WebWallpaper key={p.id} id={p.id} paused={p.paused} volume={p.volume} muted={p.muted || !!p.bgmId} style={mediaStyle} onReady={ready} onError={message => { setSceneError(message); setFailedId(p.id); }} />
         : p.kind === "scene"
-        ? <SceneWallpaper key={p.id} id={p.id} paused={p.paused} volume={p.volume} muted={p.muted} onReady={ready} onError={message => { setSceneError(message); setFailedId(p.id); }} style={mediaStyle} />
+        ? <SceneWallpaper key={p.id} id={p.id} paused={p.paused} volume={p.volume} muted={p.muted} bgm={p.bgmId ? bgmUrl(p.bgmId) : null} onReady={ready} onError={message => { setSceneError(message); setFailedId(p.id); }} style={mediaStyle} />
         : p.kind === "video"
-        ? <video key={p.id} ref={video} src={wallpaperUrl(p.id)} muted={p.muted} loop playsInline preload="auto" onLoadedData={ready} onError={() => setFailedId(p.id)} style={mediaStyle} />
+        ? <video key={p.id} ref={video} src={wallpaperUrl(p.id)} muted={p.muted || !!p.bgmId} loop playsInline preload="auto" onLoadedData={ready} onError={() => setFailedId(p.id)} style={mediaStyle} />
         // Keep animated raster files intact instead of re-encoding via Next Image.
         // eslint-disable-next-line @next/next/no-img-element
         : <img key={p.id} src={wallpaperUrl(p.id)} alt="" onLoad={ready} onError={() => setFailedId(p.id)} style={mediaStyle} />}

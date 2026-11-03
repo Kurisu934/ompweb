@@ -246,7 +246,6 @@ test("install writes a pre-hashed password unchanged and rejects a broken one", 
     rmSync(dir, { recursive: true, force: true });
   }
 });
-
 test("install fails loudly when the omp launcher interpreter is missing", () => {
   const dir = mkdtempSync(path.join(tmpdir(), "ompweb-systemd-missing-interp-"));
   try {

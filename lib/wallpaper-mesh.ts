@@ -1,6 +1,37 @@
 import { resourceName } from "./wallpaper-binary";
-import type { SceneMesh } from "./wallpaper-scene-types";
+import type { SceneBonePhysics, SceneMesh } from "./wallpaper-scene-types";
 
+function bonePhysics(settings: Record<string, unknown>): SceneBonePhysics | undefined {
+  if (settings.se !== true && settings.re !== true) return;
+  const number = (key: string, fallback: number, min = 0) => {
+    const value = settings[key] ?? fallback;
+    if (typeof value !== "number" || !Number.isFinite(value) || value < min || value > 1e6) throw new Error(`Invalid bone physics parameter: ${key}`);
+    return value;
+  };
+  const vector = (key: string, fallback: number[]) => {
+    if (settings[key] === undefined) return fallback;
+    const value = typeof settings[key] === "string" ? settings[key].trim().split(/\s+/).map(Number) : settings[key];
+    if (!Array.isArray(value) || value.length !== 3 || value.some(n => typeof n !== "number" || !Number.isFinite(n) || Math.abs(n) > 1e6)) throw new Error(`Invalid bone physics vector: ${key}`);
+    return value as number[];
+  };
+  const gravity = vector("gd", [0, -1, 0]), mass = settings.ge === true ? number("m", 20) : 0;
+  const length = Math.hypot(...gravity) || 1;
+  const minAngles = settings.la === true ? vector("lamin", [-Math.PI, -Math.PI, -Math.PI]) : undefined;
+  const maxAngles = settings.la === true ? vector("lamax", [Math.PI, Math.PI, Math.PI]) : undefined;
+  if (minAngles?.some((n, i) => n > maxAngles![i])) throw new Error("Invalid bone rotation limits");
+  return {
+    translation: settings.t === true, rotation: settings.r !== false,
+    translationAxes: [settings.tax !== false, settings.tay !== false, settings.taz !== false],
+    rotationAxes: [settings.rax === true, settings.ray === true, settings.raz !== false],
+    translationStiffness: settings.se === true ? number("ts", 200) : 0,
+    translationFriction: number("tf", 20), translationInertia: number("ti", 30, .001),
+    rotationStiffness: settings.se === true ? number("rs", 200) : 0,
+    rotationFriction: number("rf", 20), rotationInertia: number("ri", 30, .001),
+    maxDistance: number("tm", 200), gravity: gravity.map(n => n / length * mass),
+    tip: vector("tp", vector("a", [1, 0, 0]).map(n => n * (number("s", 0) || 100))),
+    minAngles, maxAngles, maxTorque: settings.lt === true ? number("ltmax", 100) : undefined,
+  };
+}
 // Byte-counted geometry followed by bounded skeleton, attachment and animation sections.
 export function decodeSceneMesh(bytes: Buffer): SceneMesh {
   let offset = 0;
@@ -22,14 +53,14 @@ export function decodeSceneMesh(bytes: Buffer): SceneMesh {
   const version = string(), layout = uint();
   const skinned = layout === 0x1800009;
   const newest = version === "MDLV0023", modern = version === "MDLV0019" || newest;
-  if (version !== "MDLV0013" && !modern || layout !== 9 && !skinned || modern && !skinned) throw new Error(`Animated or unsupported scene mesh layout: ${version}/${layout}`);
+  if (version !== "MDLV0013" && !modern || layout !== 9 && !skinned) throw new Error(`Animated or unsupported scene mesh layout: ${version}/${layout}`);
   if (uint() !== 1 || uint() !== 1) throw new Error("Multi-part scene meshes are not supported yet");
   resourceName(string());
   const meshFlags = uint();
   if (meshFlags !== 0 && !(newest && meshFlags === 4)) throw new Error("Unsupported scene mesh flags");
-  if (modern) { zeros(24); if (uint() !== 0x180000f) throw new Error("Unsupported scene vertex layout"); }
+  if (modern) { zeros(24); if (uint() !== (skinned ? 0x180000f : 0xf)) throw new Error("Unsupported scene vertex layout"); }
   const vertexBytes = uint();
-  const stride = modern ? 80 : skinned ? 52 : 20;
+  const stride = modern ? (skinned ? 80 : 48) : skinned ? 52 : 20;
   if (!vertexBytes || vertexBytes % stride || vertexBytes / stride > (skinned ? 10000 : 65536)) throw new Error("Invalid scene mesh vertex count");
   const positions: number[] = [], uvs: number[] = [], indices: number[] = [];
   const joints: number[] = [], weights: number[] = [];
@@ -49,7 +80,8 @@ export function decodeSceneMesh(bytes: Buffer): SceneMesh {
   const mesh: SceneMesh = { positions, uvs, indices };
   const groups: { bone: number; start: number; count: number }[] = [];
   const clips: { texture: string; bonePath: number[]; target: number; vertices: number[] }[] = [];
-  if (newest) {
+  if (newest && !skinned) zeros(6); // No edited vertices, draw groups, or clipping masks.
+  if (newest && skinned) {
     if (flag()) {
       if(uint()!==1||uint()!==positions.length*4)throw new Error("Unsupported alternate scene vertex layout");
       mesh.editedPositions=Array.from({length:positions.length},float);
@@ -96,7 +128,7 @@ export function decodeSceneMesh(bytes: Buffer): SceneMesh {
       const matrix = Array.from({ length: 16 }, float), metadata = string();
       const settings = modern && metadata ? JSON.parse(metadata) as Record<string, unknown> : {};
       if (!settings || typeof settings !== "object" || Array.isArray(settings)) throw new Error("Invalid bone settings");
-      bones.push({ parent, matrix, ...(name ? { name } : {}), ...(settings.se === true ? { physics: true } : {}) });
+      bones.push({ parent, matrix, ...(name ? { name } : {}), physics: bonePhysics(settings) });
     }
     for(const clip of clips)if(clip.bonePath.some((bone,i)=>bone>=count||bones[bone].parent!==(i?clip.bonePath[i-1]:-1)))throw new Error("Invalid puppet clipping hierarchy");
     if (modern) {

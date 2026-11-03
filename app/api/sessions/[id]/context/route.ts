@@ -64,6 +64,26 @@ export async function GET(
   try {
     const resolved = await resolveSessionPathOr404(id);
     if ("response" in resolved) {
+      // A model/command selection can create a dormant native session before
+      // OMP writes its first transcript. Confirm its empty context via RPC so
+      // the first prompt can take a boundary without masking missing history.
+      if (boundary === "1") {
+        const session = getRpcSession(id);
+        if (session?.isAlive() && !session.isRunning() && !existsSync(session.sessionFile)) {
+          const state = await session.send({ type: "get_state" });
+          if (
+            state && typeof state === "object"
+            && "sessionId" in state && "messageCount" in state
+            && "isStreaming" in state && "isCompacting" in state
+            && state.sessionId === id && state.messageCount === 0
+            && state.isStreaming === false && state.isCompacting === false
+            && session.isAlive() && !session.isRunning()
+            && session.sessionId === id && !existsSync(session.sessionFile)
+          ) {
+            return NextResponse.json({ entryIds: [] }, { headers: { "Cache-Control": "no-store" } });
+          }
+        }
+      }
       // OMP may not create the file until the first assistant message is
       // committed. A live wrapper can still recover that first partial reply,
       // and its persisted boundary is empty (the next prompt must not 404).

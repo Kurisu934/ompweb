@@ -49,6 +49,7 @@ function normalizeErrorMessage(error: unknown, fallback: string): string {
 }
 
 export function useDictation({ onTranscript, onError, scope }: UseDictationOptions) {
+  const [isStarting, setIsStarting] = useState(false);
   const [isRecording, setIsRecording] = useState(false);
   const [isPaused, setIsPaused] = useState(false);
   const [isReviewing, setIsReviewing] = useState(false);
@@ -62,6 +63,8 @@ export function useDictation({ onTranscript, onError, scope }: UseDictationOptio
   const abortControllerRef = useRef<AbortController | null>(null);
   const cancelledRef = useRef(false);
   const isStartingRef = useRef(false);
+  const captureSessionRef = useRef(0);
+  const isFinalizingRef = useRef(false);
   const maxTimeoutRef = useRef<number | null>(null);
   const pausePreviewTimeoutRef = useRef<number | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -71,6 +74,7 @@ export function useDictation({ onTranscript, onError, scope }: UseDictationOptio
   const chunksRef = useRef<Blob[]>([]);
   // Send/queue choice for the capture being finished; null = review first.
   const captureAfterRef = useRef<SttAfter | null>(null);
+  const immediateSendRef = useRef(false);
   // Audio kept after a failed/timed-out transcription so the user can retry
   // instead of losing the recording.
   const pendingAudioRef = useRef<{ blob: Blob; ext: string; after?: SttAfter } | null>(null);
@@ -142,6 +146,12 @@ export function useDictation({ onTranscript, onError, scope }: UseDictationOptio
   }, []);
 
   const cleanup = useCallback(() => {
+    captureSessionRef.current += 1;
+    isStartingRef.current = false;
+    isFinalizingRef.current = false;
+    immediateSendRef.current = false;
+    captureAfterRef.current = null;
+    setIsStarting(false);
     clearMaxTimeout();
     if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
       try {
@@ -489,20 +499,23 @@ export function useDictation({ onTranscript, onError, scope }: UseDictationOptio
   // `after` choice) or review (without). Gates on the live MediaRecorder state
   // (not the isRecording closure) because the 5-minute cap timeout captures
   // this callback from the render that started the recording.
-  const finishCapture = useCallback((options?: { after?: SttAfter }) => {
+  const finishCapture = useCallback((options?: { after?: SttAfter; immediateSend?: boolean }) => {
     clearMaxTimeout();
     captureAfterRef.current = options?.after ?? null;
+    immediateSendRef.current = Boolean(options?.immediateSend || options?.after);
     const recorder = mediaRecorderRef.current;
     if (!recorder || recorder.state === "inactive") return;
+    teardownPreviewAudio();
     const capture = captureRef.current;
     const finalMs = Math.max(
       0,
       performance.now() - capture.startedAt - (capture.pausedAccum + (capture.pausedAt !== null ? performance.now() - capture.pausedAt : 0)),
     );
     capture.finalDurationMs = finalMs;
+    isFinalizingRef.current = true;
     try {
       recorder.stop();
-    } catch {}
+    } catch { isFinalizingRef.current = false; }
     if (audioContextRef.current) {
       void audioContextRef.current.close().catch(() => {});
       audioContextRef.current = null;
@@ -510,17 +523,19 @@ export function useDictation({ onTranscript, onError, scope }: UseDictationOptio
     captureRef.current.analyser = null;
     setIsRecording(false);
     setIsPaused(false);
-    if (options?.after) {
+    if (immediateSendRef.current) {
       setIsTranscribing(true);
     } else {
       setIsReviewing(true);
     }
-  }, [clearMaxTimeout]);
+  }, [clearMaxTimeout, teardownPreviewAudio]);
 
   const start = useCallback(async () => {
     if (isStartingRef.current || isRecording || isTranscribing) return;
-    isStartingRef.current = true;
     cleanup();
+    const captureSession = captureSessionRef.current;
+    isStartingRef.current = true;
+    setIsStarting(true);
     if (abortControllerRef.current) {
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
@@ -544,11 +559,17 @@ export function useDictation({ onTranscript, onError, scope }: UseDictationOptio
       typeof window.MediaRecorder === "undefined"
     ) {
       isStartingRef.current = false;
+      setIsStarting(false);
       onError?.("Microphone not supported in this browser or context");
       return;
     }
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      // Permission can resolve after cancel/unmount or after a newer capture starts.
+      if (captureSession !== captureSessionRef.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
       streamRef.current = stream;
 
       captureRef.current = { analyser: null, startedAt: performance.now(), pausedAccum: 0, pausedAt: null };
@@ -575,15 +596,17 @@ export function useDictation({ onTranscript, onError, scope }: UseDictationOptio
       chunksRef.current = [];
 
       recorder.ondataavailable = (event) => {
+        if (captureSession !== captureSessionRef.current) return;
         if (event.data.size > 0) chunksRef.current.push(event.data);
       };
 
       recorder.onstop = () => {
-        if (streamRef.current) {
-          streamRef.current.getTracks().forEach((track) => track.stop());
+        stream.getTracks().forEach((track) => track.stop());
+        if (streamRef.current === stream) {
           streamRef.current = null;
         }
-        if (cancelledRef.current) return;
+        if (cancelledRef.current || captureSession !== captureSessionRef.current) return;
+        isFinalizingRef.current = false;
         clearMaxTimeout();
         if (chunksRef.current.length === 0) {
           const message = "No speech detected";
@@ -598,7 +621,8 @@ export function useDictation({ onTranscript, onError, scope }: UseDictationOptio
         const ext = mimeType.includes("mp4") ? "audio.mp4" : mimeType.includes("ogg") ? "audio.ogg" : "audio.webm";
         const after = captureAfterRef.current ?? undefined;
         pendingAudioRef.current = { blob, ext, after };
-        if (after) {
+        if (immediateSendRef.current || after) {
+          setIsReviewing(false);
           void runTranscription(blob, ext, after);
         } else {
           setIsReviewing(true);
@@ -612,12 +636,16 @@ export function useDictation({ onTranscript, onError, scope }: UseDictationOptio
         finishCapture();
       }, MAX_RECORDING_MS);
     } catch (err) {
+      if (captureSession !== captureSessionRef.current) return;
       cleanup();
       onError?.(err instanceof Error ? err.message : "Microphone access denied");
     } finally {
-      isStartingRef.current = false;
+      if (captureSession === captureSessionRef.current) {
+        isStartingRef.current = false;
+        setIsStarting(false);
+      }
     }
-  }, [isRecording, isTranscribing, cleanup, clearMaxTimeout, runTranscription, onError, finishCapture]);
+  }, [isRecording, isTranscribing, cleanup, clearMaxTimeout, runTranscription, onError, finishCapture, setupPreviewAudio, teardownPreviewAudio]);
 
   const togglePause = useCallback(() => {
     const recorder = mediaRecorderRef.current;
@@ -657,8 +685,17 @@ export function useDictation({ onTranscript, onError, scope }: UseDictationOptio
   // From review: transcribe, then insert (no `after`) or send/queue. Also wired
   // straight to a click handler; a MouseEvent has no `after`, so it inserts.
   const confirmTranscribe = useCallback((options?: { after?: SttAfter }) => {
+    if (isTranscribing) return;
+    // Recorder.stop() queues its final data asynchronously; never transcribe a partial blob.
+    if (isFinalizingRef.current) {
+      immediateSendRef.current = true;
+      if (options?.after) captureAfterRef.current = options.after;
+      setIsReviewing(false);
+      setIsTranscribing(true);
+      return;
+    }
     const pending = pendingAudioRef.current || getCapturedBlob();
-    if (!pending || isTranscribing) return;
+    if (!pending) return;
     pausePreview();
     teardownPreviewAudio();
     setIsReviewing(false);
@@ -673,6 +710,8 @@ export function useDictation({ onTranscript, onError, scope }: UseDictationOptio
       abortControllerRef.current.abort();
       abortControllerRef.current = null;
     }
+    immediateSendRef.current = false;
+    captureAfterRef.current = null;
     pendingAudioRef.current = null;
     // Discard means discard everywhere: other browsers polling the job stand down.
     if (jobIdRef.current) {
@@ -729,6 +768,7 @@ export function useDictation({ onTranscript, onError, scope }: UseDictationOptio
   }, [isRecording, start, finishCapture]);
 
   return {
+    isStarting,
     isRecording,
     isPaused,
     isReviewing,

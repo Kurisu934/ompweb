@@ -40,7 +40,6 @@ test("right-panel tabs support roving arrows, Home/End, and keyboard close", asy
 
   // Notifications is the first pinned tab, so Home lands there.
   const notifications = screen.getByRole("tab", { name: "Notifications" });
-
   const explorer = screen.getByRole("tab", { name: "Explorer" });
   const alpha = screen.getByRole("tab", { name: "/workspace/alpha.ts" });
   const beta = screen.getByRole("tab", { name: "/workspace/beta.ts" });

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode, type Ref, type RefObject } from "react";
 import { createPortal } from "react-dom";
 import { useI18n } from "@/lib/i18n";
 import { usePrefersReducedMotion } from "@/hooks/usePrefersReducedMotion";
@@ -43,6 +43,9 @@ function SidebarIconButton({
   onClick,
   active = false,
   disabled = false,
+  ref,
+  expanded,
+  badge,
   children,
 }: {
   label: string;
@@ -50,19 +53,28 @@ function SidebarIconButton({
   onClick: () => void;
   active?: boolean;
   disabled?: boolean;
+  ref?: Ref<HTMLButtonElement>;
+  /** Set for menu triggers: announces the menu instead of a pressed state. */
+  expanded?: boolean;
+  /** Small count in the corner, e.g. the number of applied filters. */
+  badge?: number;
   children: ReactNode;
 }) {
   const [hovered, setHovered] = useState(false);
   return (
     <button
+      ref={ref}
       type="button"
       className="sidebar-icon-button"
       aria-label={label}
       title={title ?? label}
       onClick={onClick}
       disabled={disabled}
-      aria-pressed={active}
+      aria-pressed={expanded === undefined ? active : undefined}
+      aria-haspopup={expanded === undefined ? undefined : "menu"}
+      aria-expanded={expanded}
       style={{
+        position: "relative",
         display: "flex", alignItems: "center", justifyContent: "center",
         width: 26, height: 26, padding: 0, flexShrink: 0, lineHeight: 0,
         background: active || hovered ? "var(--bg-hover)" : "none",
@@ -77,6 +89,7 @@ function SidebarIconButton({
       onMouseLeave={() => setHovered(false)}
     >
       {children}
+      {badge ? <span className="sidebar-icon-badge" aria-hidden="true">{badge}</span> : null}
     </button>
   );
 }

@@ -1,4 +1,7 @@
 import type { SessionEntry } from "./types";
+import { fromMarkdown } from "mdast-util-from-markdown";
+import type { Nodes } from "mdast";
+import { resolveLocalFileHref, resolveToolFilePath } from "./file-links";
 
 const SESSION_ID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -68,15 +71,46 @@ function collectStrings(value: unknown, out: string[]): void {
  * `homeDir` lets a `~/rel` mention authorize `<homeDir>/rel`: the agent's
  * shell expands `~` to the same user's home, so it names exactly that file.
  */
-export function isFilePathReferencedByEntries(filePath: string, entries: SessionEntry[], homeDir?: string): boolean {
+export function isFilePathReferencedByEntries(
+  filePath: string,
+  entries: SessionEntry[],
+  cwdOrHomeDir?: string,
+  explicitHomeDir?: string,
+): boolean {
+  const cwd = cwdOrHomeDir;
+  const homeDir = explicitHomeDir ?? cwdOrHomeDir;
   const targets = [filePath];
   const target = normalizeSlashes(filePath);
   const home = homeDir ? normalizeSlashes(homeDir).replace(/\/+$/, "") : "";
   if (home && target.startsWith(`${home}/`)) targets.push(`~${target.slice(home.length)}`);
+
   for (const entry of entries) {
     const strings: string[] = [];
     collectStrings(entry, strings);
     if (strings.some((text) => targets.some((t) => containsExactPathReference(text, t)))) return true;
+    if (cwd && strings.some((text) => containsRelativeFileReference(text, filePath, cwd))) return true;
+  }
+  return false;
+}
+
+function containsRelativeFileReference(text: string, filePath: string, cwd: string): boolean {
+  const target = resolveToolFilePath(filePath);
+  if (!target) return false;
+  const equal = (resolved: string | null) => resolved !== null && (
+    /^[a-zA-Z]:\//.test(target) || target.startsWith("//")
+      ? resolved.toLowerCase() === target.toLowerCase()
+      : resolved === target
+  );
+  const matches = (href: string) => equal(resolveLocalFileHref(href, cwd));
+  // Tool arguments can be raw paths; Markdown destinations need an actual
+  // parser so spaces, escaping and reference-style links agree with the UI.
+  if (equal(resolveToolFilePath(text, cwd)) || matches(text)) return true;
+  if (!text.includes("[")) return false;
+  const stack: Nodes[] = [fromMarkdown(text)];
+  while (stack.length) {
+    const node = stack.pop()!;
+    if ((node.type === "link" || node.type === "image" || node.type === "definition") && matches(node.url)) return true;
+    if ("children" in node) stack.push(...node.children);
   }
   return false;
 }

@@ -10,11 +10,9 @@ import { sceneWorldTransforms } from "./wallpaper-scene-parent";
 import { parseSceneTimeline } from "./wallpaper-timeline";
 import { readScenePropertyOverrides, resolveSceneProject, safeWallpaperFile } from "./wallpaper-store";
 import type { BrowserScene, SceneLayer, ScenePass, SceneParticles, ScenePropertyScript, SceneValues } from "./wallpaper-scene-types";
+import { cachedBrowserScene } from "./wallpaper-scene-cache";
 
 type Compiled = { manifest: BrowserScene; assets: Map<string, Buffer> };
-type CacheEntry = { time: number; pending: boolean; promise: Promise<Compiled> };
-const state = globalThis as typeof globalThis & { __ompBrowserScenes?: Map<string, CacheEntry> };
-const cache = state.__ompBrowserScenes ??= new Map();
 const obj = (v: unknown): SceneValues => v && typeof v === "object" && !Array.isArray(v) ? v as SceneValues : {};
 const array = (v: unknown): SceneValues[] => Array.isArray(v) ? v.map(obj) : [];
 export function sceneVector(v: unknown, fallback: number[]) {
@@ -36,8 +34,11 @@ function builtinRoots(project: string) {
   if (process.platform === "win32") roots.push(path.join(process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)", "Steam/steamapps/common/wallpaper_engine/assets"));
   return [...new Set(roots)];
 }
-export async function compileBrowserScene(id: string): Promise<Compiled> {
-  const { project, file, entryFile, metadata } = await resolveSceneProject(id);
+export async function compileBrowserScene(id: string, observe: (file: string) => Promise<void> = async () => {}): Promise<Compiled> {
+  const { project, file, entryFile, metadata, projectFiles } = await resolveSceneProject(id);
+  for (const input of projectFiles) await observe(input);
+  await observe(path.join(path.dirname(project), entryFile.replace(/\.json$/, ".pkg")));
+  await observe(file);
   const propertyDefinitions = obj(obj(metadata.general).properties);
   const overrides = Object.fromEntries(Object.entries(await readScenePropertyOverrides(id)).filter(([key, value]) =>
     Object.hasOwn(propertyDefinitions, key) && typeof value === typeof obj(propertyDefinitions[key]).value));
@@ -49,6 +50,7 @@ export async function compileBrowserScene(id: string): Promise<Compiled> {
     const packed = resources.get(name);
     if (packed) { if (packed.length > limit) throw new Error("Scene resource too large"); return packed; }
     for (const root of roots) {
+      await observe(path.resolve(root, name));
       try { return await boundedRead(await safeWallpaperFile(root, name), limit); }
       catch (e) { if (!/ENOENT|not a directory/i.test(String(e))) throw e; }
     }
@@ -106,7 +108,7 @@ export async function compileBrowserScene(id: string): Promise<Compiled> {
     const payload = data.video || data.png;
     const key = createHash("sha256").update(payload).digest("hex");
     textures.set(name, key); assets.set(key, payload);
-    manifest.textures.push({ key, url: `/api/wallpapers/${id}/scene-assets/${key}`, mimeType: data.video ? "video/mp4" : "image/png", width: data.width, height: data.height, format: data.format, frames: data.frames });
+    manifest.textures.push({ key, url: `/api/wallpapers/${id}/scene-assets/${key}`, mimeType: data.videoMimeType || "image/png", width: data.width, height: data.height, format: data.format, frames: data.frames });
     return key;
   }
   async function font(name: string) {
@@ -190,13 +192,14 @@ export async function compileBrowserScene(id: string): Promise<Compiled> {
     const mapped: (string | null)[] = [null];
     for (let i = 1; i < refs.length; i++) mapped[i] = typeof refs[i] === "string" && !String(refs[i]).startsWith("_rt_") ? await texture(refs[i] as string) : null;
     const defines = Object.entries(combos).map(([key, value]) => { if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key) || !Number.isInteger(value)) throw new Error(`Invalid shader combo: ${key}=${JSON.stringify(value)}`); return `#define ${key} ${value}\n`; }).join("");
-    return { vertex: prelude + defines + browserEffectGlsl(vertex, combos), fragment: prelude + defines + browserFragmentGlsl(browserEffectGlsl(fragment, combos)), uniforms, scripts: scripts.size ? [...scripts.values()] : undefined, textures: mapped, repeats: name === "effects/waterripple" ? [2] : ["effects/pulse", "effects/clouds", "effects/lightshafts"].includes(name) ? [1] : [] };
+    const vertexSource = prelude + defines + browserEffectGlsl(vertex, combos);
+    return { vertex: vertexSource, fragment: prelude + defines + browserFragmentGlsl(browserEffectGlsl(fragment, combos), vertexSource), uniforms, scripts: scripts.size ? [...scripts.values()] : undefined, textures: mapped, repeats: name === "effects/waterripple" ? [2] : ["effects/pulse", "effects/clouds", "effects/lightshafts"].includes(name) ? [1] : [] };
   }
   async function particle(file: string, common: Pick<SceneParticles, "id" | "origin" | "scale" | "angle" | "parallax">, overrides: SceneValues, depth = 0): Promise<SceneParticles> {
     if (depth > 3) throw new Error("Particle child system nesting exceeds limit");
     const config = await json(file), base = array((await json(String(config.material))).passes)[0];
     if (!base || !["genericparticle", "genericropeparticle"].includes(String(base.shader))) throw new Error("Unsupported particle material");
-    const known = new Set(["sphererandom", "boxrandom", "lifetimerandom", "sizerandom", "velocityrandom", "turbulentvelocityrandom", "colorrandom", "rotationrandom", "angularvelocityrandom", "alpharandom", "movement", "alphafade", "alphachange", "colorchange", "angularmovement", "turbulence", "sprite", "spritetrail", "ropetrail", "rope", "oscillateposition", "oscillatealpha", "oscillatesize", "controlpointattract", "sizechange"]);
+    const known = new Set(["sphererandom", "boxrandom", "lifetimerandom", "sizerandom", "velocityrandom", "turbulentvelocityrandom", "colorrandom", "rotationrandom", "angularvelocityrandom", "alpharandom", "mapsequencearoundcontrolpoint", "movement", "alphafade", "alphachange", "colorchange", "angularmovement", "turbulence", "vortex", "sprite", "spritetrail", "ropetrail", "rope", "oscillateposition", "oscillatealpha", "oscillatesize", "controlpointattract", "sizechange"]);
     for (const group of ["emitter", "initializer", "operator", "renderer"]) for (const item of array(config[group])) if (!known.has(String(item.name))) throw new Error(`Unsupported particle operation: ${item.name}`);
     const children: SceneParticles[] = [];
     for (const child of array(config.children)) {
@@ -311,10 +314,6 @@ export async function compileBrowserScene(id: string): Promise<Compiled> {
       if (model.mesh) throw new Error("Unsupported scene model mesh");
       const mesh = typeof model.puppet === "string" ? decodeSceneMesh(await read(model.puppet)) : undefined;
       for (const clip of mesh?.clips || []) clip.texture = await texture(clip.texture);
-      if (mesh?.bones?.some(b => b.physics)) {
-        manifest.warnings ??= [];
-        manifest.warnings.push(`Bone spring physics is unavailable; animation and scripted transforms remain active: ${String(o.name || o.id)}`);
-      }
       Object.assign(common, { solid: o.solid !== false });
       const animations = array(o.animationlayers).filter(a => a.visible !== false);
       if (animations.length) {
@@ -338,9 +337,11 @@ export async function compileBrowserScene(id: string): Promise<Compiled> {
       const basePasses = customBase ? [await effectPass(base, {})] : [];
       if (customBase && ++passCount > 512) throw new Error("Too many scene effect passes");
       const passes = await layerEffects(o.effects, size, basePasses);
-      const composition = base.shader === "composelayer";
+      // Background-copy compositions use the same projected framebuffer input
+      // and effect pipeline as other full-frame sampling layers.
+      const composition = base.shader === "composelayer" && o.copybackground === false;
       if (composition) {
-        if (o.copybackground || passes.length) throw new Error("Composition background copying and post-effects are not supported yet");
+        if (passes.length) throw new Error("Isolated composition post-effects are not supported yet");
         if (manifest.layers.filter(l => l.composition).length >= 8) throw new Error("Too many composition layers");
         passPixels += width * height;
       }
@@ -365,7 +366,7 @@ export async function compileBrowserScene(id: string): Promise<Compiled> {
       }
     } else if (typeof o.particle === "string") {
       manifest.particles.push(await particle(o.particle, common, obj(o.instanceoverride)));
-    } else if (parentIds.has(common.id) && Object.keys(o).every(k => ["id","name","origin","angles","scale","parent","attachment","visible","parallaxDepth"].includes(k))) {
+    } else if (Object.keys(o).every(k => ["id","name","origin","angles","scale","parent","attachment","visible","parallaxDepth","solid","disablepropagation"].includes(k))) {
       manifest.layers.push({ ...common, name: String(o.name || ""), group: true, solid: false, size: [1,1], color: [1,1,1], alpha: 1, texture: "@transparent", blending: "translucent", colorBlendMode: 0, passes: [] });
     } else throw new Error(`Unsupported scene object: ${String(o.name || o.id)}`);
   }
@@ -376,20 +377,4 @@ export async function compileBrowserScene(id: string): Promise<Compiled> {
   return { manifest, assets };
 }
 
-export async function browserScene(id: string) {
-  if (!/^[a-f0-9]{32}$/.test(id)) throw new Error("Invalid scene identifier");
-  const key = `${process.env.PI_CODING_AGENT_DIR || ""}|${process.env.OMP_WEB_WALLPAPER_ASSETS || ""}|${id}`;
-  let entry = cache.get(key);
-  if (entry && !entry.pending && Date.now() - entry.time > 300_000) { cache.delete(key); entry = undefined; }
-  if (!entry) {
-    if (cache.size >= 2) {
-      const evict = [...cache].find(([, value]) => !value.pending);
-      if (!evict) throw new Error("Two scenes are loading. Please retry after they finish.");
-      cache.delete(evict[0]);
-    }
-    entry = { time: Date.now(), pending: true, promise: compileBrowserScene(id) }; cache.set(key, entry);
-    const current = entry;
-    void current.promise.then(() => { current.pending = false; current.time = Date.now(); }, () => { if (cache.get(key) === current) cache.delete(key); });
-  }
-  return entry.promise;
-}
+export async function browserScene(id: string, validate = false) { return cachedBrowserScene(id, observe => compileBrowserScene(id, observe), validate); }

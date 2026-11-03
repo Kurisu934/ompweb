@@ -14,7 +14,7 @@ const frame=kind==='web'?await page.locator('iframe.wallpaper-web').elementHandl
 await frame.waitForFunction(selector=>{const m=document.querySelector(selector);return m&&!m.paused&&m.currentTime>.1;},selector);
 let properties=await frame.locator(selector).evaluate(m=>({volume:window.qaNativeVolume.call(m),muted:m.muted,paused:m.paused}));
 assert.equal(properties.volume,kind==='video'?.4:.2);
-await page.locator('.wallpaper-volume').fill('20');
+await page.getByRole('button',{name:/Wallpaper settings|壁纸设置/}).click();await page.locator('.wallpaper-volume').fill('20');
 await frame.waitForFunction(({selector,expected})=>window.qaNativeVolume.call(document.querySelector(selector))===expected,{selector,expected:kind==='video'?.2:.1});
 await page.evaluate(()=>{const p=JSON.parse(localStorage.getItem('omp-web:wallpaper'));localStorage.setItem('omp-web:wallpaper',JSON.stringify({...p,paused:true,muted:true}));window.dispatchEvent(new Event('omp-web:wallpaper-preferences'));});
 await frame.waitForFunction(selector=>document.querySelector(selector).paused,selector);

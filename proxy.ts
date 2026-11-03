@@ -12,6 +12,9 @@ import {
 export function proxy(request: NextRequest) {
   // Opaque wallpaper frames use a scoped capability, never the app's cookies.
   if (/^\/api\/wallpapers\/[a-f0-9]{32}\/web-assets\/[a-f0-9]{64}\//.test(request.nextUrl.pathname)) return NextResponse.next();
+  // Scheduled task webhooks: the unguessable token in the path is the
+  // credential (checked by the route), so external callers need no cookie.
+  if (/^\/api\/hooks\/[A-Za-z0-9_-]{43}$/.test(request.nextUrl.pathname)) return NextResponse.next();
   if (request.nextUrl.pathname.startsWith("/api/") && shouldCheckApiRequestOrigin(request) && !isApiRequestOriginAllowed(request)) {
     return NextResponse.json({ error: "Cross-origin API requests are not allowed" }, { status: 403 });
   }
@@ -56,4 +59,4 @@ export function proxy(request: NextRequest) {
 // The service worker script holds no data either, and the browser re-fetches
 // it for update checks even after the sign-in cookie expired.
 // The upload route applies guardApiRequest itself and streams the body to disk.
-export const config = { matcher: "/((?!api/wallpapers/upload$|_next/static|_next/image|favicon\\.ico|manifest\\.webmanifest|icon\\.svg|icon\\.png|icon-192\\.png|badge-96\\.png|sw\\.js).*)" };
+export const config = { matcher: "/((?!api/wallpapers/(?:bgm/)?upload$|_next/static|_next/image|favicon\\.ico|manifest\\.webmanifest|icon\\.svg|icon\\.png|icon-192\\.png|badge-96\\.png|sw\\.js).*)" };

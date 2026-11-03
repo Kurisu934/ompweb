@@ -65,31 +65,30 @@ export function getConfigAgentRoots(): string[] {
   ].map(normalizeSlashes);
 }
 
-/**
- * Files inside the omp config/agent roots that must stay unreadable through the
- * generic file API even though their directory is an allowed root (#135).
- *
- * `~/.omp/agent/agent.db` is omp's credential store (API keys) and `models.yml`
- * can carry an `apiKey` for custom models, so making the config root readable
- * to view a rule file would also hand out secrets over `?type=download`. Both
- * are already reachable through their purpose-built routes
- * (`app/api/auth/api-key/*`, `app/api/models-config/route.ts`) which redact or
- * scope what they return, so nothing legitimate needs the generic path.
- */
-const CONFIG_ROOT_DENIED_FILES: ReadonlySet<string> = new Set(["agent.db", "models.yml"]);
+// These files can contain provider credentials or Web authentication material.
+// Rules and skills stay browsable; private Web state uses its own scoped APIs.
+const CONFIG_ROOT_DENIED_FILE_RE = /^(?:agent\.db|models\.ya?ml|omp-web-settings\.json|web-service\.env)(?:[.-].*)?$/i;
 
-export function isConfigRootDeniedFile(filePath: string): boolean {
-  const base = normalizeSlashes(filePath);
-  const name = base.slice(base.lastIndexOf("/") + 1).toLowerCase();
-  // SQLite sidecars carry the same credentials as the db itself.
-  if (CONFIG_ROOT_DENIED_FILES.has(name)) return true;
-  return CONFIG_ROOT_DENIED_FILES.has(name.split(".").slice(0, -1).join(".")) && name.includes(".db");
+function canonicalFilePath(filePath: string): string {
+  try { return normalizeSlashes(realpathSync(filePath)); } catch { /* a new destination may not exist */ }
+  try { return normalizeSlashes(path.join(realpathSync(path.dirname(filePath)), path.basename(filePath))); } catch { return normalizeSlashes(filePath); }
 }
 
-/** True when `filePath` lives under one of the omp config/agent roots. */
-export function isUnderConfigRoot(filePath: string, configRoots: readonly string[]): boolean {
-  const target = normalizeSlashes(filePath);
-  return configRoots.some((root) => isPathWithinRoots(target, new Set([normalizeSlashes(root)])));
+/** Deny credentials through both lexical paths and symlink aliases. */
+export function isConfigPathDenied(filePath: string, configRoots: readonly string[]): boolean {
+  const targets = [normalizeSlashes(filePath), canonicalFilePath(filePath)];
+  for (const root of configRoots) {
+    for (const configRoot of [normalizeSlashes(root), canonicalFilePath(root)]) {
+      const roots = new Set([configRoot]);
+      for (const target of targets) {
+        if (!isPathWithinRoots(target, roots)) continue;
+        const resolver = isWindowsAbsolutePath(target) || isWindowsAbsolutePath(configRoot) ? path.win32 : path;
+        const parts = normalizeSlashes(resolver.relative(configRoot, target)).toLowerCase().split("/");
+        if (parts.includes("omp-web") || CONFIG_ROOT_DENIED_FILE_RE.test(parts.at(-1) ?? "")) return true;
+      }
+    }
+  }
+  return false;
 }
 
 export async function getAllowedFileRoots(): Promise<Set<string>> {

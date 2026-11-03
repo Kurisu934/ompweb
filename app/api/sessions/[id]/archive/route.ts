@@ -1,13 +1,8 @@
 import { NextResponse } from "next/server";
-import { archiveSessionFileWithArtifacts } from "@/lib/omp/session-files";
-import {
-  invalidateSessionListCache,
-  invalidateSessionPathCache,
-  listAllSessions,
-  readSessionHeader,
-} from "@/lib/session-reader";
 import { resolveSessionPathOr404 } from "@/lib/api-utils";
-import { clearExitedRpcSession, getRpcSession } from "@/lib/rpc-manager";
+import { archiveSession, sessionHasChildren } from "@/lib/session-archive";
+import { readSessionHeader } from "@/lib/session-reader";
+import { getRpcSession } from "@/lib/rpc-manager";
 import { readSessionMetadata } from "@/lib/omp/local-bridge";
 import { inspectNativeSessionLease } from "@/lib/omp/native-lease";
 import { getAgentEnvOverrides } from "@/lib/omp/agent-env";
@@ -52,25 +47,13 @@ export async function POST(
         { status: 409 },
       );
     }
-    // Parent-session paths are native branch metadata. Moving only a parent
-    // would leave active children pointing at a path that no longer exists,
-    // flattening their tree in the sidebar. Archive leaves first instead.
-    const hasChildren = (await listAllSessions()).some((session) => session.parentSessionId === id);
-    if (hasChildren) {
+    if (await sessionHasChildren(id)) {
       return NextResponse.json(
         { error: "Archive child sessions before archiving this session", code: "session_has_children" },
         { status: 409 },
       );
     }
-
-    // OMP owns writes while a child is live; wait for its final flush before
-    // moving the file so the archive contains the complete native transcript.
-    await getRpcSession(id)?.destroyAndWait?.();
-    const archivedPath = archiveSessionFileWithArtifacts(filePath);
-    clearExitedRpcSession(id);
-    invalidateSessionPathCache(id);
-    // The file is gone: full flush is correct (drops its caches + refreshes list).
-    invalidateSessionListCache();
+    const archivedPath = await archiveSession(id, resolved.filePath);
     return NextResponse.json({ ok: true, archived: true, archivedPath });
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);

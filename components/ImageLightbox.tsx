@@ -4,6 +4,7 @@ import { useEffect, useLayoutEffect, useRef, useState, type ImgHTMLAttributes } 
 import { createPortal } from "react-dom";
 import { Maximize } from "lucide-react";
 import { useI18n } from "@/lib/i18n";
+import { useImageLoadError } from "@/hooks/useImageLoadError";
 
 const ZOOM_MAX = 8;
 /** Lowest zoom when the fitted size is larger; big images can go below it down to their fit. */
@@ -56,9 +57,16 @@ export function ClickableImage({ src, fullSrc, alt, ...imgProps }: ClickableImag
   }, [src]);
 
   const resolvedSrc = typeof src === "string" ? src : objectUrl ?? "";
+  const { error, onError: diagnoseError, clearError } = useImageLoadError(resolvedSrc);
 
   // Never render a broken clickable thumbnail for a missing source.
   if (!resolvedSrc) return null;
+  if (error) return (
+    <span role="alert" style={{ display: "inline-flex", flexWrap: "wrap", alignItems: "center", gap: 8, padding: 8, color: "var(--status-error)", fontSize: 13 }}>
+      <span>{alt || t("imagePreview.imageTitle")}: {error}</span>
+      <a href={resolvedSrc} download style={{ color: "var(--accent)" }}>{t("fileViewer.downloadFile")}</a>
+    </span>
+  );
 
   return (
     <>
@@ -76,7 +84,10 @@ export function ClickableImage({ src, fullSrc, alt, ...imgProps }: ClickableImag
         title={alt ? t("imagePreview.openWithAlt", { alt }) : t("imagePreview.open")}
       >
         {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img src={resolvedSrc} alt={alt ?? ""} loading="lazy" {...imgProps} />
+        <img src={resolvedSrc} alt={alt ?? ""} loading="lazy" {...imgProps}
+          onError={(event) => { imgProps.onError?.(event); void diagnoseError(); }}
+          onLoad={(event) => { clearError(); imgProps.onLoad?.(event); }}
+        />
       </button>
       {/*
         Portal to <body>: a linked markdown image (`[![alt](img)](url)`) would

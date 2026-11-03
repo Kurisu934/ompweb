@@ -29,6 +29,8 @@ export interface ProjectRegistryEntry {
   alias?: string;
   /** Explicit sidebar position; lower values appear first. */
   sortOrder?: number;
+  /** Pinned to the sidebar's pinned section (ordered by sortOrder within it). */
+  pinned?: boolean;
   /** Workspace-level omp launch configuration. */
   launchConfig?: ProjectLaunchConfig;
 }
@@ -36,6 +38,15 @@ export interface ProjectRegistryEntry {
 export interface ProjectRegistryFile {
   version: 1;
   projects: ProjectRegistryEntry[];
+}
+
+/** One display-only change; `null` clears the field (pinned: false/null unpins). */
+export interface ProjectPresentationUpdate {
+  path: string;
+  alias?: string | null;
+  sortOrder?: number | null;
+  pinned?: boolean | null;
+  launchConfig?: ProjectLaunchConfig | null;
 }
 
 /** Error carrying a stable code (errors.* key) for client localization. */
@@ -101,6 +112,7 @@ export function parseProjectRegistry(raw: string): ProjectRegistryFile {
         hidden: "hidden" in item && item.hidden === true,
         alias: "alias" in item && typeof item.alias === "string" && item.alias.trim() ? item.alias.trim() : undefined,
         sortOrder: "sortOrder" in item && typeof item.sortOrder === "number" && Number.isFinite(item.sortOrder) ? item.sortOrder : undefined,
+        pinned: "pinned" in item && item.pinned === true ? true : undefined,
         launchConfig: parseLaunchConfig(item as Record<string, unknown>),
       });
     }
@@ -158,14 +170,14 @@ export function upsertProject(
   return { version: 1, projects };
 }
 
-/** Apply display-only updates (alias, sortOrder) to any number of projects in
- *  ONE atomic operation — the caller persists the result once, so concurrent
- *  single-entry writes can never lose each other's changes. Paths that match
- *  no registry entry are ignored; callers wanting session-discovered projects
- *  managed must register them in the same cycle (see /api/projects PATCH). */
+/** Apply display-only updates (alias, sortOrder, pinned) to any number of
+ *  projects in ONE atomic operation — the caller persists the result once, so
+ *  concurrent single-entry writes can never lose each other's changes. Paths
+ *  that match no registry entry are ignored; callers wanting session-discovered
+ *  projects managed must register them in the same cycle (see /api/projects PATCH). */
 export function updateProjectsPresentation(
   registry: ProjectRegistryFile,
-  updates: ReadonlyArray<{ path: string; alias?: string | null; sortOrder?: number | null; launchConfig?: ProjectLaunchConfig | null }>,
+  updates: ReadonlyArray<ProjectPresentationUpdate>,
 ): ProjectRegistryFile {
   const keyed = new Map(updates.map((update) =>
     [comparableProjectPath(canonicalProjectPath(update.path)), update] as const,
@@ -184,6 +196,10 @@ export function updateProjectsPresentation(
       if (update.sortOrder !== undefined) {
         if (update.sortOrder === null) delete next.sortOrder;
         else next.sortOrder = update.sortOrder;
+      }
+      if (update.pinned !== undefined) {
+        if (update.pinned) next.pinned = true;
+        else delete next.pinned;
       }
       if (update.launchConfig !== undefined) {
         if (update.launchConfig === null) delete next.launchConfig;
@@ -221,6 +237,7 @@ export function mergeProjects(registry: ProjectRegistryFile, discovered: Iterabl
   for (const p of registry.projects
     .filter((entry) => !entry.hidden)
     .sort((a, b) => {
+      if (Boolean(a.pinned) !== Boolean(b.pinned)) return a.pinned ? -1 : 1;
       const aOrder = a.sortOrder ?? Number.POSITIVE_INFINITY;
       const bOrder = b.sortOrder ?? Number.POSITIVE_INFINITY;
       if (aOrder !== bOrder) return aOrder - bOrder;
@@ -229,7 +246,7 @@ export function mergeProjects(registry: ProjectRegistryFile, discovered: Iterabl
     const key = comparableProjectPath(p.path);
     if (registeredSeen.has(key)) continue; // tolerate hand-edited duplicates
     registeredSeen.add(key);
-    registered.push({ path: p.path, addedAt: p.addedAt, alias: p.alias, sortOrder: p.sortOrder, launchConfig: p.launchConfig });
+    registered.push({ path: p.path, addedAt: p.addedAt, alias: p.alias, sortOrder: p.sortOrder, pinned: p.pinned, launchConfig: p.launchConfig });
   }
   const extra: ManagedProject[] = [];
   const extraSeen = new Set<string>();

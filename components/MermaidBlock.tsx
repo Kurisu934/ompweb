@@ -4,6 +4,9 @@ import { memo, useEffect, useRef, useState, type ComponentType, type ReactNode }
 import { useTheme } from "@/hooks/useTheme";
 import { useI18n } from "@/lib/i18n";
 import { useCopyFeedback } from "@/hooks/useCopyFeedback";
+import { Code } from "lucide-react";
+import { contributeContextMenu } from "@/lib/context-menu";
+import { copyFromContextMenu } from "./ui/context-menu";
 
 interface MermaidBlockProps {
   code: string;
@@ -263,7 +266,13 @@ export const CodeBlock = memo(function CodeBlock({ code, lang, headerAction, isS
   }, [HighlightedCode, isStreaming]);
 
   return (
-    <div className="markdown-code-block">
+    <div
+      className="markdown-code-block"
+      onContextMenu={(event) => contributeContextMenu(event, {
+        id: "code-block",
+        items: [{ id: "copy-code", label: t("contextMenu.copyCode"), icon: Code, onSelect: () => copyFromContextMenu(code) }],
+      })}
+    >
       <div className="markdown-code-header">
         <span className="markdown-code-lang">{lang || "text"}</span>
         <div className="markdown-code-actions">

@@ -36,6 +36,7 @@ test("attaches todo plan and subagent roster with live states", () => {
   assert.match(html, /Subagents/);
   assert.match(html, /scout/);
   assert.match(html, /class="composer-subagents-panel wallpaper-surface /);
+  assert.match(html, /class="composer-todo-panel wallpaper-surface /);
   assert.match(html, /class="ui-focus-ring wallpaper-inset"/);
   assert.match(html, /Map the surface/);
   assert.match(html, /worker/);

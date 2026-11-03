@@ -12,10 +12,11 @@ import type {
 const execFileAsync = promisify(execFile);
 const USAGE_TIMEOUT_MS = 30_000;
 const USAGE_MAX_BUFFER = 4 * 1024 * 1024;
-const USAGE_CACHE_TTL_MS = 5 * 60_000;
+const USAGE_CACHE_TTL_MS = 60_000;
 const HYPER_FALLBACK_CREDIT_LIMIT = 250;
 
 type UsageQuery = { provider?: string; modelId?: string };
+
 
 type CachedUsage = { expiresAt: number; output: string };
 
@@ -61,6 +62,7 @@ function usageWindow(
   };
 }
 
+
 function hyperCreditBalance(provider: string, limits: unknown[]): ProviderCreditBalance | undefined {
   if (provider !== "charm-hyper") return undefined;
   for (const limit of limits) {
@@ -82,14 +84,36 @@ function hyperCreditBalance(provider: string, limits: unknown[]): ProviderCredit
   }
   return undefined;
 }
+
 type UsageLimit = { id: ProviderUsageWindowId; fraction: number; window: Record<string, unknown> };
 
 type UsageGroup = {
   priority: number;
   modelId?: string;
   tier?: string;
+  pool?: string;
   limits: Map<ProviderUsageWindowId, UsageLimit>;
 };
+
+// A provider can meter independent quota pools on the same window (Antigravity
+// has separate Gemini and "Claude & GPT" 5h/weekly budgets). Those only differ
+// by label, so labels split groups only when one window carries several of them;
+// otherwise labels just name the window ("Claude 5 Hour") and must not split.
+function labelsSplitPools(limits: unknown[]): boolean {
+  const labelsByWindow = new Map<string, Set<string>>();
+  for (const rawLimit of limits) {
+    if (!isRecord(rawLimit) || !isRecord(rawLimit.scope)) continue;
+    const label = nonEmptyString(rawLimit.label);
+    const windowId = normalizeWindowId(rawLimit.scope, isRecord(rawLimit.window) ? rawLimit.window : {});
+    if (!label || !windowId) continue;
+    const key = `${nonEmptyString(rawLimit.scope.modelId)?.toLowerCase() ?? ""}\0${nonEmptyString(rawLimit.scope.tier)?.toLowerCase() ?? ""}\0${windowId}`;
+    const labels = labelsByWindow.get(key) ?? new Set<string>();
+    labels.add(label);
+    if (labels.size > 1) return true;
+    labelsByWindow.set(key, labels);
+  }
+  return false;
+}
 
 function normalizeReport(
   rawReport: Record<string, unknown>,
@@ -101,6 +125,7 @@ function normalizeReport(
   if (!provider || (query.provider && provider !== query.provider)) return [];
   const limits = Array.isArray(rawReport.limits) ? rawReport.limits : [];
   const activeModelId = query.modelId?.toLowerCase();
+  const splitPools = labelsSplitPools(limits);
   const groups = new Map<string, UsageGroup>();
 
   for (const rawLimit of limits) {
@@ -117,11 +142,12 @@ function normalizeReport(
     const tier = nonEmptyString(scope.tier);
     const normalizedModelId = modelId?.toLowerCase();
     const normalizedTier = tier?.toLowerCase();
-    const groupKey = `${normalizedModelId ?? ""}\0${normalizedTier ?? ""}`;
+    const pool = splitPools ? nonEmptyString(rawLimit.label) : undefined;
+    const groupKey = `${normalizedModelId ?? ""}\0${normalizedTier ?? ""}\0${pool ?? ""}`;
     const priority = modelId ? (normalizedTier ? 0 : 1) : normalizedTier ? 2 : 3;
     let group = groups.get(groupKey);
     if (!group) {
-      group = { priority, modelId, tier, limits: new Map() };
+      group = { priority, modelId, tier, pool, limits: new Map() };
       groups.set(groupKey, group);
     }
     const candidate = { id: windowId, fraction, window };
@@ -129,22 +155,22 @@ function normalizeReport(
     if (!current || fraction > current.fraction) group.limits.set(windowId, candidate);
   }
 
-  const selectedGroups = [...groups.values()];
+  let selectedGroups = [...groups.values()];
   if (activeModelId && selectedGroups.length > 0) {
-    const selected = selectedGroups.reduce((best, group) => group.priority < best.priority ? group : best);
-    selectedGroups.splice(0, selectedGroups.length, selected);
+    const bestPriority = Math.min(...selectedGroups.map((group) => group.priority));
+    // Parallel pools are all relevant to the active model; otherwise keep the single most specific group.
+    selectedGroups = splitPools
+      ? selectedGroups.filter((group) => group.priority === bestPriority)
+      : [selectedGroups.find((group) => group.priority === bestPriority)!];
   }
   const metadata = isRecord(rawReport.metadata) ? rawReport.metadata : undefined;
-  // Email only: unredacted account ids are opaque UUIDs, so those accounts
-  // show as "Account N".
   const label = nonEmptyString(metadata?.email);
   const plan = nonEmptyString(metadata?.planType);
   const credits = hyperCreditBalance(provider, limits);
   if (selectedGroups.length === 0) {
     return [{
       provider,
-      ...(label ? { accountLabel: label } : {}),
-      ...(!label ? { accountIndex: reportIndex + 1 } : {}),
+      ...(label ? { accountLabel: label } : { accountIndex: reportIndex + 1 }),
       ...(plan ? { plan } : {}),
       ...(credits ? { credits } : { noLimits: true }),
     }];
@@ -152,11 +178,11 @@ function normalizeReport(
   return selectedGroups.flatMap((group) => {
     const result: ProviderUsageReport = {
       provider,
-      ...(label ? { accountLabel: label } : {}),
-      ...(!label ? { accountIndex: reportIndex + 1 } : {}),
+      ...(label ? { accountLabel: label } : { accountIndex: reportIndex + 1 }),
       ...(plan ? { plan } : {}),
       ...(group.modelId ? { modelId: group.modelId } : {}),
       ...(group.tier ? { tier: group.tier } : {}),
+      ...(group.pool ? { pool: group.pool } : {}),
       ...(credits ? { credits } : {}),
     };
     for (const candidate of group.limits.values()) {
@@ -169,7 +195,8 @@ function normalizeReport(
   });
 }
 
-export function parseProviderUsageOutput(output: string, query: UsageQuery = {}, now = Date.now()): ProviderUsageSnapshot {
+
+function parseUsagePayload(output: string): { generatedAt: unknown; reports: unknown[] } {
   let payload: unknown;
   try {
     payload = JSON.parse(output);
@@ -177,10 +204,33 @@ export function parseProviderUsageOutput(output: string, query: UsageQuery = {},
     throw new Error("omp usage returned invalid JSON");
   }
   if (!isRecord(payload)) throw new Error("omp usage returned an invalid response");
-  const rawReports = Array.isArray(payload.reports) ? payload.reports : [];
-  const reports = rawReports.flatMap((report, index) => isRecord(report) ? normalizeReport(report, query, now, index) : []);
+  return { generatedAt: payload.generatedAt, reports: Array.isArray(payload.reports) ? payload.reports : [] };
+}
+
+
+export function parseProviderUsageOutput(output: string, query: UsageQuery = {}, now = Date.now()): ProviderUsageSnapshot {
+  const payload = parseUsagePayload(output);
+  const reports = payload.reports.flatMap((report, index) =>
+    isRecord(report) ? normalizeReport(report, query, now, index) : [],
+  );
   const generatedAt = asNumber(payload.generatedAt) ?? null;
   return { generatedAt, reports };
+}
+function getUsageOutput(refresh = false): Promise<string> {
+  if (!refresh && usageCache && usageCache.expiresAt > Date.now()) return Promise.resolve(usageCache.output);
+  if (usageInFlight) {
+    return refresh && !usageInFlightForced
+      ? usageInFlight.then(() => getUsageOutput(true), () => getUsageOutput(true))
+      : usageInFlight;
+  }
+  usageInFlightForced = refresh;
+  usageInFlight = fetchProviderUsage(refresh)
+    .then((output) => {
+      usageCache = { output, expiresAt: Date.now() + USAGE_CACHE_TTL_MS };
+      return output;
+    })
+    .finally(() => { usageInFlight = undefined; });
+  return usageInFlight;
 }
 
 async function fetchProviderUsage(refresh = false): Promise<string> {
@@ -203,22 +253,6 @@ async function fetchProviderUsage(refresh = false): Promise<string> {
   return stdout;
 }
 
-function getUsageOutput(refresh = false): Promise<string> {
-  if (!refresh && usageCache && usageCache.expiresAt > Date.now()) return Promise.resolve(usageCache.output);
-  if (usageInFlight) {
-    return refresh && !usageInFlightForced
-      ? usageInFlight.then(() => getUsageOutput(true), () => getUsageOutput(true))
-      : usageInFlight;
-  }
-  usageInFlightForced = refresh;
-  usageInFlight = fetchProviderUsage(refresh)
-    .then((output) => {
-      usageCache = { output, expiresAt: Date.now() + USAGE_CACHE_TTL_MS };
-      return output;
-    })
-    .finally(() => { usageInFlight = undefined; });
-  return usageInFlight;
-}
 
 export async function getProviderUsage(query: UsageQuery = {}, refresh = false): Promise<ProviderUsageSnapshot> {
   return parseProviderUsageOutput(await getUsageOutput(refresh), query);

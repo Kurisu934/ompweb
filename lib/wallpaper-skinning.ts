@@ -1,5 +1,6 @@
 import { Bone, Euler, Matrix4, Quaternion, Skeleton, Vector3 } from "three";
-import type { SceneMesh } from "./wallpaper-scene-types";
+import type { SceneBoneCommand, SceneMesh } from "./wallpaper-scene-types";
+import { SceneBoneSimulation } from "./wallpaper-bone-physics";
 
 export class SceneMeshAnimator {
   readonly positions: Float32Array;
@@ -16,6 +17,7 @@ export class SceneMeshAnimator {
   private boneOpacity: number[];
   private attachmentTransforms = new Map<string, { bone: number; local: Matrix4; result: Matrix4 }>();
   private clippingTransforms: { bone: number; reference: Matrix4; result: Matrix4 }[] = [];
+  private physics?: SceneBoneSimulation;
   constructor(private mesh: SceneMesh) {
     const bones = mesh.bones!.map(({ matrix }) => {
       const bone = new Bone(), transform = new Matrix4().fromArray(matrix);
@@ -33,6 +35,7 @@ export class SceneMeshAnimator {
       transform.decompose(bones[i].position, bones[i].quaternion, bones[i].scale);
     });
     this.rest = bones.map(b => ({ position: b.position.clone(), quaternion: b.quaternion.clone(), scale: b.scale.clone() }));
+    if (mesh.bones!.some(b => b.physics)) this.physics = new SceneBoneSimulation(bones, mesh.bones!);
     this.positions = new Float32Array(mesh.positions);
     this.opacities = new Float32Array(mesh.positions.length/3).fill(1);
     this.boneOpacity=mesh.bones!.map(()=>1);
@@ -65,9 +68,16 @@ export class SceneMeshAnimator {
       matrix.decompose(bone.position, bone.quaternion, bone.scale);
     }
     this.upload();
+    if (this.physics) for (const index of Object.keys(values)) this.physics.override(Number(index));
+  }
+  applyPhysicsCommands(commands: SceneBoneCommand[], world?: Matrix4) {
+    if (!this.physics) return;
+    for (const command of commands) this.physics.command(command, world);
+    this.upload();
   }
   update(time: number) {
     if (this.time === time) return false;
+    const dt = time - this.time;
     this.time = time;
     this.boneOpacity.fill(1);
     this.skeleton.bones.forEach((bone, i) => { bone.position.copy(this.rest[i].position); bone.quaternion.copy(this.rest[i].quaternion); bone.scale.copy(this.rest[i].scale); });
@@ -104,6 +114,7 @@ export class SceneMeshAnimator {
         }
       }
     }
+    this.physics?.step(dt);
     this.upload();
     return true;
   }

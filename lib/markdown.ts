@@ -10,10 +10,13 @@ const markdownSanitizeSchema = {
     ...defaultSchema.attributes,
     code: [["className", /^language-./, "math-inline", "math-display"]],
   },
-  // `agent://` subagent handles are opened in-app by MarkdownBody.
+  // `agent://` subagent handles are opened in-app by MarkdownBody. File and
+  // artifact URLs are routed through the file API and checked again by its
+  // path authorization; drive-letter paths also need their first letter here.
   protocols: {
     ...defaultSchema.protocols,
-    href: [...(defaultSchema.protocols?.href ?? []), "agent"],
+    href: [...(defaultSchema.protocols?.href ?? []), "agent", "file", "artifact", ..."abcdefghijklmnopqrstuvwxyz"],
+    src: [...(defaultSchema.protocols?.src ?? []), "file", "artifact", ..."abcdefghijklmnopqrstuvwxyz"],
   },
   strip: [...(defaultSchema.strip || []), "iframe", "object", "style", "form"],
 };

@@ -1,25 +1,36 @@
 "use client";
 
-import { Children, cloneElement, isValidElement, useContext, useMemo, type ComponentProps, type MouseEvent, type ReactElement, type ReactNode } from "react";
+import { Children, cloneElement, createContext, isValidElement, useContext, useMemo, type ComponentProps, type MouseEvent, type ReactElement, type ReactNode } from "react";
 import ReactMarkdown, { type Components } from "react-markdown";
 import { remarkInlineCodeFileLinks, resolveLocalFileHref } from "@/lib/file-links";
-import { encodeFilePathForApi } from "@/lib/file-paths";
+import { getFileApiUrl } from "@/lib/file-urls";
 import { AgentLinkContext, agentAwareUrlTransform, agentLinkIds, remarkAgentLinks } from "../lib/agent-links";
+
+const markdownUrlTransform: typeof agentAwareUrlTransform = (url, key, node) => {
+  const transformed = agentAwareUrlTransform(url, key, node);
+  if (transformed) return transformed;
+  return resolveLocalFileHref(url) ? url : undefined;
+};
 import { GithubRepoContext, remarkGithubRefs } from "../lib/github-refs";
 import { normalizeDisplayMath, useMarkdownPlugins, type MarkdownPlugins } from "../lib/markdown";
 import { markdownCodeRenderer } from "./MarkdownCode";
 import { ClickableImage } from "./ImageLightbox";
+
+export const FileSessionContext = createContext<string | undefined>(undefined);
 
 interface MarkdownBodyProps {
   children: string;
   className?: string;
   isStreaming?: boolean;
   cwd?: string;
+  sourceSessionId?: string;
   onOpenFile?: (filePath: string) => void;
   suppressImages?: boolean;
 }
 
-export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile, suppressImages = false }: MarkdownBodyProps) {
+export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile, sourceSessionId, suppressImages = false }: MarkdownBodyProps) {
+  const inheritedSessionId = useContext(FileSessionContext);
+  const fileSessionId = sourceSessionId ?? inheritedSessionId;
   const normalizedMarkdown = useMemo(() => normalizeDisplayMath(children), [children]);
   const { remarkPlugins: baseRemarkPlugins, rehypePlugins } = useMarkdownPlugins(normalizedMarkdown);
   const githubRepo = useContext(GithubRepoContext);
@@ -42,7 +53,7 @@ export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile
       if (suppressImages) return alt ?? null;
       const filePath = typeof src === "string" ? resolveLocalFileHref(src, cwd) : null;
       const imageSrc = filePath
-        ? `/api/files/${encodeFilePathForApi(filePath)}?type=read`
+        ? getFileApiUrl(filePath, "read", fileSessionId)
         : src;
       // Dynamic local paths are served directly by the file API.
       return <ClickableImage src={imageSrc} alt={alt ?? ""} loading="lazy" {...imgProps} />;
@@ -119,7 +130,7 @@ export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile
         const anchor = <a href={href} {...props} onClick={handleClick} onAuxClick={(event) => event.preventDefault()}>{textParts}</a>;
         return imageParts.length > 0 ? <>{anchor}{imageParts}</> : anchor;
       }
-      const filePath = onOpenFile ? resolveLocalFileHref(href, cwd) : null;
+      const filePath = resolveLocalFileHref(href, cwd);
       const openFile = onOpenFile;
       if (filePath && openFile) {
         const handleClick = (event: MouseEvent<HTMLAnchorElement>) => {
@@ -130,12 +141,12 @@ export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile
           event.preventDefault();
           openFile(filePath);
         };
-        const anchor = <a href={href} {...props} onClick={handleClick}>{textParts}</a>;
+        const anchor = <a href={getFileApiUrl(filePath, "read", fileSessionId)} {...props} onClick={handleClick}>{textParts}</a>;
         return imageParts.length > 0 ? <>{anchor}{imageParts}</> : anchor;
       }
 
       const anchor = (
-        <a href={href} {...props} target="_blank" rel="noopener noreferrer">
+        <a href={filePath ? getFileApiUrl(filePath, "read", fileSessionId) : href} {...props} target="_blank" rel="noopener noreferrer">
           {textParts}
         </a>
       );
@@ -150,7 +161,7 @@ export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile
       );
     },
     };
-  }, [isStreaming, cwd, onOpenFile, suppressImages, openAgentLink]);
+  }, [isStreaming, cwd, onOpenFile, suppressImages, openAgentLink, fileSessionId]);
 
   return (
     <div className={["markdown-body", className].filter(Boolean).join(" ")}>
@@ -158,7 +169,7 @@ export function MarkdownBody({ children, className, isStreaming, cwd, onOpenFile
         remarkPlugins={remarkPlugins}
         rehypePlugins={rehypePlugins}
         components={components}
-        urlTransform={agentAwareUrlTransform}
+        urlTransform={markdownUrlTransform}
       >
         {normalizedMarkdown}
       </ReactMarkdown>

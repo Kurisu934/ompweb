@@ -1,11 +1,16 @@
 "use client";
 
 import { FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import { ChevronRight, FolderPlus, SlidersHorizontal, Star, X } from "lucide-react";
 import { createPortal } from "react-dom";
 import { useModalDialog } from "@/hooks/useModalDialog";
 import { useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
 import { appendProgress, cloneDirectoryName } from "@/lib/git-clone";
+
+const FAVORITES_OPEN_KEY = "omp-web:directory-picker-favorites-open";
+/** Mirrors MAX_FAVORITE_DIRECTORIES in lib/web-settings.ts (server-only module). */
+const MAX_FAVORITES = 50;
 
 interface DirectoryEntry {
   name: string;
@@ -29,6 +34,19 @@ async function loadDirectories(directory?: string): Promise<BrowseResponse> {
     throw new Error(formatApiError({ ...data, error: data.error ?? `HTTP ${response.status}` }));
   }
   return data;
+}
+
+async function createFolder(parent: string, name: string): Promise<string> {
+  const response = await fetch("/api/cwd/browse", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ parent, name }),
+  });
+  const data = await response.json() as { path?: string; error?: string; code?: string };
+  if (!response.ok || data.error || !data.path) {
+    throw new Error(formatApiError({ ...data, error: data.error ?? `HTTP ${response.status}` }));
+  }
+  return data.path;
 }
 
 function FolderIcon() {
@@ -82,14 +100,30 @@ export function DirectoryPicker({ onCancel, onSelect, busy = false, error }: Pro
   const cloneLogRef = useRef<HTMLPreElement>(null);
   const cloning = cloneId !== null;
   const locked = busy || cloning;
+
+  // null = the inline "new folder" row is closed.
+  const [newFolderName, setNewFolderName] = useState<string | null>(null);
+  const [creatingFolder, setCreatingFolder] = useState(false);
+  const [createError, setCreateError] = useState<string | null>(null);
+  const [favorites, setFavorites] = useState<string[]>([]);
+  const [favoritesOpen, setFavoritesOpen] = useState(true);
   const dialogRef = useModalDialog<HTMLDivElement>({
-    onClose: () => { if (!locked) onCancel(); },
+    onClose: () => {
+      // Escape inside the new-folder row only dismisses that row.
+      if (newFolderName !== null) {
+        if (!creatingFolder) setNewFolderName(null);
+        return;
+      }
+      if (!locked) onCancel();
+    },
     active: portalTarget !== null,
   });
 
   const navigateTo = useCallback(async (directory?: string) => {
     setLoading(true);
     setLoadError(null);
+    setNewFolderName(null);
+    setCreateError(null);
     try {
       const data = await loadDirectories(directory);
       const nextPath = data.path ?? directory ?? "/";
@@ -118,16 +152,63 @@ export function DirectoryPicker({ onCancel, onSelect, busy = false, error }: Pro
     if (log) log.scrollTop = log.scrollHeight;
   }, [cloneLog]);
 
+  useEffect(() => {
+    let alive = true;
+    fetch("/api/favorite-directories", { cache: "no-store" })
+      .then((response) => (response.ok ? response.json() : null))
+      .then((data: { directories?: string[] } | null) => { if (alive && Array.isArray(data?.directories)) setFavorites(data.directories); })
+      .catch(() => {});
+    try { setFavoritesOpen(window.localStorage.getItem(FAVORITES_OPEN_KEY) !== "0"); } catch { /* storage unavailable: stay open */ }
+    return () => { alive = false; };
+  }, []);
+
+  const setFavoritesOpenPersisted = (open: boolean) => {
+    setFavoritesOpen(open);
+    try { window.localStorage.setItem(FAVORITES_OPEN_KEY, open ? "1" : "0"); } catch { /* not persisted */ }
+  };
+
+  // Optimistic: shown at once, rolled back with a message if the save fails.
+  const saveFavorites = (next: string[]) => {
+    const previous = favorites;
+    setFavorites(next);
+    void fetch("/api/favorite-directories", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ directories: next }),
+    }).then(async (response) => {
+      if (!response.ok) throw new Error(formatApiError(await response.json().catch(() => ({ error: `HTTP ${response.status}` }))));
+    }).catch((cause: unknown) => {
+      setFavorites(previous);
+      setLoadError(cause instanceof Error ? cause.message : String(cause));
+    });
+  };
+
   const handlePathSubmit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     const candidate = pathInput.trim();
     if (candidate) void navigateTo(candidate);
+  };
+  const handleCreateFolder = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const name = newFolderName?.trim();
+    if (!name || creatingFolder) return;
+    setCreatingFolder(true);
+    setCreateError(null);
+    try {
+      // Open the new folder so it can be selected right away.
+      await navigateTo(await createFolder(currentPath, name));
+    } catch (cause) {
+      setCreateError(cause instanceof Error ? cause.message : String(cause));
+    } finally {
+      setCreatingFolder(false);
+    }
   };
   const hasUncommittedPath = pathInput.trim() !== currentPath;
   const cloneName = cloneUrl.trim() ? cloneDirectoryName(cloneUrl) : null;
   const cloneTarget = cloneName && currentPath ? `${currentPath.replace(/[\\/]+$/, "")}${currentPath.includes("\\") ? "\\" : "/"}${cloneName}` : null;
   const canSelect = Boolean(currentPath) && !hasUncommittedPath && !locked && (!cloneUrl.trim() || cloneName !== null);
   const canNavigateUp = Boolean(parentDirectory) || isWindowsDriveRoot(currentPath);
+  const canCreateFolder = Boolean(currentPath) && drives === null && !hasUncommittedPath && !loading;
   const submitSelection = async () => {
     const args = extraArgs.split("\n").map((arg) => arg.trim()).filter(Boolean);
     const launchConfig = { profile: profile.trim() || undefined, advisor: advisor || undefined, extraArgs: args.length ? args : undefined };
@@ -206,6 +287,8 @@ export function DirectoryPicker({ onCancel, onSelect, busy = false, error }: Pro
     void fetch("/api/projects/clone", { method: "DELETE", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: cloneId }) })
       .then((response) => { if (response.status === 404 && !cloneRespondedRef.current) dropStream(); }, dropStream);
   };
+  const currentIsFavorite = Boolean(currentPath) && favorites.includes(currentPath);
+  const launchOptionCount = Number(Boolean(profile.trim())) + Number(advisor) + Number(Boolean(extraArgs.trim()));
 
   if (!portalTarget) return null;
 
@@ -272,9 +355,63 @@ export function DirectoryPicker({ onCancel, onSelect, busy = false, error }: Pro
           >
             {t("directoryPicker.go")}
           </button>
+          <button
+            className="directory-picker-icon-button"
+            type="button"
+            onClick={() => { setNewFolderName((name) => (name === null ? "" : null)); setCreateError(null); }}
+            disabled={!canCreateFolder}
+            aria-expanded={newFolderName !== null}
+            title={t("directoryPicker.newFolderIn")}
+            aria-label={t("directoryPicker.newFolderIn")}
+            style={{ width: 36, height: 36, padding: 0, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, border: "1px solid var(--border)", borderRadius: 6, background: newFolderName !== null ? "var(--bg-selected)" : "var(--bg-hover)", color: newFolderName !== null ? "var(--text)" : "var(--text-muted)", cursor: canCreateFolder ? "pointer" : "default", opacity: canCreateFolder ? 1 : 0.45, transition: "background-color var(--dur-fast) var(--ease-out-warm), color var(--dur-fast) var(--ease-out-warm), opacity var(--dur-fast) var(--ease-out-warm)" }}
+          >
+            <FolderPlus size={16} strokeWidth={1.8} aria-hidden="true" />
+          </button>
         </form>
 
         <div className="directory-picker-list" style={{ flex: 1, minHeight: 0, overflow: "auto", padding: "8px 10px" }}>
+          {newFolderName !== null && !loading && (
+            <form onSubmit={(event) => void handleCreateFolder(event)} style={{ padding: "2px 0 8px", marginBottom: 6, borderBottom: "1px solid var(--border)" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <span style={{ display: "flex", padding: "0 2px 0 8px", color: "var(--text-muted)" }}><FolderIcon /></span>
+                <input
+                  className="directory-picker-new-folder-name"
+                  value={newFolderName}
+                  onChange={(event) => { setNewFolderName(event.target.value); setCreateError(null); }}
+                  placeholder={t("directoryPicker.folderName")}
+                  aria-label={t("directoryPicker.folderName")}
+                  aria-invalid={createError ? true : undefined}
+                  disabled={creatingFolder}
+                  autoFocus
+                  autoComplete="off"
+                  spellCheck={false}
+                  style={{ minWidth: 0, flex: 1, height: 30, padding: "0 8px", border: `1px solid ${createError ? "var(--status-error)" : "var(--border)"}`, borderRadius: 6, outline: "none", background: "var(--bg-panel)", color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 11 }}
+                />
+                <button
+                  className="directory-picker-action"
+                  type="submit"
+                  disabled={creatingFolder || !newFolderName.trim()}
+                  style={{ height: 30, padding: "0 12px", border: "1px solid var(--border)", borderRadius: 6, background: "var(--bg-hover)", color: "var(--text)", fontSize: 12, fontWeight: 600, cursor: creatingFolder || !newFolderName.trim() ? "default" : "pointer", opacity: creatingFolder || !newFolderName.trim() ? 0.6 : 1 }}
+                >
+                  {creatingFolder ? t("directoryPicker.creating") : t("directoryPicker.create")}
+                </button>
+                <button
+                  className="directory-picker-icon-button"
+                  type="button"
+                  onClick={() => { setNewFolderName(null); setCreateError(null); }}
+                  disabled={creatingFolder}
+                  title={t("directoryPicker.cancel")}
+                  aria-label={t("directoryPicker.cancel")}
+                  style={{ width: 30, height: 30, padding: 0, display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, border: 0, borderRadius: 6, background: "none", color: "var(--text-muted)", cursor: creatingFolder ? "default" : "pointer" }}
+                >
+                  <X size={14} aria-hidden="true" />
+                </button>
+              </div>
+              {createError && (
+                <div role="alert" style={{ padding: "6px 8px 0", color: "var(--status-error)", fontSize: 11 }}>{createError}</div>
+              )}
+            </form>
+          )}
           {loading ? (
             <div style={{ display: "grid", gap: 6, padding: 8 }} aria-busy="true" aria-label={t("directoryPicker.loadingDirectories")}>
               {Array.from({ length: 7 }).map((_, i) => (
@@ -333,10 +470,62 @@ export function DirectoryPicker({ onCancel, onSelect, busy = false, error }: Pro
               {cloneLog.replace(/\r/g, "")}
             </pre>
           )}
-          <input className="directory-picker-profile" value={profile} onChange={(event) => setProfile(event.target.value)} placeholder={t("directoryPicker.profilePlaceholder")} aria-label={t("directoryPicker.profileLabel")} style={{ width: "100%", height: 30, boxSizing: "border-box", marginBottom: 7, padding: "0 8px", background: "var(--bg-panel)", border: "1px solid var(--border)", borderRadius: 6, color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 11 }} />
-          <label className="directory-picker-launch" style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 7, color: "var(--text-muted)", fontSize: 11 }}><input type="checkbox" checked={advisor} onChange={(event) => setAdvisor(event.target.checked)} />{t("projectLaunchConfig.advisorLabel")}</label>
-          <textarea className="directory-picker-extra-args" value={extraArgs} onChange={(event) => setExtraArgs(event.target.value)} placeholder={t("directoryPicker.extraArgsPlaceholder")} aria-label={t("directoryPicker.extraArgsLabel")} rows={2} style={{ width: "100%", boxSizing: "border-box", resize: "vertical", padding: "6px 8px", background: "var(--bg-panel)", border: "1px solid var(--border)", borderRadius: 6, color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 11 }} />
         </div>
+
+        <details
+          className="directory-picker-section"
+          open={favoritesOpen}
+          onToggle={(event) => setFavoritesOpenPersisted(event.currentTarget.open)}
+        >
+          <summary className="directory-picker-section-summary">
+            <ChevronRight className="directory-picker-section-chevron" size={14} aria-hidden="true" />
+            <Star size={13} aria-hidden="true" />
+            <span style={{ flex: 1 }}>{t("directoryPicker.favorites")}</span>
+            {favorites.length > 0 && <span className="directory-picker-section-count">{favorites.length}</span>}
+          </summary>
+          <div className="directory-picker-section-body">
+            {favorites.length === 0 ? (
+              <p className="directory-picker-section-empty">{t("directoryPicker.favoritesEmpty")}</p>
+            ) : (
+              <ul className="directory-picker-favorites">
+                {favorites.map((path) => (
+                  <li key={path} data-current={path === currentPath || undefined}>
+                    <button className="directory-picker-entry" type="button" onClick={() => void navigateTo(path)} disabled={loading} title={t("directoryPicker.jumpTo", { path })}>
+                      <FolderIcon />
+                      <span className="directory-picker-favorite-path">{path}</span>
+                    </button>
+                    <button className="directory-picker-icon-button directory-picker-favorite-remove" type="button" onClick={() => saveFavorites(favorites.filter((entry) => entry !== path))} title={t("directoryPicker.removeFavorite")} aria-label={`${t("directoryPicker.removeFavorite")}: ${path}`}>
+                      <X size={13} aria-hidden="true" />
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <button
+              className="directory-picker-action directory-picker-favorite-toggle"
+              type="button"
+              onClick={() => saveFavorites(currentIsFavorite ? favorites.filter((entry) => entry !== currentPath) : [...favorites, currentPath])}
+              disabled={!currentPath || hasUncommittedPath || (!currentIsFavorite && favorites.length >= MAX_FAVORITES)}
+            >
+              <Star size={13} aria-hidden="true" fill={currentIsFavorite ? "currentColor" : "none"} />
+              {currentIsFavorite ? t("directoryPicker.unfavoriteCurrent") : t("directoryPicker.favoriteCurrent")}
+            </button>
+          </div>
+        </details>
+
+        <details className="directory-picker-section">
+          <summary className="directory-picker-section-summary">
+            <ChevronRight className="directory-picker-section-chevron" size={14} aria-hidden="true" />
+            <SlidersHorizontal size={13} aria-hidden="true" />
+            <span style={{ flex: 1 }}>{t("directoryPicker.launchOptions")}</span>
+            {launchOptionCount > 0 && <span className="directory-picker-section-count">{launchOptionCount}</span>}
+          </summary>
+          <div className="directory-picker-section-body">
+            <input className="directory-picker-profile" value={profile} onChange={(event) => setProfile(event.target.value)} placeholder={t("directoryPicker.profilePlaceholder")} aria-label={t("directoryPicker.profileLabel")} style={{ width: "100%", height: 30, boxSizing: "border-box", marginBottom: 7, padding: "0 8px", background: "var(--bg-panel)", border: "1px solid var(--border)", borderRadius: 6, color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 11 }} />
+            <label className="directory-picker-launch" style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 7, color: "var(--text-muted)", fontSize: 11 }}><input type="checkbox" checked={advisor} onChange={(event) => setAdvisor(event.target.checked)} />{t("projectLaunchConfig.advisorLabel")}</label>
+            <textarea className="directory-picker-extra-args" value={extraArgs} onChange={(event) => setExtraArgs(event.target.value)} placeholder={t("directoryPicker.extraArgsPlaceholder")} aria-label={t("directoryPicker.extraArgsLabel")} rows={2} style={{ width: "100%", boxSizing: "border-box", resize: "vertical", padding: "6px 8px", background: "var(--bg-panel)", border: "1px solid var(--border)", borderRadius: 6, color: "var(--text)", fontFamily: "var(--font-mono)", fontSize: 11 }} />
+          </div>
+        </details>
         <div className="directory-picker-footer" style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 10, flexShrink: 0, padding: "10px 18px", borderTop: "1px solid var(--border)" }}>
           {cloning ? (
             <button className="directory-picker-action" type="button" autoFocus onClick={cancelClone} style={{ padding: "6px 14px", border: "1px solid var(--border)", borderRadius: 6, background: "none", color: "var(--status-error)", cursor: "pointer", fontSize: 13 }}>{t("directoryPicker.cancelClone")}</button>

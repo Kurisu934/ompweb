@@ -17,35 +17,35 @@ function renderChat(markdown, opened = []) {
 test("an inline-code path opens the cleaned path in the file panel", () => {
   const opened = [];
   const { container } = renderChat(
-    "Shot: `/var/tmp/omp-sshots-1.webp`, see `src/app.ts:12`, `~/notes/a.md`, `C:\\Users\\me\\b.txt:3:4`.",
+    "Shot: `/var/tmp/omp-sshots-1.webp`, see `src/app.ts:12`, `~/notes/a.md`, `C:\\Users\\me\\b.txt:3:4`, `../outside.ts`.",
     opened,
   );
   const links = [...container.querySelectorAll("a")];
 
-  assert.deepEqual(links.map((a) => a.textContent), ["/var/tmp/omp-sshots-1.webp", "src/app.ts:12", "~/notes/a.md", "C:\\Users\\me\\b.txt:3:4"]);
+  assert.deepEqual(links.map((a) => a.textContent), ["/var/tmp/omp-sshots-1.webp", "src/app.ts:12", "~/notes/a.md", "C:\\Users\\me\\b.txt:3:4", "../outside.ts"]);
   assert.ok(links.every((a) => a.firstElementChild?.tagName === "CODE" && !a.hasAttribute("target")));
   for (const link of links) assert.equal(fireEvent.click(link, { button: 0 }), false, "click default must be prevented");
-  assert.deepEqual(opened, ["/var/tmp/omp-sshots-1.webp", "/home/me/project/src/app.ts", "~/notes/a.md", "C:/Users/me/b.txt"]);
+  assert.deepEqual(opened, ["/var/tmp/omp-sshots-1.webp", "/home/me/project/src/app.ts", "~/notes/a.md", "C:/Users/me/b.txt", "/home/me/outside.ts"]);
 });
 
-test("ordinary code, scheme handles, fenced blocks and escaping paths stay unlinked", () => {
+test("ordinary code, scheme handles and fenced blocks stay unlinked", () => {
   const opened = [];
   const { container } = renderChat(
     [
-      "`foo.bar()` `foo.bar` `a/b` `x => y` `/compact` `rm -rf /tmp/x` `../outside.ts` `/api/files/a.ts`",
+      "`foo.bar()` `foo.bar` `a/b` `x => y` `/compact` `rm -rf /tmp/x` `/api/files/a.ts`",
       "`history://abc` `proc://1` `local://plan.md` `https://x.test/a.png` `file:///tmp/a.png`",
       "```\n/var/tmp/a.png\n```",
     ].join("\n\n"),
     opened,
   );
 
-  assert.equal(container.querySelector("a"), null);
+  assert.equal(container.querySelectorAll("a").length, 0);
   assert.deepEqual(opened, []);
 });
 
 test("inline-code paths stay code outside a file-opening view and inside existing links", () => {
   const plain = render(React.createElement(MarkdownBody, null, "`/var/tmp/a.png`"));
-  assert.equal(plain.container.querySelector("a"), null);
+  assert.equal(plain.container.querySelectorAll("a").length, 0);
   cleanup();
 
   const { container } = renderChat("[`/var/tmp/a.png`](https://x.test)");

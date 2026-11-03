@@ -1,0 +1,17 @@
+.shortcut-settings { display: flex; flex-direction: column; min-width: 0; gap: 14px; }
+.shortcut-settings > h3 { display: flex; align-items: center; gap: 10px; margin: 0; font-size: 19px; }
+.shortcut-note, .shortcut-info p, .shortcut-conflicts { color: var(--text-muted); font-size: var(--text-sm); line-height: 1.5; margin: 4px 0; }
+.shortcut-search { width: 100%; min-width: 0; min-height: var(--control-height); padding: 8px 10px; border: 1px solid var(--border); border-radius: var(--radius-control); color: var(--text); background: var(--bg); }
+.shortcut-row { display: flex; flex-wrap: wrap; gap: 16px; justify-content: space-between; padding: 16px; border: 1px solid var(--border); border-radius: var(--radius-card); background: var(--bg-panel); }
+.shortcut-info { flex: 1 1 220px; min-width: 0; }
+.shortcut-info h4 { margin: 4px 0; font-size: var(--text-md); font-weight: 600; }
+.shortcut-scope { color: var(--text-dim); font-size: var(--text-xs); }
+.shortcut-controls { flex: 1 1 280px; min-width: 0; max-width: 100%; }
+.shortcut-bindings, .shortcut-actions, .shortcut-recording { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 4px 0 8px; }
+.shortcut-recording input { flex: 1 1 180px; }
+.shortcut-button, .shortcut-key { display: inline-flex; align-items: center; justify-content: center; gap: 5px; min-height: var(--control-height); padding: 6px 9px; border: 1px solid var(--border); border-radius: var(--radius-control); color: var(--text); background: var(--bg); cursor: pointer; font-size: var(--text-sm); }
+.shortcut-button:hover, .shortcut-key:hover { background: var(--bg-hover); }
+.shortcut-button:disabled { opacity: .5; cursor: default; }
+.shortcut-key kbd { font-family: var(--font-mono); }
+.shortcut-unbound { color: var(--text-muted); font-size: var(--text-sm); }
+@media (max-width: 640px) { .shortcut-button, .shortcut-key { min-height: 44px; } }

@@ -1,4 +1,5 @@
 "use client";
+import { matchesShortcut } from "@/lib/keyboard-shortcuts";
 
 import { useEffect, useState, useRef, useCallback, useMemo, type CSSProperties, type MouseEvent } from "react";
 import type { SyntaxHighlighterProps } from "react-syntax-highlighter";
@@ -10,8 +11,8 @@ import {
   vs,
   vscDarkPlus,
 } from "@/lib/syntax-highlight";
-import ReactMarkdown, { defaultUrlTransform } from "react-markdown";
-import { AtSign, Download, WrapText } from "lucide-react";
+import ReactMarkdown from "react-markdown";
+import { AtSign, Download, Pencil, WrapText } from "lucide-react";
 import { useTheme } from "@/hooks/useTheme";
 import {
   DOCX_PREVIEW_MAX_BYTES,
@@ -20,16 +21,22 @@ import {
   isDocumentPreviewPath,
   isImagePath,
 } from "@/lib/file-types";
-import { encodeFilePathForApi, getFileDirectory, getFileName, getRelativeFilePath } from "@/lib/file-paths";
+import { getFileDirectory, getFileName, getRelativeFilePath } from "@/lib/file-paths";
+import { getFileApiUrl, markdownFileUrlTransform } from "@/lib/file-urls";
 import { translate, useI18n } from "@/lib/i18n";
-import { resolveLocalFileHref } from "@/lib/file-links";
+import { parseArtifactHref, resolveLocalFileHref } from "@/lib/file-links";
 import { normalizeDisplayMath, useMarkdownPlugins } from "@/lib/markdown";
+import { ClickableImage } from "./ImageLightbox";
+import { useImageLoadError } from "@/hooks/useImageLoadError";
+import { formatApiError } from "@/lib/i18n/api-error";
 import { markdownCodeRenderer } from "./MarkdownCode";
 import { Tooltip } from "./ui/primitives";
 import { parseUnifiedPatch } from "@/lib/patch";
 import type { GitFileDiffResponse } from "@/lib/git-types";
 import { parseFrontmatter } from "@/lib/frontmatter";
 import { FrontmatterCard } from "./FrontmatterCard";
+import { FileTextEditor } from "./FileTextEditor";
+import type { FileEditorStatus } from "@/lib/file-editing";
 
 interface Props {
   filePath: string;
@@ -39,12 +46,15 @@ interface Props {
   onMentionLines?: (relativePath: string, startLine: number, endLine: number) => void;
   gitRefreshKey?: number;
   active?: boolean;
+  onEditorStateChange?: (filePath: string, status: FileEditorStatus) => void;
+  onSaved?: () => void;
 }
 
 interface FileData {
   content: string;
   language: string;
   size: number;
+  editable?: boolean;
 }
 
 type DisplayMode = "source" | "preview" | "diff";
@@ -192,20 +202,6 @@ function SourceCodeRenderer({ rows, stylesheet, useInlineStyles, wrapLines }: So
   });
 }
 
-function getFileApiUrl(
-  filePath: string,
-  type: "read" | "download" | "meta" | "preview" | "watch",
-  sourceSessionId?: string | null,
-  params: Record<string, string | number | undefined> = {},
-): string {
-  const encoded = encodeFilePathForApi(filePath);
-  const searchParams = new URLSearchParams({ type });
-  if (sourceSessionId) searchParams.set("sessionId", sourceSessionId);
-  for (const [key, value] of Object.entries(params)) {
-    if (value !== undefined) searchParams.set(key, String(value));
-  }
-  return `/api/files/${encoded}?${searchParams.toString()}`;
-}
 
 function DownloadLink({ filePath, sourceSessionId }: { filePath: string; sourceSessionId?: string | null }) {
   const { t } = useI18n();
@@ -418,14 +414,15 @@ function ImageViewer({ filePath, cwd, sourceSessionId, active = true }: Props) {
   const [bust, setBust] = useState(0);
   const [size, setSize] = useState<number | null>(null);
   const [naturalSize, setNaturalSize] = useState<{ w: number; h: number } | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const src = getFileApiUrl(filePath, "read", sourceSessionId, bust ? { v: bust } : undefined);
+  const { error, onError, clearError } = useImageLoadError(src);
   const esRef = useRef<EventSource | null>(null);
 
   const ext = getFileName(filePath).toLowerCase().split(".").pop() ?? "";
   const retry = useCallback(() => {
-    setError(null);
+    clearError();
     setBust((value) => value + 1);
-  }, []);
+  }, [clearError]);
 
   useEffect(() => {
     if (!active) {
@@ -435,7 +432,7 @@ function ImageViewer({ filePath, cwd, sourceSessionId, active = true }: Props) {
     setBust(0);
     setSize(null);
     setNaturalSize(null);
-    setError(null);
+    clearError();
     setWatching(false);
 
     if (esRef.current) {
@@ -461,9 +458,8 @@ function ImageViewer({ filePath, cwd, sourceSessionId, active = true }: Props) {
       es.close();
       esRef.current = null;
     };
-  }, [active, filePath, sourceSessionId]);
+  }, [active, filePath, sourceSessionId, clearError]);
 
-  const src = getFileApiUrl(filePath, "read", sourceSessionId, bust ? { v: bust } : undefined);
 
   const formatSizeStr = size != null ? formatSize(size) : null;
 
@@ -532,10 +528,11 @@ function ImageViewer({ filePath, cwd, sourceSessionId, active = true }: Props) {
             src={src}
             alt={filePath}
             onLoad={(e) => {
+              clearError();
               const img = e.currentTarget;
               setNaturalSize({ w: img.naturalWidth, h: img.naturalHeight });
             }}
-            onError={() => setError(t("fileViewer.imageLoadFailed"))}
+            onError={onError}
             style={{
               maxWidth: "100%",
               maxHeight: "100%",
@@ -683,7 +680,7 @@ function AudioViewer({ filePath, cwd, sourceSessionId, active = true }: Props) {
   );
 }
 
-function DocumentViewer({ filePath, cwd, sourceSessionId, active = true }: Props) {
+function DocumentViewer({ filePath, sourceSessionId, active = true }: Props) {
   const { t } = useI18n();
   const [watching, setWatching] = useState(false);
   const [bust, setBust] = useState(0);
@@ -820,7 +817,12 @@ function DocumentViewer({ filePath, cwd, sourceSessionId, active = true }: Props
   );
 }
 
-export function FileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionLines, gitRefreshKey, active = true }: Props) {
+export function FileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionLines, gitRefreshKey, active = true, onEditorStateChange, onSaved }: Props) {
+  const [editing, setEditing] = useState(false);
+  if (editing) return <FileTextEditor key={filePath} filePath={filePath} onClose={() => setEditing(false)} onStateChange={onEditorStateChange} onSaved={onSaved} />;
+  if (parseArtifactHref(filePath)) {
+    return <ArtifactFileViewer filePath={filePath} cwd={cwd} sourceSessionId={sourceSessionId} onOpenFile={onOpenFile} onMentionLines={onMentionLines} gitRefreshKey={gitRefreshKey} active={active} onEditorStateChange={onEditorStateChange} onSaved={onSaved} />;
+  }
   if (isImagePath(filePath)) {
     return <ImageViewer filePath={filePath} cwd={cwd} sourceSessionId={sourceSessionId} active={active} />;
   }
@@ -830,10 +832,35 @@ export function FileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMenti
   if (isDocumentPreviewPath(filePath)) {
     return <DocumentViewer filePath={filePath} cwd={cwd} sourceSessionId={sourceSessionId} active={active} />;
   }
-  return <TextFileViewer filePath={filePath} cwd={cwd} sourceSessionId={sourceSessionId} onOpenFile={onOpenFile} onMentionLines={onMentionLines} gitRefreshKey={gitRefreshKey} active={active} />;
+  return <TextFileViewer filePath={filePath} cwd={cwd} sourceSessionId={sourceSessionId} onOpenFile={onOpenFile} onMentionLines={onMentionLines} gitRefreshKey={gitRefreshKey} active={active} onEdit={() => setEditing(true)} />;
 }
 
-function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionLines, gitRefreshKey, active = true }: Props) {
+function ArtifactFileViewer(props: Props) {
+  const { t } = useI18n();
+  const url = getFileApiUrl(props.filePath, "resolve", props.sourceSessionId);
+  const [result, setResult] = useState<{ url: string; filePath?: string; error?: string } | null>(null);
+  useEffect(() => {
+    const controller = new AbortController();
+    void fetch(url, { signal: controller.signal })
+      .then(async (response) => {
+        const data = await response.json();
+        if (!controller.signal.aborted) {
+          setResult(response.ok && typeof data.filePath === "string"
+            ? { url, filePath: data.filePath }
+            : { url, error: formatApiError(data) });
+        }
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setResult({ url, error: formatApiError(null) });
+      });
+    return () => controller.abort();
+  }, [url]);
+  if (result?.url !== url) return <div role="status">{t("appShell.loading")}</div>;
+  if (!result.filePath) return <div role="alert" style={{ padding: 16, color: "var(--status-error)" }}>{result.error}</div>;
+  return <FileViewer {...props} filePath={result.filePath} />;
+}
+
+function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionLines, gitRefreshKey, active = true, onEdit }: Props & { onEdit: () => void }) {
   const { t } = useI18n();
   const { isDark } = useTheme();
   const [data, setData] = useState<FileData | null>(null);
@@ -873,7 +900,7 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
       .then((d: FileData & { error?: string }) => {
         if (requestId !== contentRequestRef.current) return null;
         if (d.error) {
-          setError(d.error);
+          setError(formatApiError(d));
           return null;
         }
         setError(null);
@@ -1037,7 +1064,7 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
     if (!onMentionLines || displayMode !== "source") return;
 
     const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.repeat || event.key.toLowerCase() !== "i" || (!event.metaKey && !event.ctrlKey) || event.altKey || event.shiftKey) return;
+      if (!matchesShortcut("mentionSelection", event)) return;
 
       const target = event.target;
       if (target instanceof Element && target.closest("input, textarea, [contenteditable='true']")) return;
@@ -1134,6 +1161,9 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
         />
 
         <div className="file-viewer-controls">
+          <button className="file-edit-action" onClick={onEdit} disabled={!data.editable} title={t(data.editable ? "fileEditing.edit" : "fileEditing.readOnly")} aria-label={t("fileEditing.edit")}>
+            <Pencil size={14} /> {t("fileEditing.edit")}
+          </button>
           {displayModes.length > 1 && (
             <div
               className="file-viewer-mode-switch"
@@ -1232,9 +1262,7 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
             <ReactMarkdown
               remarkPlugins={markdownPlugins.remarkPlugins}
               rehypePlugins={markdownPlugins.rehypePlugins}
-              // The shared sanitizer admits `agent:` for chat links; previews
-              // have no subagent to open, so drop such hrefs as before.
-              urlTransform={(url) => defaultUrlTransform(url) || undefined}
+              urlTransform={markdownFileUrlTransform}
               components={{
                 code: markdownCodeRenderer({ defaultPreview: true }),
                 pre({ children }) {
@@ -1244,10 +1272,11 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
                 },
                 a({ href, children, ...props }) {
                   delete props.node;
-                  const linkedFile = onOpenFile
-                    ? resolveLocalFileHref(href, markdownDirectory, cwd ?? markdownDirectory)
-                    : null;
+                  const linkedFile = resolveLocalFileHref(href, markdownDirectory);
                   if (!linkedFile || !onOpenFile) {
+                    if (linkedFile) {
+                      return <a href={getFileApiUrl(linkedFile, "read", sourceSessionId)} {...props}>{children}</a>;
+                    }
                     // Never let a preview link replace omp-web itself: in-page anchors stay,
                     // web links open a new tab, and a path the panel cannot open (such as a
                     // relative link in a Markdown file outside the workspace) is plain text.
@@ -1265,12 +1294,12 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
                     onOpenFile(linkedFile);
                   };
 
-                  return <a href={href} {...props} onClick={handleClick}>{children}</a>;
+                  return <a href={getFileApiUrl(linkedFile, "read", sourceSessionId)} {...props} onClick={handleClick}>{children}</a>;
                 },
                 img({ src, alt, ...props }) {
                   delete props.node;
                   const imagePath = typeof src === "string"
-                    ? resolveLocalFileHref(src, markdownDirectory, cwd ?? markdownDirectory)
+                    ? resolveLocalFileHref(src, markdownDirectory)
                     : null;
                   // A local path the file API cannot serve here would only request the app
                   // origin and 404; show the alt text instead of a broken image.
@@ -1280,9 +1309,7 @@ function TextFileViewer({ filePath, cwd, sourceSessionId, onOpenFile, onMentionL
                   const imageSrc = imagePath
                     ? getFileApiUrl(imagePath, "read", sourceSessionId)
                     : src;
-                  // Dynamic local paths are served directly by the file API.
-                  // eslint-disable-next-line @next/next/no-img-element
-                  return <img src={imageSrc} alt={alt ?? ""} loading="lazy" {...props} />;
+                  return <ClickableImage src={imageSrc} alt={alt ?? ""} loading="lazy" {...props} />;
                 },
               }}
             >

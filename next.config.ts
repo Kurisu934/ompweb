@@ -24,10 +24,14 @@ const nextConfig = (phase: string): NextConfig => {
     // root, Next can choose a parent lockfile on Windows and traverse protected
     // user-profile junctions while compiling.
     outputFileTracingRoot: process.cwd(),
+    outputFileTracingIncludes: {
+      "/*": ["./bin/omp-single-agent.yml", "./bin/omp-web-instructions.ts", "./lib/agent-instructions.ts", "./lib/agent-instructions-store.ts", "./lib/omp/paths.ts"],
+    },
     // undici is loaded from a runtime dependency (lib/http-dispatcher.ts) to
     // honor HTTP(S)_PROXY for server-side fetch; keep it external so the
     // bundler does not inline a second copy next to the global dispatcher.
-    serverExternalPackages: ["undici", "dxt-js", "lz4js", "sharp"],
+    // node-pty is a native addon (lib/terminal-manager.ts loads it at runtime).
+    serverExternalPackages: ["undici", "dxt-js", "lz4js", "sharp", "node-pty"],
     webpack(config: Parameters<NonNullable<NextConfig["webpack"]>>[0]) {
       // Next's entrypoint tracer does not automatically reject dynamic paths
       // outside the project root. Add parent/profile patterns to its ignore list
@@ -71,7 +75,7 @@ const nextConfig = (phase: string): NextConfig => {
         { key: "X-Frame-Options", value: "DENY" },
         { key: "Referrer-Policy", value: "no-referrer" },
         { key: "Permissions-Policy", value: "camera=(), microphone=(self), geolocation=()" },
-        { key: "Content-Security-Policy", value: "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; connect-src 'self' ws: wss:; font-src 'self' data:; media-src 'self' blob:" },
+        { key: "Content-Security-Policy", value: "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; img-src 'self' data: blob: https:; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; connect-src 'self' ws: wss:; font-src 'self' data: blob:; media-src 'self' blob:" },
       ];
       // /api/files streams workspace files whose document policy depends on the
       // content type (strict CSP for SVG, the DOCX preview policy, none for

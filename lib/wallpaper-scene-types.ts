@@ -16,10 +16,19 @@ export interface SceneSound {
   minTime: number; maxTime: number;
 }
 export type SceneSoundCommand = { id: number; action: "play" | "pause" | "stop" | "volume"; value?: number };
+export interface SceneBonePhysics {
+  translation: boolean; rotation: boolean;
+  translationAxes: boolean[]; rotationAxes: boolean[];
+  translationStiffness: number; translationFriction: number; translationInertia: number;
+  rotationStiffness: number; rotationFriction: number; rotationInertia: number;
+  maxDistance: number; gravity: number[]; tip: number[];
+  minAngles?: number[]; maxAngles?: number[]; maxTorque?: number;
+}
+export type SceneBoneCommand = { bone: number; action: "impulse"; translation: number[]; rotation: number[] } | { bone: number; action: "reset" };
 export interface SceneMesh {
   positions: number[]; uvs: number[]; indices: number[];
   joints?: number[]; weights?: number[];
-  bones?: { parent: number; matrix: number[]; name?: string; physics?: boolean }[];
+  bones?: { parent: number; matrix: number[]; name?: string; physics?: SceneBonePhysics }[];
   referencePose?: number[][];
   editedPose?: number[][];
   editedPositions?: number[];

@@ -36,7 +36,7 @@ export const boneGuestSource = String.raw`(function(Vec3, finite) {
     toString(){return valid(this.elements).join(' ');}
   }
   const matrix=v=>{const m=new Mat4();m.elements=valid(v);return m;};
-  const supported=new Set(['getBoneCount','getBoneIndex','getBoneParentIndex','getLocalBoneTransform','getBoneTransform','setLocalBoneTransform','setBoneTransform','getLocalBoneOrigin','setLocalBoneOrigin']);
+  const supported=new Set(['getBoneCount','getBoneIndex','getBoneParentIndex','getLocalBoneTransform','getBoneTransform','setLocalBoneTransform','setBoneTransform','getLocalBoneOrigin','setLocalBoneOrigin','applyBonePhysicsImpulse','resetBonePhysicsSimulation']);
   function api(data,key){
     if(!supported.has(key))return undefined;
     const bones=data.bones??[];
@@ -44,6 +44,8 @@ export const boneGuestSource = String.raw`(function(Vec3, finite) {
     const local=i=>matrix(data.boneWrites?.[i]??data.bonePose?.local[i]??bones[i].matrix);
     const world=(i,depth=0)=>{if(depth>=64)throw Error('Cyclic scene bone');const p=bones[i].parent;return (p<0?matrix(data.bonePose?.world??identity()):world(p,depth+1)).multiply(local(i));};
     const write=(i,m)=>{if(!(m instanceof Mat4))throw Error('Invalid bone transform');(data.boneWrites??={})[i]=valid(m.elements);};
+    const command=c=>{if((data.boneCommands??=[]).length>=128)throw Error('Bone physics command limit');data.boneCommands.push(c);};
+    const impulse=v=>{const p=new Vec3(v??0);return [finite(p.x),finite(p.y),finite(p.z)];};
     const methods={
       getBoneCount:()=>bones.length,
       getBoneIndex:name=>bones.findIndex(b=>b.name===name),
@@ -53,7 +55,9 @@ export const boneGuestSource = String.raw`(function(Vec3, finite) {
       setLocalBoneTransform:(v,m)=>write(index(v),m),
       setBoneTransform:(v,m)=>{const i=index(v),p=bones[i].parent;write(i,(p<0?matrix(data.bonePose?.world??identity()):world(p)).inverse().multiply(m));},
       getLocalBoneOrigin:v=>local(index(v)).translation(),
-      setLocalBoneOrigin:(v,p)=>{const i=index(v);write(i,local(i).translation(p));}
+      setLocalBoneOrigin:(v,p)=>{const i=index(v);write(i,local(i).translation(p));},
+      applyBonePhysicsImpulse:(v,translation,rotation)=>command({bone:v===undefined?-1:index(v),action:'impulse',translation:impulse(translation),rotation:impulse(rotation)}),
+      resetBonePhysicsSimulation:v=>command({bone:v===undefined?-1:index(v),action:'reset'})
     };
     return Object.hasOwn(methods,key)?methods[key]:undefined;
   }

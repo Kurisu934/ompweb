@@ -11,6 +11,7 @@ import {
   loadProjectRegistry,
   mergeProjects,
   ProjectPathError,
+  type ProjectPresentationUpdate,
   saveProjectRegistry,
   upsertProject,
   updateProjectsPresentation,
@@ -91,7 +92,7 @@ export async function POST(req: Request) {
 }
 
 // PATCH /api/projects
-// Single shape: { cwd, alias?, sortOrder? }   Batch shape: { updates: [{ cwd, alias?, sortOrder? }, ...] }
+// Single shape: { cwd, alias?, sortOrder?, pinned? }   Batch shape: { updates: [{ cwd, alias?, sortOrder?, pinned? }, ...] }
 // Applied atomically in one registry load/save so a drag reorder (one request,
 // many entries) can never interleave with another writer and lose updates.
 // Renaming or ordering a project is an explicit act of managing it: paths that
@@ -105,13 +106,14 @@ export async function PATCH(req: Request) {
       cwd?: unknown;
       alias?: unknown;
       sortOrder?: unknown;
+      pinned?: unknown;
       launchConfig?: unknown;
       updates?: unknown;
     };
     const rawUpdates: unknown[] = Array.isArray(body.updates)
       ? body.updates
-      : body.cwd !== undefined || body.alias !== undefined || body.sortOrder !== undefined || body.launchConfig !== undefined
-        ? [{ cwd: body.cwd, alias: body.alias, sortOrder: body.sortOrder, launchConfig: body.launchConfig }]
+      : body.cwd !== undefined || body.alias !== undefined || body.sortOrder !== undefined || body.pinned !== undefined || body.launchConfig !== undefined
+        ? [{ cwd: body.cwd, alias: body.alias, sortOrder: body.sortOrder, pinned: body.pinned, launchConfig: body.launchConfig }]
         : [];
     if (rawUpdates.length === 0) {
       return NextResponse.json({ error: "Path is required", code: "path_required" }, { status: 400 });
@@ -138,16 +140,18 @@ export async function PATCH(req: Request) {
       return match ? match.path : null;
     };
 
-    const parsed: Array<{ path: string; alias?: string | null; sortOrder?: number | null; launchConfig?: ProjectLaunchConfig | null }> = [];
+    const parsed: ProjectPresentationUpdate[] = [];
     const skipped: Array<{ cwd: string; code: string; error: string }> = [];
     for (const item of rawUpdates) {
-      const entry = item as { cwd?: unknown; alias?: unknown; sortOrder?: unknown; launchConfig?: unknown };
+      const entry = item as { cwd?: unknown; alias?: unknown; sortOrder?: unknown; pinned?: unknown; launchConfig?: unknown };
       const cwd = typeof entry.cwd === "string" ? entry.cwd.trim() : "";
       if (!cwd) return NextResponse.json({ error: "Path is required", code: "path_required" }, { status: 400 });
       const alias = entry.alias === null ? null : typeof entry.alias === "string" ? entry.alias : undefined;
       const sortOrder = entry.sortOrder === null ? null : typeof entry.sortOrder === "number" && Number.isFinite(entry.sortOrder) ? entry.sortOrder : undefined;
+      const pinned = entry.pinned === null ? null : typeof entry.pinned === "boolean" ? entry.pinned : undefined;
       if (entry.alias !== undefined && alias === undefined) return NextResponse.json({ error: "Alias must be a string", code: "invalid_alias" }, { status: 400 });
       if (entry.sortOrder !== undefined && sortOrder === undefined) return NextResponse.json({ error: "Sort order must be a number", code: "invalid_sort_order" }, { status: 400 });
+      if (entry.pinned !== undefined && pinned === undefined) return NextResponse.json({ error: "Pinned must be a boolean", code: "invalid_pinned" }, { status: 400 });
       const launchConfig = entry.launchConfig === null ? null : parseLaunchConfig(entry.launchConfig);
       // Same existence/directory checks as POST: an auto-registering endpoint
       // must never persist ghost entries for deleted paths, plain files, or
@@ -158,7 +162,7 @@ export async function PATCH(req: Request) {
       // workspace stays reorderable/renamable even after its directory is removed.
       const managedPath = isAlreadyManaged(cwd);
       if (managedPath) {
-        parsed.push({ path: managedPath, alias, sortOrder, launchConfig });
+        parsed.push({ path: managedPath, alias, sortOrder, pinned, launchConfig });
         continue;
       }
       let normalized: string;
@@ -185,7 +189,7 @@ export async function PATCH(req: Request) {
         }
         throw error;
       }
-      parsed.push({ path: projectRoot, alias, sortOrder, launchConfig });
+      parsed.push({ path: projectRoot, alias, sortOrder, pinned, launchConfig });
     }
     // Bulk path: every entry was a ghost — propagate the first failure so the
     // client gets a meaningful 400 instead of a misleading 200 with no changes.
@@ -196,7 +200,7 @@ export async function PATCH(req: Request) {
 
     // Duplicate targets within one batch merge per-field (later defined
     // fields win) instead of the whole later update replacing the earlier.
-    const merged = new Map<string, { path: string; alias?: string | null; sortOrder?: number | null; launchConfig?: ProjectLaunchConfig | null }>();
+    const merged = new Map<string, ProjectPresentationUpdate>();
     for (const update of parsed) {
       const key = comparableProjectPath(update.path);
       const previous = merged.get(key);
@@ -204,6 +208,7 @@ export async function PATCH(req: Request) {
         path: previous.path,
         alias: update.alias !== undefined ? update.alias : previous.alias,
         sortOrder: update.sortOrder !== undefined ? update.sortOrder : previous.sortOrder,
+        pinned: update.pinned !== undefined ? update.pinned : previous.pinned,
         launchConfig: update.launchConfig !== undefined ? update.launchConfig : previous.launchConfig,
       } : update);
     }
@@ -232,7 +237,7 @@ export async function PATCH(req: Request) {
     const updatedKeys = new Set(updates.map((update) => comparableProjectPath(update.path)));
     const projects = next.projects
       .filter((entry) => updatedKeys.has(comparableProjectPath(entry.path)))
-      .map((entry) => ({ path: entry.path, addedAt: entry.addedAt, hidden: entry.hidden, alias: entry.alias, sortOrder: entry.sortOrder, launchConfig: entry.launchConfig }));
+      .map((entry) => ({ path: entry.path, addedAt: entry.addedAt, hidden: entry.hidden, alias: entry.alias, sortOrder: entry.sortOrder, pinned: entry.pinned, launchConfig: entry.launchConfig }));
     return NextResponse.json({ projects });
   } catch (error) {
     if (error instanceof ProjectPathError) {

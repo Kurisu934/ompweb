@@ -3,6 +3,7 @@
 import dynamic from "next/dynamic";
 import { useEffect, useState } from "react";
 import type { SessionInfo } from "@/lib/types";
+import { matchesShortcut } from "@/lib/keyboard-shortcuts";
 
 const CommandPalette = dynamic(() => import("./CommandPalette").then((module) => module.CommandPalette), {
   ssr: false,
@@ -16,7 +17,7 @@ type Props = {
 
 /**
  * Keeps the command palette chunk out of the initial shell. The first
- * Ctrl/Cmd+K or explicit toolbar action mounts it with the palette already
+ * configured shortcut or explicit toolbar action mounts it with the palette already
  * open; subsequent shortcuts are handled by the palette itself.
  */
 export function CommandPaletteMount(props: Props) {
@@ -25,12 +26,10 @@ export function CommandPaletteMount(props: Props) {
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "k") {
+      if (!loaded && matchesShortcut("commandPalette", event)) {
         event.preventDefault();
-        if (!loaded) {
-          setLoaded(true);
-          setOpenRequest((request) => request + 1);
-        }
+        setLoaded(true);
+        setOpenRequest((request) => request + 1);
       }
     };
     window.addEventListener("keydown", onKeyDown, true);

@@ -183,7 +183,7 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
   scrollToNodeRef.current = scrollToNode;
 
   // Scroll-spy: identify which message node is currently in the viewport
-  const updateScroll = useCallback(() => {
+  const updateScroll = () => {
     const scrollEl = scrollContainer.current;
     if (!scrollEl || nodes.length === 0) return;
 
@@ -215,7 +215,7 @@ export const ChatMinimap = memo(function ChatMinimap({ messages, scrollContainer
     }
 
     setActiveIndex(bestIdx);
-  }, [scrollContainer, messageRefs, nodes]);
+  };
 
   const updateScrollRef = useRef(updateScroll);
   updateScrollRef.current = updateScroll;

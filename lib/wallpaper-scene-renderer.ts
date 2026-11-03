@@ -16,6 +16,8 @@ import type { SceneScriptInput } from "./wallpaper-script-bones";
 import { pointInSceneMesh, sceneCursorPosition } from "./wallpaper-scene-pointer";
 import { audioUniformSpectrum, type WallpaperAudio } from "./wallpaper-audio";
 import { SceneTextScheduler } from "./wallpaper-text-scheduler";
+import { loadSceneFont, loadSceneResources, loadSceneVideo, sceneTextureDemand, type LoadedSceneFont } from "./wallpaper-scene-loading";
+import { cachedSceneAsset, cacheSceneVideo, sceneAssetBlob } from "./wallpaper-client-cache";
 
 const vertex = `precision highp float;
 attribute vec3 a_Position;
@@ -62,7 +64,7 @@ function bindMatrix(mesh: T.Mesh, mat: T.RawShaderMaterial) {
   };
 }
 
-type ParticleInstance = { x: number; y: number; anchor?: Particle; credits: number[]; started: boolean; emitting: boolean; alive: number };
+type ParticleInstance = { x: number; y: number; anchor?: Particle; credits: number[]; started: boolean; emitting: boolean; alive: number; sequence: number };
 type Particle = { age: number; life: number; x: number; y: number; vx: number; vy: number; size: number; angle: number; spin: number; color: number[]; alpha: number; frame: number; seed: number; owner: ParticleInstance; history?: { x: number; y: number; age: number }[] };
 export class ParticleSystem {
   readonly mesh: T.Mesh;
@@ -85,6 +87,14 @@ export class ParticleSystem {
   private connectedRope: boolean;
   private segments: number;
   controlPoint = new T.Vector2();
+  private sequenceAxis = new T.Vector3();
+  private sequenceVector = new T.Vector3();
+  private controlPointFor(id: unknown) {
+    const point = list(this.definition.config.controlpoint).find(c => c.id === num(id, 0));
+    if (point && (num(point.flags, 0) & 1)) return this.controlPoint;
+    const offset = vec(point?.offset, [0, 0]);
+    return { x: offset[0], y: offset[1] };
+  }
   constructor(private definition: SceneParticles, private info: SceneTexture, texture: T.Texture, createChild: (child: SceneParticles) => ParticleSystem, refraction?: { texture?: T.Texture; format: number; background: T.FramebufferTexture; capture: () => void }) {
     let seed = definition.id || 1;
     this.random = () => { seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0; return seed / 4294967296; };
@@ -153,7 +163,7 @@ color.rgb*=u_Overbright;gl_FragColor=color;}`, { g_ModelViewProjectionMatrix: { 
   private activate(anchor?: Particle, origin = { x: 0, y: 0 }) {
     const event = this.definition.event;
     if (this.instances.length >= (event?.max || 1) || this.random() >= (event?.probability ?? 1)) return;
-    const instance: ParticleInstance = { x: anchor?.x ?? origin.x, y: anchor?.y ?? origin.y, anchor: event?.type === "eventfollow" ? anchor : undefined, credits: this.emitters.map(() => 0), started: false, emitting: true, alive: 0 };
+    const instance: ParticleInstance = { x: anchor?.x ?? origin.x, y: anchor?.y ?? origin.y, anchor: event?.type === "eventfollow" ? anchor : undefined, credits: this.emitters.map(() => 0), started: false, emitting: true, alive: 0, sequence: 0 };
     this.instances.push(instance);
     for (const child of this.children) if (child.definition.event?.type === "static") child.activate(undefined, instance);
   }
@@ -169,6 +179,19 @@ color.rgb*=u_Overbright;gl_FragColor=color;}`, { g_ModelViewProjectionMatrix: { 
     if (emitter.name === "boxrandom") { const max = vec(emitter.max ?? emitter.distancemax, [100, 100]), min = vec(emitter.min, max.map(n => -n)); p.x = origin[0] + this.range(min[0], max[0], 0); p.y = origin[1] + this.range(min[1], max[1], 0); }
     for (const init of this.initializers) {
       switch (init.name) {
+        case "mapsequencearoundcontrolpoint": {
+          const bounds = vec(init.bounds, [0, 1]), count = Math.max(.001, num(init.count, 1));
+          const fraction = init.limitbehavior === "clamp" ? Math.min(1, owner.sequence / count) : (owner.sequence / count) % 1;
+          const angle = (bounds[0] + (bounds[1] - bounds[0]) * fraction) * Math.PI * 2;
+          const axis = vec(init.axis, [0, 0, 1]), point = this.controlPointFor(init.controlpoint);
+          this.sequenceAxis.set(axis[0], axis[1], axis[2]).normalize();
+          this.sequenceVector.set(0, Math.hypot(p.x - origin[0], p.y - origin[1]), 0).applyAxisAngle(this.sequenceAxis, angle);
+          p.x = point.x + origin[0] + this.sequenceVector.x; p.y = point.y + origin[1] + this.sequenceVector.y;
+          const low = vec(init.speedmin, [0, 0, 0]), high = vec(init.speedmax, low);
+          this.sequenceVector.set(this.range(low[0], high[0], 0), this.range(low[1], high[1], 0), this.range(low[2], high[2], 0)).applyAxisAngle(this.sequenceAxis, angle);
+          p.vx += this.sequenceVector.x; p.vy += this.sequenceVector.y;
+          break;
+        }
         case "lifetimerandom": p.life = Math.max(.01, this.range(init.min, init.max, 1)); break;
         case "sizerandom": p.size = this.range(init.min, init.max, 10) * num(this.definition.overrides.size, 1); break;
         case "rotationrandom": p.angle = typeof init.min === "string" || typeof init.max === "string" ? this.range(vec(init.min, [0, 0, 0])[2], vec(init.max, [0, 0, 0])[2], 0) : this.range(init.min, init.max, 0); break;
@@ -201,6 +224,7 @@ color.rgb*=u_Overbright;gl_FragColor=color;}`, { g_ModelViewProjectionMatrix: { 
       p.angle += transform.angle;
     }
     p.x += owner.x; p.y += owner.y;
+    owner.sequence++;
     if (this.rope && !this.connectedRope) p.history = [{ x: p.x, y: p.y, age: 0 }];
     return p;
   }
@@ -241,12 +265,18 @@ color.rgb*=u_Overbright;gl_FragColor=color;}`, { g_ModelViewProjectionMatrix: { 
         }
         if (op.name === "angularmovement") p.spin += vec(op.force, [0, 0, 0])[2] * dt;
         if (op.name === "controlpointattract") {
-          const cp = list(this.definition.config.controlpoint).find(c => c.id === op.controlpoint);
-          const origin = vec(op.origin, [0, 0]);
-          const point = cp && (num(cp.flags, 0) & 1) ? [this.controlPoint.x, this.controlPoint.y] : vec(cp?.offset, [0, 0]);
-          const dx = point[0] + origin[0] - p.x, dy = point[1] + origin[1] - p.y;
+          const origin = vec(op.origin, [0, 0]), point = this.controlPointFor(op.controlpoint);
+          const dx = point.x + origin[0] - p.x, dy = point.y + origin[1] - p.y;
           const distance = Math.hypot(dx, dy), threshold = Math.max(1, num(op.threshold, 32));
           if (distance < threshold && distance > .001) { const force = num(op.scale, 0) * (1 - distance / threshold) * dt / distance; p.vx += dx * force; p.vy += dy * force; }
+        }
+        if (op.name === "vortex") {
+          const point = this.controlPointFor(op.controlpoint), offset = vec(op.origin, [0, 0]);
+          const dx = p.x - point.x - offset[0], dy = p.y - point.y - offset[1], distance = Math.hypot(dx, dy);
+          const inner = Math.max(0, num(op.distanceinner, 0)), outer = Math.max(inner + .001, num(op.distanceouter, 100));
+          const fraction = Math.max(0, Math.min(1, (distance - inner) / (outer - inner)));
+          const force = num(op.speedinner, 0) * (1 - fraction) + num(op.speedouter, 0) * fraction;
+          if (distance > .001) { p.vx -= dy / distance * force * dt; p.vy += dx / distance * force * dt; }
         }
       }
       p.x += (p.vx + nx) * dt; p.y += (p.vy + ny) * dt; p.angle += p.spin * dt;
@@ -349,6 +379,12 @@ export class BrowserSceneRenderer {
   private camera: T.OrthographicCamera;
   private textures = new Map<string, T.Texture>();
   private videos: HTMLVideoElement[] = [];
+  private videoSources = new Map<HTMLVideoElement, string>();
+  private videoKeys = new Map<HTMLVideoElement, string>();
+  private videoObjectUrls = new Set<string>();
+  private videoCacheTimers = new Set<ReturnType<typeof setTimeout>>();
+  private videoLoads = new Map<HTMLVideoElement, Promise<void>>();
+  private resourceAbort = new AbortController();
   private videoPlayback = new Map<string, boolean>();
   private videoStarting = new WeakSet<HTMLVideoElement>();
   private compositionTargets: T.WebGLRenderTarget[] = [];
@@ -357,7 +393,7 @@ export class BrowserSceneRenderer {
   private audioRequired = false;
   private scriptStates = new Map<number, ScriptLayerState>();
   private scriptUniforms = new Map<number, Record<string, T.IUniform>[]>();
-  private fonts: FontFace[] = [];
+  private fonts: LoadedSceneFont[] = [];
   private textLayers: import("./wallpaper-scene-text").SceneTextTexture[] = [];
   private textScheduler = new SceneTextScheduler();
   private skins: { id: number; animation: SceneMeshAnimator; positions: T.BufferAttribute; opacities: T.BufferAttribute }[] = [];
@@ -405,7 +441,7 @@ export class BrowserSceneRenderer {
     // The crop preview reads this canvas even while playback is paused.
     this.renderer = new T.WebGLRenderer({ canvas, antialias: true, alpha: false, depth: false, powerPreference: "high-performance", preserveDrawingBuffer: true });
     this.renderer.autoClear = true;
-    this.renderer.debug.onShaderError = (gl, _p, vs, fs) => { this.shaderError = `${gl.getShaderInfoLog(vs) || ""}\n${gl.getShaderInfoLog(fs) || ""}`; };
+    this.renderer.debug.onShaderError = (gl, program, vs, fs) => { this.shaderError = `${gl.getProgramInfoLog(program) || ""}\n${gl.getShaderInfoLog(vs) || ""}\n${gl.getShaderInfoLog(fs) || ""}`; };
     this.camera = new T.OrthographicCamera(0, data.width, data.height, 0, -10, 10);
     this.scene.background = new T.Color(data.clearColor[0], data.clearColor[1], data.clearColor[2]);
     if (data.bloom) {
@@ -504,48 +540,39 @@ gl_FragColor=vec4(max(vec3(0.0),2.0*c-gray)*excess,1.0);}`;
   private visibility = () => { this.last = 0; this.setPaused(this.paused); };
   static async create(canvas: HTMLCanvasElement, data: BrowserScene, signal: AbortSignal, onError: (e: string) => void) {
     const result = new BrowserSceneRenderer(canvas, data, onError);
+    const aborted = () => result.resourceAbort.abort();
+    signal.addEventListener("abort", aborted, { once: true });
+    if (signal.aborted) aborted();
+    const loadingSignal = result.resourceAbort.signal;
     try {
-      for (const info of data.textures) {
-        if (info.mimeType === "video/mp4") {
+      await loadSceneResources([...new Map(data.textures.map(info => [info.key, info])).values()], loadingSignal, async info => {
+        if (info.mimeType?.startsWith("video/")) {
           const video = document.createElement("video");
           result.videos.push(video);
-          video.muted = true; video.loop = true; video.playsInline = true; video.preload = "auto";
-          await new Promise<void>((resolve, reject) => {
-            const cleanup = () => { video.removeEventListener("loadeddata", loaded); video.removeEventListener("error", failed); signal.removeEventListener("abort", aborted); };
-            const loaded = () => { cleanup(); resolve(); };
-            const failed = () => { cleanup(); reject(new Error("Cannot decode embedded scene video")); };
-            const aborted = () => { cleanup(); reject(new DOMException("Aborted", "AbortError")); };
-            video.addEventListener("loadeddata", loaded); video.addEventListener("error", failed); signal.addEventListener("abort", aborted, { once: true });
-            if (signal.aborted) { aborted(); return; }
-            video.src = info.url;
-          });
-          video.width = video.videoWidth; video.height = video.videoHeight;
+          video.muted = true; video.loop = true; video.playsInline = true; video.preload = "none";
+          video.width = info.width; video.height = info.height;
+          result.videoSources.set(video, info.url);
+          result.videoKeys.set(video, info.key);
           const texture = new T.VideoTexture(video); texture.flipY = false; texture.colorSpace = T.NoColorSpace;
           result.textures.set(info.key, texture);
-          continue;
+          return;
         }
-        const response = await fetch(info.url, { signal });
-        if (!response.ok) throw new Error("Cannot load scene texture");
-        const bitmap = await createImageBitmap(await response.blob(), { premultiplyAlpha: "none", colorSpaceConversion: "none" });
+        const bitmap = await createImageBitmap(await sceneAssetBlob(info.url, info.key, signal), { premultiplyAlpha: "none", colorSpaceConversion: "none" });
         if (signal.aborted) { bitmap.close(); throw new DOMException("Aborted", "AbortError"); }
         const texture = new T.Texture(bitmap); texture.flipY = false; texture.colorSpace = T.NoColorSpace;
         texture.minFilter = T.LinearMipmapLinearFilter; texture.magFilter = T.LinearFilter;
         texture.anisotropy = Math.min(8, result.renderer.capabilities.getMaxAnisotropy()); texture.needsUpdate = true;
         result.textures.set(info.key, texture);
-      }
+      });
       if (data.layers.some(layer => layer.texture === "@transparent")) {
         const texture = new T.DataTexture(new Uint8Array(4), 1, 1);
         texture.needsUpdate = true;
         result.textures.set("@transparent", texture);
       }
-      for (const info of data.fonts || []) {
-        const response = await fetch(info.url, { signal });
-        if (!response.ok) throw new Error("Cannot load scene font");
-        const face = new FontFace(`we-${info.key}`, await response.arrayBuffer());
-        await face.load();
-        signal.throwIfAborted();
-        document.fonts.add(face); result.fonts.push(face);
-      }
+      await loadSceneResources(data.fonts || [], loadingSignal, async info => {
+        const blob = await sceneAssetBlob(info.url, info.key, signal);
+        result.fonts.push(await loadSceneFont(`we-${info.key}`, blob, signal));
+      });
       for (const [i, layer] of data.layers.entries()) {
         if (layer.text) {
           const { SceneTextTexture } = await import("./wallpaper-scene-text");
@@ -574,11 +601,17 @@ gl_FragColor=vec4(max(vec3(0.0),2.0*c-gray)*excess,1.0);}`;
         result.propertyScripts = await ScenePropertyScripts.create(data, Date.now(), result.scriptBonePoses(), true);
         signal.throwIfAborted();
       }
+      // Scripts decide the active time-of-day layer before any video downloads.
+      result.updatePropertyScripts(0); result.updateLayerTransforms(0);
+      const needed = result.neededVideoTextures();
+      await loadSceneResources([...result.textures].filter(([key, texture]) => texture instanceof T.VideoTexture && needed.has(key)), loadingSignal, async ([, texture]) => { await result.loadVideo(texture.image as HTMLVideoElement); });
+      signal.throwIfAborted();
       result.ready = true; result.resizeDirty = true;
       result.draw(0);
       if (result.shaderError) throw new Error(`Scene shader compilation failed: ${result.shaderError.slice(0, 400)}`);
       return result;
     } catch (e) { result.dispose(); throw e; }
+    finally { signal.removeEventListener("abort", aborted); }
   }
   private addLayer(layer: SceneLayer, order: number) {
     const capture = layer.texture === "@scene";
@@ -781,7 +814,17 @@ if(u_BlendMode==6.0`) : fragment;
     if (!this.propertyScripts) return;
     this.flushCursorMove();
     const bones = this.scriptBonePoses();
-    const frame = this.propertyScripts.update(this.time, dt, this.spectrum, Date.now(), { bones, sounds: this.audio?.soundStates(), cursor: this.cursorWorld(), events: this.cursorEvents.splice(0) });
+    let frame;
+    try {
+      frame = this.propertyScripts.update(this.time, dt, this.spectrum, Date.now(), { bones, sounds: this.audio?.soundStates(), cursor: this.cursorWorld(), events: this.cursorEvents.splice(0) });
+      this.canvas.dataset.scriptRecoveries = String(this.propertyScripts.recoveries);
+    } catch {
+      // A failed script guest must not hide the whole scene or leave sound over
+      // a blank page. Keep validated geometry; native video/particles still run.
+      this.propertyScripts.dispose(); this.propertyScripts = undefined;
+      this.scriptWarnings = ["Scene property scripts stopped after a runtime failure; last valid layer state retained"];
+      return;
+    }
     this.scriptWarnings=frame.warnings;
     if (this.audio) for (const command of frame.soundCommands) this.audio.command(command);
     else {
@@ -802,10 +845,12 @@ if(u_BlendMode==6.0`) : fragment;
       }
       const { layer, mesh } = target;
       if (state.videoPlaying !== undefined) this.videoPlayback.set(layer.texture, state.videoPlaying);
-      if (Object.keys(state.boneWrites || {}).length) {
+      if (Object.keys(state.boneWrites || {}).length || state.boneCommands?.length) {
         const skin = this.skins.find(s => s.id === state.id);
         if (!skin) throw new Error("Missing scripted skeleton");
-        skin.animation.applyLocalTransforms(state.boneWrites!); skin.positions.needsUpdate = true;
+        if (Object.keys(state.boneWrites || {}).length) skin.animation.applyLocalTransforms(state.boneWrites!);
+        if (state.boneCommands?.length) skin.animation.applyPhysicsCommands(state.boneCommands, mesh.matrixWorld);
+        skin.positions.needsUpdate = true;
       }
       mesh.visible = state.visible;
       mesh.renderOrder = order;
@@ -829,18 +874,48 @@ if(u_BlendMode==6.0`) : fragment;
     this.particles.forEach((p, i) => { p.mesh.renderOrder = frame.layers.length + i; });
     this.canvas.dataset.scriptLayerCount = String(frame.layers.length);
     this.audioRequired ||= frame.audio;
-    this.syncVideoPlayback();
+  }
+  private neededVideoTextures() {
+    const needed = sceneTextureDemand([...this.scriptLayers.values()].map(({ layer, mesh }) => ({ layer, visible: mesh.visible })), this.data.particles);
+    for (const [key, playing] of this.videoPlayback) if (playing) needed.add(key);
+    return needed;
+  }
+  private loadVideo(video: HTMLVideoElement) {
+    let loading = this.videoLoads.get(video);
+    if (!loading) {
+      loading = (async () => {
+        const key = this.videoKeys.get(video)!, source = this.videoSources.get(video)!;
+        const cached = await cachedSceneAsset(key);
+        this.resourceAbort.signal.throwIfAborted();
+        const url = cached ? URL.createObjectURL(cached) : source;
+        if (cached) this.videoObjectUrls.add(url);
+        await loadSceneVideo(video, url, this.resourceAbort.signal);
+        if (!cached) {
+          const timer = setTimeout(() => { this.videoCacheTimers.delete(timer); void cacheSceneVideo(source, key, this.resourceAbort.signal); }, 3000);
+          this.videoCacheTimers.add(timer);
+        }
+      })();
+      this.videoLoads.set(video, loading);
+    }
+    return loading;
   }
   private syncVideoPlayback() {
+    const needed = this.neededVideoTextures();
+    let waiting = false;
     for (const [key, texture] of this.textures) {
       if (!(texture instanceof T.VideoTexture)) continue;
       const video = texture.image as HTMLVideoElement;
-      if (this.paused || document.hidden || this.videoPlayback.get(key) === false) video.pause();
+      if (needed.has(key) && !this.videoLoads.has(video)) {
+        void this.loadVideo(video).then(() => { if (!this.disposed) { this.dirty = true; this.schedule(); } }).catch(e => { if (!this.disposed) this.onError(e.message); });
+      }
+      if (needed.has(key) && video.readyState < video.HAVE_CURRENT_DATA) waiting = true;
+      if (!needed.has(key) || this.paused || document.hidden || this.videoPlayback.get(key) === false) video.pause();
       else if (video.paused && !this.videoStarting.has(video)) {
         this.videoStarting.add(video);
         void video.play().catch(e => { if (!this.disposed && e.name !== "AbortError") this.onError(`Scene video playback failed: ${e.message}`); }).finally(() => this.videoStarting.delete(video));
       }
     }
+    return waiting;
   }
   setAudio(audio: WallpaperAudio) { this.audio = audio; for (const command of this.pendingSoundCommands.splice(0)) audio.command(command); }
   setPaused(paused: boolean) {
@@ -899,6 +974,8 @@ if(u_BlendMode==6.0`) : fragment;
       this.canvas.dataset.renderResolution = `${w}x${h}`;
     }
     this.updateLayerTransforms(this.propertyScripts && this.skins.length ? 0 : dt);
+    // Retain the last complete frame during a newly selected clip's first load.
+    if (this.syncVideoPlayback()) { this.dirty = true; return; }
     this.camera.updateMatrixWorld();
     const now = new Date();
     const daytime = (now.getHours() * 3600 + now.getMinutes() * 60 + now.getSeconds()) / 86400;
@@ -954,7 +1031,7 @@ if(u_BlendMode==6.0`) : fragment;
       for (const layer of locals) {
         const mesh = this.scriptLayers.get(layer.id)!.mesh, world = worlds.get(layer.id)!;
         const [a, b, c, d, x, y] = world.matrix, depth = world.parallax;
-        const origin = sceneLayerOrigin(this.data, [x, y, 0], depth);
+        const origin = sceneLayerOrigin(this.data, [x, y, 0], depth, world.parallaxOrigin);
         const [dx, dy] = sceneAlignmentOffset(layer.alignment, layer.size);
         const factor = effects.parallax ? effects.amount * effects.mouse * .05 : 0;
         mesh.matrixAutoUpdate = false;
@@ -981,11 +1058,14 @@ if(u_BlendMode==6.0`) : fragment;
     for (const target of this.compositionTargets) target.dispose();
     for (const p of this.particles) p.dispose(); for (const target of new Set(this.passes.map(p => p.target))) target.dispose();
     for (const m of this.materials) m.dispose(); for (const g of this.geometries) g.dispose();
+    this.resourceAbort.abort();
+    for (const timer of this.videoCacheTimers) clearTimeout(timer);
     for (const video of this.videos) { video.pause(); video.removeAttribute("src"); video.load(); }
+    for (const url of this.videoObjectUrls) URL.revokeObjectURL(url);
     for (const text of this.textLayers) text.dispose();
     this.propertyScripts?.dispose();
     for (const skin of this.skins) skin.animation.dispose();
-    for (const font of this.fonts) document.fonts.delete(font);
+    for (const font of this.fonts) font.dispose();
     for (const t of this.textures.values()) { const image = t.image as { close?: () => void } | undefined; image?.close?.(); t.dispose(); }
     this.renderer.dispose(); this.renderer.forceContextLoss();
   }

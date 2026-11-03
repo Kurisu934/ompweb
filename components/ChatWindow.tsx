@@ -1,9 +1,10 @@
 "use client";
 import { sendAgentCommand } from "@/lib/agent-client";
 import { registerAbortHandler } from "@/hooks/useKeyboardShortcuts";
+import { matchesShortcut } from "@/lib/keyboard-shortcuts";
 import { Fragment, memo, useCallback, useEffect, useMemo, useRef, useState, type ReactNode, type Ref } from "react";
 import { ArrowDown, ChevronDown, ChevronUp, Layers, Paperclip, Square } from "lucide-react";
-import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolResultMessage } from "@/lib/types";
+import type { AgentMessage, AssistantContentBlock, AssistantMessage, BashExecutionMessage, ExtensionUiRequest, SessionInfo, SessionTreeNode, ToolCallContent, ToolResultMessage } from "@/lib/types";
 import { translate, useI18n } from "@/lib/i18n";
 import { collectToolResults, isGroupAnchor, planTranscriptRows, type ActivityPiece, type TranscriptRow } from "@/lib/chat-transcript-plan";
 import { resolveForkEntryIds } from "@/lib/chat-fork";
@@ -15,8 +16,10 @@ import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
 import { ComposerPanels } from "./ComposerPanels";
 import { SkillDiagnosticsNotice } from "./SkillDiagnostics";
 import { BtwHistoryDialog, type BtwPanelProps } from "./BtwPanel";
+import { WhaleTail } from "./WhaleTail";
 import OmpWebLogo from "./OmpWebLogo";
 import { CHAT_COLUMN_MAX_WIDTH, MINIMAP_WIDTH } from "@/lib/chat-layout";
+import { collectGenerationSpeedSamples, GENERATION_SPEED_AVERAGE_WINDOW, summarizeGenerationSpeed } from "@/lib/generation-speed";
 import { WorkspaceState } from "./AppShell-layout";
 import { useAgentSession, type AgentPhase, type NoticeItem, type SubagentInfo } from "@/hooks/useAgentSession";
 import { useAudio } from "@/hooks/useAudio";
@@ -24,6 +27,7 @@ import { useSpeechSynthesis, SpeechSynthesisProvider } from "@/hooks/useSpeechSy
 import { GithubRepoContext } from "@/lib/github-refs";
 import { useDragDrop } from "@/hooks/useDragDrop";
 import { useIsMobile } from "@/hooks/useIsMobile";
+import { useScheduledMessages } from "@/hooks/useScheduledMessages";
 import { useModalDialog } from "@/hooks/useModalDialog";
 import type { SessionStatsInfo, GenerationSpeedInfo } from "@/lib/pi-types";
 import type { ProviderUsageContext } from "@/lib/provider-usage-types";
@@ -66,7 +70,7 @@ interface Props {
   /** Handles the open_url host tool; returns the result text for the agent. */
   onOpenUrl?: (url: string) => string;
   onGenerationSpeedChange?: (speed: GenerationSpeedInfo | null) => void;
-  /** Open Settings → API Keys & Providers (from the model picker). */
+  /** Open Settings → Models & Providers (from the model picker). */
   onOpenProviders?: () => void;
 }
 
@@ -266,8 +270,8 @@ interface CommittedTranscriptProps {
   isNew: boolean;
   forkingEntryId: string | null;
   handleFork: (entryId: string) => void;
-  handleNavigate: (entryId: string) => boolean | Promise<boolean>;
-  handleEditContent: (content: string) => void;
+  /** Edit and resend a user message (branch off before it, text in the composer). */
+  handleEditFromHere: (entryId: string, content: string) => void;
   modelNames: Record<string, string>;
   messageCwd: string | undefined;
   onOpenFile?: (filePath: string) => void;
@@ -293,7 +297,7 @@ interface CommittedTranscriptProps {
  */
 const CommittedTranscript = memo(function CommittedTranscript({
   messages, entryIds, conversationMeta, messageRefs, isStreaming, sessionBusy, externalRunActive, isNew, forkingEntryId,
-  handleFork, handleNavigate, handleEditContent, modelNames, messageCwd, onOpenFile, sessionId,
+  handleFork, handleEditFromHere, modelNames, messageCwd, onOpenFile, sessionId,
   toolCallsDefaultCollapsed, expandThinkingByDefault, hideThinkingBlock, visibleCount, nearBottom, sentinelRef, handleLoadMoreClick,
 }: CommittedTranscriptProps) {
   const { t } = useI18n();
@@ -307,10 +311,6 @@ const CommittedTranscript = memo(function CommittedTranscript({
 
   const renderMessage = (idx: number, options: { attachRef?: boolean; keyPrefix?: string; messageOverride?: AgentMessage; showTimestamp?: boolean; sourceBlockIndices?: number[] } = {}): ReactNode => {
     const msg = options.messageOverride ?? messages[idx];
-    const prevAssistantEntryId =
-      msg.role === "user" && idx > 0 && messages[idx - 1].role === "assistant"
-        ? entryIds[idx - 1]
-        : undefined;
     const isVisible = msg.role === "user" || msg.role === "assistant";
     const currentRefIdx = visibleRefIndexByMessage.get(idx);
     const keyPrefix = options.keyPrefix ?? "message";
@@ -344,9 +344,7 @@ const CommittedTranscript = memo(function CommittedTranscript({
         onFork={canOfferFork ? handleFork : undefined}
         forking={forkingEntryId === forkTarget}
         forkDisabled={forkingEntryId !== null}
-        onNavigate={sessionBusy ? undefined : handleNavigate}
-        prevAssistantEntryId={sessionBusy ? undefined : prevAssistantEntryId}
-        onEditContent={handleEditContent}
+        onEditFromHere={canOfferFork && msg.role === "user" ? handleEditFromHere : undefined}
         showTimestamp={showTimestamp}
         prevTimestamp={idx > 0 ? (messages[idx - 1] as AgentMessage & { timestamp?: number }).timestamp : undefined}
         sessionId={sessionId}
@@ -492,11 +490,6 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
     if (ttsRef.current.autoPlayEnabled) autoplayPendingRef.current = true;
     onAgentEnd?.();
   }, [onAgentEnd]);
-  // Stabilize the onEditContent ref; pairs with React.memo to avoid re-rendering history messages
-  const handleEditContent = useCallback((content: string) => {
-    chatInputRef?.current?.insertIfEmpty(content);
-  }, [chatInputRef]);
-
   const {
     loading, error, messages, entryIds, showPreCompactionHistory, streamState,
     agentRunning, bashRunning, pendingBash, modelNames, modelList, modelsLoading, modelError, modelThinkingLevels, modelThinkingLevelMaps, thinkingLevel, fastModeEnabled, fastModeActive, slowModeSupported, slowModeEnabled, slowModeScope, usageLimit,
@@ -505,7 +498,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
     liveModelMeta,
     retryInfo, contextUsage, forkingEntryId,
     isCompacting, compactResult, tokensPerSecond, displayModel: displayModelValue, sessionStats,
-    slashCommands, slashCommandsLoading, queuedMessages, advisorActive, advisorEnabled, handleAdvisorChange,
+    slashCommands, slashCommandsLoading, queuedMessages, queuedMessageTimestamps, advisorActive, advisorEnabled, handleAdvisorChange,
     notices, dismissNotice, extensionDialog, extensionCustomUi, extensionStatuses, extensionWidgets, respondToExtensionUi, sendExtensionCustomInput,
     skillDiagnostics, setSkillStartupDiagnostics,
     isAutoModelSelection,
@@ -514,7 +507,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
     subagents, subagentEvents, subagentTranscriptVersions, activeSubagentCount, currentTodoPhase, todoPhases,
     isNew,
     sessionIdRef, messagesEndRef, scrollContainerRef,
-    handleSend, handleAbort, handleFork, handleNavigate, handleModelChange, retrySession,
+    handleSend, handleAbort, handleFork, handleNavigate, handleEditFromHere, handleModelChange, retrySession,
     handleSteer, handleFollowUp, handleInterruptAndReply, handlePromptWithStreamingBehavior, handleAbortCompaction, handleCompact,
     removeQueuedMessage,
     handleBuiltinSlashCommand, togglePreCompactionHistory,
@@ -533,6 +526,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
     if (speech) ttsRef.current.speak(speech.id, speech.text);
   }, [messages, entryIds, streamState, agentRunning]);
   const sessionBusy = agentRunning || bashRunning;
+  const scheduled = useScheduledMessages(session?.id ?? null, advisorEnabled);
   const petSessionKey = session?.id ?? newSessionCwd ?? "";
   const lastAssistant = useMemo(() => messages.findLast((message) => message.role === "assistant") as AssistantMessage | undefined, [messages]);
   const petState = resolvePetState({
@@ -562,75 +556,22 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
     onProviderUsageContextChange?.(providerUsageContext);
     return () => onProviderUsageContextChange?.(null);
   }, [onProviderUsageContextChange, providerUsageContext]);
-  const [generationSpeed, setGenerationSpeed] = useState<GenerationSpeedInfo | null>(null);
-  const speedSamplesRef = useRef<number[]>([]);
-  // Source of truth is omp's own get_state.tokensPerSecond (polled by the
-  // session hook), not a client-side char-count estimate. Distinct reported
-  // values feed the rolling AVG; repeated polls of the same value are ignored.
-  const lastPublishedSpeedRef = useRef<number | null>(null);
-  useEffect(() => {
-    if (tokensPerSecond === null || !Number.isFinite(tokensPerSecond) || tokensPerSecond <= 0) {
-      // Clear the live value; the session average remains visible.
-      if (lastPublishedSpeedRef.current !== null) {
-        lastPublishedSpeedRef.current = null;
-        setGenerationSpeed((previous) => previous ? { ...previous, current: null } : previous);
-      }
-      return;
-    }
-    const quantized = Math.round(tokensPerSecond * 10) / 10;
-    if (quantized === lastPublishedSpeedRef.current) return;
-    lastPublishedSpeedRef.current = quantized;
-    const samples = [...speedSamplesRef.current, quantized].slice(-32);
-    speedSamplesRef.current = samples;
-    setGenerationSpeed({
-      current: quantized,
-      average: samples.reduce((sum, sample) => sum + sample, 0) / samples.length,
-    });
-  }, [tokensPerSecond]);
-  // Rehydrate the session average from on-disk history after a reload: the
-  // per-message generation speed is derivable from assistant usage.output and
-  // the timestamp gap to the previous message, so AVG survives refreshes.
-  const speedHydratedSessionRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (sessionBusy || messages.length === 0) return;
-    const sessionKey = session?.id ?? newSessionCwd ?? null;
-    if (!sessionKey || speedHydratedSessionRef.current === sessionKey) return;
-    speedHydratedSessionRef.current = sessionKey;
-    const samples: number[] = [];
-    // One forward pass carrying the latest seen timestamp: a per-assistant
-    // backward scan is O(N²) on long histories full of timestamp-less roles.
-    let prevTs: number | undefined;
-    for (const msg of messages) {
-      const hasTs = "timestamp" in msg && typeof msg.timestamp === "number";
-      const ts = hasTs ? msg.timestamp : undefined;
-      if (msg.role !== "assistant" || !msg.usage || ts === undefined) {
-        if (ts !== undefined) prevTs = ts;
-        continue;
-      }
-      if (prevTs !== undefined) {
-        const secs = (ts - prevTs) / 1000;
-        // The timestamp gap includes thinking + tool time, so a naive
-        // output/secs rate can be absurdly low; and tool-only turns (zero
-        // output) divide by near-zero gaps into absurdly high spikes. Keep
-        // only plausible text-generation rates.
-        if (secs > 1) {
-          const sample = msg.usage.output / secs;
-          if (Number.isFinite(sample) && sample > 0.5 && sample <= 500) samples.push(sample);
-        }
-      }
-      prevTs = ts;
-    }
-    if (samples.length === 0) return;
-    const recent = samples.slice(-32);
-    speedSamplesRef.current = recent;
-    setGenerationSpeed((previous) => ({
-      current: previous?.current ?? null,
-      average: recent.reduce((sum, sample) => sum + sample, 0) / recent.length,
-    }));
-  }, [messages, sessionBusy, session?.id, newSessionCwd]);
+  // Every number here is omp's own tok/s (output tokens / request duration):
+  // `current` is the polled get_state.tokensPerSecond, and the history comes
+  // from the committed messages' usage.output and duration, so the average
+  // and the speed chart survive reloads with the same definition.
+  const speedSamples = useMemo(() => collectGenerationSpeedSamples(messages), [messages]);
+  const generationSpeed = useMemo<GenerationSpeedInfo | null>(() => {
+    const current = tokensPerSecond !== null && Number.isFinite(tokensPerSecond) && tokensPerSecond > 0
+      ? Math.round(tokensPerSecond * 10) / 10
+      : null;
+    const average = summarizeGenerationSpeed(speedSamples.slice(-GENERATION_SPEED_AVERAGE_WINDOW))?.mean ?? null;
+    if (current === null && average === null) return null;
+    return { current, average, samples: speedSamples };
+  }, [tokensPerSecond, speedSamples]);
 
 
-  // Register the abort handler for the global Esc shortcut. The cleanup
+  // Register the abort handler for the configurable global shortcut. The cleanup
   // matters: unmounting mid-run must not leave the module-global handler
   // pointing at this (now unmounted) instance's handleAbort.
   useEffect(() => {
@@ -638,18 +579,15 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
     return () => registerAbortHandler(null);
   }, [sessionBusy, handleAbort]);
 
-  // Cycle model / thinking level via ⌘/Ctrl+Alt+M and ⌘/Ctrl+Alt+T (RPC
-  // cycle_model / cycle_thinking_level). Meta/Alt combos avoid clashing with
-  // ordinary typing in the composer.
+  // Cycle model / thinking level using the shared shortcut bindings.
   useEffect(() => {
     if (!session) return;
     const handler = (e: KeyboardEvent) => {
-      if (!(e.metaKey || e.ctrlKey) || !e.altKey) return;
-      const key = e.key.toLowerCase();
-      if (key === "m") {
+      if (e.target instanceof Element && e.target.closest('[role="dialog"], [role="alertdialog"], .settings-view, [data-native-context-menu]')) return;
+      if (matchesShortcut("cycleModel", e)) {
         e.preventDefault();
         void handleCycleModel();
-      } else if (key === "t") {
+      } else if (matchesShortcut("cycleThinking", e)) {
         e.preventDefault();
         void handleCycleThinkingLevel();
       }
@@ -785,8 +723,10 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
     setVisibleCount((prev) => getNextVisibleCount(prev));
   }, [scrollContainerRef]);
 
+  // `messages` gets a new identity on every update; publish only real changes.
+  const lastSpeedSample = generationSpeed?.samples.at(-1);
   const generationSpeedKey = generationSpeed
-    ? `${generationSpeed.current ?? "null"}|${generationSpeed.average ?? "null"}`
+    ? `${generationSpeed.current ?? "null"}|${generationSpeed.average ?? "null"}|${generationSpeed.samples.length}|${lastSpeedSample?.timestamp ?? ""}:${lastSpeedSample?.durationMs ?? ""}`
     : null;
   const generationSpeedRef = useRef(generationSpeed);
   generationSpeedRef.current = generationSpeed;
@@ -1069,6 +1009,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
       onAdvisorChange={handleAdvisorChange}
       advisorModel={advisorModelMeta}
       queuedMessages={queuedMessages}
+      queuedMessageTimestamps={queuedMessageTimestamps}
       inputHistory={inputHistory}
       advisorActive={advisorActive}
       onCompact={handleCompact}
@@ -1077,7 +1018,10 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
       modelCapacity={modelCapacity}
       generationSpeed={generationSpeed}
       onRemoveQueuedMessage={removeQueuedMessage}
-
+      scheduledMessages={session ? scheduled.messages : undefined}
+      onScheduleMessage={session ? scheduled.schedule : undefined}
+      onCancelScheduledMessage={scheduled.cancel}
+      onSendScheduledMessageNow={scheduled.sendNow}
       slashCommands={slashCommands}
       slashCommandsLoading={slashCommandsLoading}
       onLoadSlashCommands={loadSlashCommands}
@@ -1086,7 +1030,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
       draftKey={session?.id ?? (newSessionCwd ? `new:${newSessionCwd}` : undefined)}
       cwd={session?.cwd ?? newSessionCwd}
       /* The pill bar and chevron only render in the non-empty layout; don't
-         accept Escape-to-minimize in the fresh-chat branch where there is
+         accept minimize shortcuts in the fresh-chat branch where there is
          nothing to collapse. */
       onMinimize={isEmptyNew ? undefined : handleMinimize}
       statusText={composerStatusText}
@@ -1256,6 +1200,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
 
             {conversationMeta.hasCompaction && (
               <div
+                className="compacted-history-notice wallpaper-surface"
                 style={{
                   display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12,
                   marginBottom: 8, padding: "7px 10px", border: "1px solid var(--border)",
@@ -1288,8 +1233,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
               isNew={isNew}
               forkingEntryId={forkingEntryId}
               handleFork={handleFork}
-              handleNavigate={handleNavigate}
-              handleEditContent={handleEditContent}
+              handleEditFromHere={handleEditFromHere}
               modelNames={modelNames}
               messageCwd={messageCwd}
               onOpenFile={onOpenFile}
@@ -1309,6 +1253,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
                 modelNames={modelNames}
                 cwd={messageCwd}
                 onOpenFile={onOpenFile}
+                sessionId={session?.id ?? sessionIdRef.current ?? undefined}
                 toolResults={toolResultsWithLive}
                 toolCallsDefaultCollapsed={toolCallsDefaultCollapsed}
                 expandThinkingByDefault={expandThinkingByDefault}
@@ -1320,6 +1265,7 @@ export function ChatWindow({ session, newSessionCwd, newSessionWorkspace, toolCa
             {toolCallsDefaultCollapsed && pendingToolHeaders.map((tool) => (
               <div
                 key={tool.id}
+                className="pending-tool-notice wallpaper-surface"
                 role="status"
                 aria-label={t("chatWindow.runningNamed", { names: tool.name })}
                 style={{
@@ -1465,7 +1411,7 @@ function ExtensionStatusBar({ statuses }: { statuses: Array<{ key: string; text:
       {statuses.map((status) => (
         <div
           key={status.key}
-          className="ui-compact-surface"
+          className="ui-compact-surface extension-status-surface wallpaper-surface"
           style={{
             display: "flex",
             alignItems: "center",
@@ -1494,7 +1440,7 @@ function ExtensionWidgets({ widgets }: { widgets: Array<{ key: string; lines: st
       {widgets.map((widget) => (
         <pre
           key={widget.key}
-          className="ui-compact-surface"
+          className="ui-compact-surface extension-widget-surface wallpaper-surface"
           role="group"
           aria-label={widget.key}
           title={widget.key}
@@ -1538,7 +1484,7 @@ function NoticeShelf({ notices, onDismiss, floating = false, align = "left" }: {
         return (
           <div
             key={notice.id}
-            className="notice-shelf-item"
+            className="notice-shelf-item wallpaper-surface"
             style={{
               display: "flex",
               alignItems: isError ? "flex-start" : "center",
@@ -1798,6 +1744,7 @@ const MinimizedComposerBar = memo(function MinimizedComposerBar({ draftKey, isSt
     <div style={{ flexShrink: 0, padding: "4px 16px calc(6px + env(safe-area-inset-bottom))" }}>
       <div style={{ maxWidth: CHAT_COLUMN_MAX_WIDTH, margin: "0 auto" }}>
         <div
+          className="composer-minimized wallpaper-surface"
           style={{
             display: "flex",
             alignItems: "center",
@@ -1845,7 +1792,7 @@ const MinimizedComposerBar = memo(function MinimizedComposerBar({ draftKey, isSt
                 fontSize: 13,
                 color: "var(--text-muted)",
               }}>
-                <span aria-hidden className="live-status-dot live-pulse inline-block h-2 w-2 shrink-0 rounded-full bg-accent" />
+                <WhaleTail active width={16} style={{ color: "var(--accent)" }} />
                 <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   {statusText}
                 </span>

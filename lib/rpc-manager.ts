@@ -3,6 +3,8 @@ import { existsSync, realpathSync } from "fs";
 import { canonicalSessionPath } from "./omp/desktop-protocol";
 import { acquireWebResumeReservation, inspectNativeSessionLease } from "./omp/native-lease";
 import { homedir } from "os";
+import { join } from "path";
+import { agentInstructionsPath } from "./agent-instructions-store";
 import { validateAgentImages } from "./image-attachments";
 import { hasVisibleAssistantContent } from "./assistant-response";
 import { invalidateModelsCache } from "./models-cache";
@@ -21,6 +23,10 @@ import {
   resolveSessionPath,
 } from "./session-reader";
 import { markShuttingDown, recordRunningSessions, RESUME_PROMPT, takeInterruptedSessions } from "./session-resume";
+import { prepareAskpassSpawn, withWebAskpassPrompt, type AskpassSessionIdentity } from "./askpass";
+import { ompWebDefaultConfigArgs } from "./omp/web-defaults";
+import { ompBinaryFingerprint } from "./omp/omp-cli";
+import { dialogAttention, type AttentionItem } from "./attention";
 import { PRESET_FULL } from "./tool-presets";
 import { comparableProjectPath } from "./comparable-path";
 import { samePath } from "./paths";
@@ -29,10 +35,12 @@ import { BLOCKING_UI_METHODS, createNotificationDetector } from "./notification-
 import { publishNotification } from "./notification-hub";
 import { parseSkillDiagnosticsSnapshot, type SkillDiagnosticsSnapshot } from "./skill-diagnostics";
 import { isReservedLaunchArg, loadProjectRegistry } from "./project-registry";
+import { allowFileRoot } from "./file-access";
 import { eventWithToolResultImageUrls } from "./media-cache";
 import type {
   BashResultInfo,
   OmpModel,
+  QueuedMessageTimestamps,
   RpcAvailableSlashCommand,
   RpcAskDialogQuestion,
   RpcSessionState,
@@ -54,6 +62,10 @@ export interface AgentEvent {
 
 type EventListener = (event: AgentEvent) => void;
 type UnsequencedAgentEvent = { type: string; [key: string]: unknown };
+
+type QueueTimestampEntry = { text: string; timestamp: number };
+type QueueTimestampState = { steering: QueueTimestampEntry[]; followUp: QueueTimestampEntry[] };
+
 
 interface CompactionResultLike {
   summary?: string;
@@ -117,6 +129,19 @@ export class WebRpcError extends Error {
   }
 }
 
+// Extension UI methods that stay pending until the client answers (replayed to
+// newly-attached SSE listeners so dialogs survive reconnects).
+const PENDING_UI_METHODS = new Set(["select", "confirm", "input", "editor", "ask", "open_url"]);
+
+/** Shape check for an ask-dialog `answers` payload; omp validates the content. */
+function isAskAnswers(value: unknown): boolean {
+  return Array.isArray(value) && value.every((answer: unknown) =>
+    isRecord(answer)
+    && typeof answer.id === "string"
+    && Array.isArray(answer.selectedOptions)
+    && answer.selectedOptions.every((option: unknown) => typeof option === "string")
+    && (answer.customInput === undefined || typeof answer.customInput === "string"));
+}
 
 // Commands forwarded to omp verbatim (request shape already matches rpc-types).
 const PASSTHROUGH_COMMANDS = new Set([
@@ -190,8 +215,8 @@ export function mapPresetToolNames(toolNames: string[]): string[] {
 const FULL_PRESET_KEY = [...PRESET_FULL].map((n) => n.toLowerCase()).sort().join(",");
 
 /** Extra CLI args for spawning `omp --mode rpc-ui` for a session. */
-export function buildSessionSpawnArgs(sessionFile: string, toolNames?: string[], advisor = false, launchConfig?: ProjectLaunchConfig): string[] {
-  const args: string[] = [];
+export function buildSessionSpawnArgs(sessionFile: string, toolNames?: string[], advisor = false, launchConfig?: ProjectLaunchConfig, webConfigArgs: string[] = []): string[] {
+  const args: string[] = ["--extension", join(process.cwd(), "bin", "omp-web-instructions.ts")];
   if (sessionFile) {
     // An absolute path (or anything containing "/") resolves deterministically:
     // omp's createSessionManager opens it directly via SessionManager.open
@@ -215,6 +240,8 @@ export function buildSessionSpawnArgs(sessionFile: string, toolNames?: string[],
   // args and dash-leading profiles at the spawn boundary even though the
   // API validates them on write.
   if (launchConfig?.profile && !launchConfig.profile.startsWith("-")) args.push("--profile", launchConfig.profile);
+  // omp-web's overlays go before the workspace's own args so a `--config` there wins.
+  args.push(...webConfigArgs);
   if (launchConfig?.extraArgs) args.push(...launchConfig.extraArgs.filter((arg) => !isReservedLaunchArg(arg)));
   return args;
 }
@@ -308,6 +335,10 @@ export class AgentSessionWrapper {
   private responseObserved = false;
   private responseRunActive = false;
   private fastModeEnabled = false;
+  private queueUpdateRevision = 0;
+  private queueTimestampLast = 0;
+  private queueTimestampEntries: QueueTimestampState = { steering: [], followUp: [] };
+
   private idleTimer: ReturnType<typeof setTimeout> | null = null;
   /** Lazily-armed deadline for tearing down a session nobody is watching. */
   private reapTimer: ReturnType<typeof setTimeout> | null = null;
@@ -365,6 +396,15 @@ export class AgentSessionWrapper {
    * or when the header lacks one. Used to detect a spawn fallback so a notice
    * can warn the user the agent is running in a different directory. */
   private readonly recordedCwd: string | null;
+  /** `ompBinaryFingerprint` at spawn; an `omp update` replaces the executable
+   * (by rename, so this child keeps running), and the next idle prompt
+   * restarts onto the new one. */
+  ompBinarySpawned: string | null = null;
+
+  /** Whether the child was spawned with an outdated omp binary. */
+  private spawnOutdated(): boolean {
+    return ompBinaryFingerprint() !== this.ompBinarySpawned;
+  }
 
   // Plain field assignments (not TS parameter properties) keep this module
   // runnable under Node's strip-only TypeScript mode for probes/tests.
@@ -392,8 +432,28 @@ export class AgentSessionWrapper {
     return this._sessionId;
   }
 
+  /** Who a sudo password request from this child belongs to (lib/askpass.ts). */
+  askpassIdentity(): AskpassSessionIdentity {
+    return { sessionId: this._sessionId, sessionName: this._sessionName, cwd: this.cwd };
+  }
+
   get sessionFile(): string {
     return this._sessionFile;
+  }
+
+  /** Web-owned child only; an attached desktop process is never a managed kill target. */
+  get pid(): number | undefined {
+    return !this.isAttached && this.isAlive() && this.proc instanceof RpcProcess ? this.proc.pid : undefined;
+  }
+
+  /**
+   * The memory guard (lib/memory-guard.ts) killed a command this session
+   * started: tell the user in the chat and, mid-run, the agent through a
+   * steering message so it does not just retry the same command.
+   */
+  memoryGuardKilled(userNotice: string, agentNote: string): void {
+    this.emit({ type: "notice", level: "warning", message: userNotice });
+    if (this.isRunning()) void this.proc.sendCommand({ type: "steer", message: agentNote }).catch(() => {});
   }
 
   isAlive(): boolean {
@@ -520,6 +580,13 @@ export class AgentSessionWrapper {
       // and keeps the per-question select/editor fallback.
       // Bounded like get_state so a child that never answers cannot stall startup.
       await this.proc.sendCommand({ type: "set_ask_dialog", enabled: true }, GET_STATE_TIMEOUT_MS).catch(() => {});
+      // omp-web's server-side tools (scheduled tasks, wake-up webhooks) work
+      // without a browser tab, so register them here; tabs re-register theirs
+      // through set_host_tools, which merges these back in.
+      const serverTools = serverHostToolDefinitions();
+      if (serverTools.length > 0) {
+        await this.proc.sendCommand({ type: "set_host_tools", tools: serverTools }, GET_STATE_TIMEOUT_MS).catch(() => {});
+      }
       const state = await this.getStateWithTimeout();
       this.applyIdentity(state);
       // Warn when the spawn cwd differs from the session's recorded directory.
@@ -551,6 +618,10 @@ export class AgentSessionWrapper {
     // live stream and run state must survive; only the id changes.
     const moved = identityChanged && this.sessionMovePending;
     if (identityChanged && !moved) {
+      this.queueTimestampLast = 0;
+      this.queueTimestampEntries = { steering: [], followUp: [] };
+      this.queueUpdateRevision += 1;
+
       this.resetStream();
       this.promptRunning = false;
       this.awaitingAgentStart = false;
@@ -702,6 +773,15 @@ export class AgentSessionWrapper {
     let refreshSessionList = false;
 
     switch (event.type) {
+      case "queue_update": {
+        const timestamps = this.reconcileQueueTimestamps(event, true);
+        if (timestamps) {
+          this.queueUpdateRevision += 1;
+          event.queuedMessageTimestamps = timestamps;
+        }
+        break;
+      }
+
       case "command_output": {
         // `/mcp list` is a local OMP command. Capture its authoritative text for
         // Settings instead of adding an invisible command to the chat stream.
@@ -824,6 +904,11 @@ export class AgentSessionWrapper {
       case "host_tool_call": {
         const id = typeof event.id === "string" ? event.id : "";
         const toolName = typeof event.toolName === "string" ? event.toolName : "";
+        const serverTool = id && toolName ? getServerHostTools().get(toolName) : undefined;
+        if (serverTool) {
+          void this.runServerHostTool(id, serverTool, event.arguments);
+          return;
+        }
         // Route REGISTERED host tools to an attached UI (the browser answers
         // via host_tool_result). With no tab on this session, hand the call to
         // any open omp-web tab (the user switched sessions mid-run). Otherwise
@@ -840,7 +925,7 @@ export class AgentSessionWrapper {
           if (otherTabs.size > 0) {
             this.pendingHostTools.set(id, { ...event, webCrossSession: true });
             const args = event.arguments && typeof event.arguments === "object" ? event.arguments as Record<string, unknown> : {};
-            const call: CrossSessionHostToolCall = { sessionId: this.sessionId, id, toolName, arguments: args };
+            const call: CrossSessionHostToolCall = { sessionId: this.sessionId, cwd: this.cwd, id, toolName, arguments: args };
             for (const listener of otherTabs) {
               try { listener(call); } catch { /* ignore listener errors */ }
             }
@@ -944,10 +1029,14 @@ export class AgentSessionWrapper {
       const timeout = typeof event.timeout === "number" ? event.timeout : undefined;
       if (timeout && timeout > 0) {
         event.expiresAt = Date.now() + timeout;
-        const timer = setTimeout(() => this.forgetPendingUiRequest(id), timeout);
+        const timer = setTimeout(() => {
+          this.forgetPendingUiRequest(id);
+          notifyRunningChange();
+        }, timeout);
         timer.unref?.();
         this.uiExpiryTimers.set(id, timer);
       }
+      event.receivedAt = Date.now();
       this.pendingUiRequests.set(id, event);
       return false;
     }
@@ -972,6 +1061,21 @@ export class AgentSessionWrapper {
       }
     }
     return false;
+  }
+
+  /** Answer a server host tool call; a thrown error becomes the tool's error text. */
+  private async runServerHostTool(id: string, tool: ServerHostTool, rawArgs: unknown): Promise<void> {
+    const args = rawArgs && typeof rawArgs === "object" && !Array.isArray(rawArgs) ? rawArgs as Record<string, unknown> : {};
+    let text: string;
+    let isError = false;
+    try {
+      text = await tool.run({ sessionId: this.sessionId, cwd: this.recordedCwd ?? this.cwd }, args);
+    } catch (error) {
+      text = error instanceof Error ? error.message : String(error);
+      isError = true;
+    }
+    if (!this.isAlive()) return;
+    this.proc.sendFrame({ type: "host_tool_result", id, isError, result: { content: [{ type: "text", text }] } });
   }
 
   /**
@@ -1203,6 +1307,27 @@ export class AgentSessionWrapper {
     };
   }
 
+  /** Dialogs this session is blocked on until the user answers (lib/attention.ts). */
+  attentionItems(): AttentionItem[] {
+    const items: AttentionItem[] = [];
+    const now = Date.now();
+    for (const [id, event] of this.pendingUiRequests) {
+      const expiresAt = event.expiresAt as number | undefined;
+      if (expiresAt !== undefined && expiresAt <= now) continue;
+      const dialog = dialogAttention(event);
+      if (!dialog) continue;
+      items.push({
+        id,
+        ...dialog,
+        sessionId: this._sessionId,
+        ...(this._sessionName ? { sessionName: this._sessionName } : {}),
+        cwd: this.cwd,
+        createdAt: typeof event.receivedAt === "number" ? event.receivedAt : now,
+      });
+    }
+    return items;
+  }
+
   onDestroy(cb: () => void): void {
     this.destroyListeners.add(cb);
   }
@@ -1298,7 +1423,88 @@ export class AgentSessionWrapper {
       notifyRunningChange();
     }
   }
-  private buildWebState(state: RpcSessionState): WebSessionState {
+  private reconcileQueueTimestamps(value: unknown, updateTimeline: boolean): QueuedMessageTimestamps | null {
+    if (!isRecord(value) || !Array.isArray(value.steering) || !Array.isArray(value.followUp)) return null;
+    const snapshot = {
+      steering: value.steering.filter((item): item is string => typeof item === "string"),
+      followUp: value.followUp.filter((item): item is string => typeof item === "string"),
+    };
+    const queues = ["followUp", "steering"] as const;
+    const previous = this.queueTimestampEntries;
+
+    const prevByText: Record<"steering" | "followUp", Map<string, QueueTimestampEntry[]>> = {
+      followUp: new Map(),
+      steering: new Map(),
+    };
+    for (const q of queues) {
+      for (const entry of previous[q]) {
+        const list = prevByText[q].get(entry.text) ?? [];
+        list.push(entry);
+        prevByText[q].set(entry.text, list);
+      }
+    }
+
+    const snapCountByText: Record<"steering" | "followUp", Map<string, number>> = {
+      followUp: new Map(),
+      steering: new Map(),
+    };
+    for (const q of queues) {
+      for (const text of snapshot[q]) {
+        snapCountByText[q].set(text, (snapCountByText[q].get(text) ?? 0) + 1);
+      }
+    }
+
+    const surviving: Record<"steering" | "followUp", Map<string, QueueTimestampEntry[]>> = {
+      followUp: new Map(),
+      steering: new Map(),
+    };
+    const availableForMove: Record<"steering" | "followUp", Map<string, QueueTimestampEntry[]>> = {
+      followUp: new Map(),
+      steering: new Map(),
+    };
+
+    for (const q of queues) {
+      for (const [text, candidates] of prevByText[q]) {
+        const k = snapCountByText[q].get(text) ?? 0;
+        const n = candidates.length;
+        if (k <= n) {
+          surviving[q].set(text, candidates.slice(n - k));
+          availableForMove[q].set(text, candidates.slice(0, n - k));
+        } else {
+          surviving[q].set(text, [...candidates]);
+          availableForMove[q].set(text, []);
+        }
+      }
+    }
+
+    const next: QueueTimestampState = { steering: [], followUp: [] };
+    const timestamps: QueuedMessageTimestamps = { steering: [], followUp: [] };
+
+    for (const q of queues) {
+      const otherQ = q === "steering" ? "followUp" : "steering";
+      for (const text of snapshot[q]) {
+        let entry: QueueTimestampEntry | undefined = surviving[q].get(text)?.shift();
+        if (!entry) {
+          entry = availableForMove[otherQ].get(text)?.shift();
+        }
+        if (!entry && updateTimeline) {
+          this.queueTimestampLast = Math.max(Date.now(), this.queueTimestampLast + 1);
+          entry = { text, timestamp: this.queueTimestampLast };
+        }
+        if (entry) {
+          if (updateTimeline) next[q].push(entry);
+          timestamps[q].push(entry.timestamp);
+        } else {
+          timestamps[q].push(0);
+        }
+      }
+    }
+
+    if (updateTimeline) this.queueTimestampEntries = next;
+    return timestamps;
+  }
+
+  private buildWebState(state: RpcSessionState, queueRevision: number): WebSessionState {
     const wasRunning = this.isRunning();
 
     // Reconcile process-side flags with authoritative child state.
@@ -1330,6 +1536,9 @@ export class AgentSessionWrapper {
       notifyRunningChange();
     }
     const skillDiagnostics = parseSkillDiagnosticsSnapshot(state.skillDiagnostics);
+    const queuedMessages = state.queuedMessages ?? { steering: [], followUp: [] };
+    const shouldUpdateTimeline = state.queuedMessages !== undefined && queueRevision === this.queueUpdateRevision;
+    const queuedMessageTimestamps = this.reconcileQueueTimestamps(queuedMessages, shouldUpdateTimeline) ?? { steering: [], followUp: [] };
     return {
       sessionId: state.sessionId,
       sessionFile: state.sessionFile ?? "",
@@ -1355,7 +1564,8 @@ export class AgentSessionWrapper {
         : undefined,
       messageCount: state.messageCount,
       queuedMessageCount: state.queuedMessageCount,
-      queuedMessages: state.queuedMessages ?? { steering: [], followUp: [] },
+      queuedMessages,
+      queuedMessageTimestamps,
       tokensPerSecond: state.tokensPerSecond ?? null,
       contextUsage: state.contextUsage ?? null,
       systemPrompt: state.systemPrompt?.join("\n\n") ?? "",
@@ -1447,13 +1657,32 @@ export class AgentSessionWrapper {
       this.bashRunning = false;
       this.streaming = false;
       this.compacting = false;
+      const askpass = await prepareAskpassSpawn(() => this.askpassIdentity());
+      if (!this._alive) {
+        askpass?.revoke();
+        return;
+      }
+      this.ompBinarySpawned = ompBinaryFingerprint();
       const proc = new RpcProcess({
         cwd: this.cwd,
-        // Re-read per spawn so a restart picks up environment values the user
-        // added in Settings after this session was created (#104).
-        env: getAgentEnvOverrides(),
-        extraArgs: buildSessionSpawnArgs(resumable ? sessionFile : "", undefined, this.advisorSpawned, launchConfigForCwd(this.cwd)),
+        extraArgs: withWebAskpassPrompt(
+          buildSessionSpawnArgs(
+            resumable ? sessionFile : "",
+            undefined,
+            this.advisorSpawned,
+            launchConfigForCwd(this.cwd),
+            ompWebDefaultConfigArgs(this.cwd),
+          ),
+          this.cwd,
+          askpass !== null,
+        ),
+        env: {
+          ...getAgentEnvOverrides(),
+          ...askpass?.env,
+          OMP_WEB_AGENT_INSTRUCTIONS_FILE: agentInstructionsPath(),
+        },
         onExit: (info) => {
+          askpass?.revoke();
           if (this.proc === proc) this.handleProcessExit(info, proc);
         },
       });
@@ -1541,6 +1770,11 @@ export class AgentSessionWrapper {
         // message once the shell command releases the session.
         if (this.bashRunning) return await this.queueWhileShellRunning(command);
         const streamingBehavior = command.streamingBehavior as "steer" | "followUp" | undefined;
+        // A session that is not on disk yet cannot be restarted in place
+        // (its id would change); it picks changes up at its next respawn.
+        if (!this.isAttached && !streamingBehavior && !this.isRunning() && existsSync(this._sessionFile) && this.spawnOutdated()) {
+          await this.restart();
+        }
         if (!streamingBehavior) {
           this.responseObserved = false;
           this.responseRunActive = false;
@@ -1664,8 +1898,9 @@ export class AgentSessionWrapper {
 
       case "get_state": {
         try {
+          const queueRevision = this.queueUpdateRevision;
           const state = await this.proc.sendCommand<RpcSessionState>({ type: "get_state" }, GET_STATE_TIMEOUT_MS);
-          return this.buildWebState(state);
+          return this.buildWebState(state, queueRevision);
         } catch (error) {
           if (error instanceof RpcCommandTimeoutError) {
             await this.destroyAndWait();
@@ -1856,12 +2091,23 @@ export class AgentSessionWrapper {
           // The desktop arbitrates against its native dialog and acknowledges
           // validation before Web drops reconnect replay. Its cancel is broadcast
           // to every connection, including other Web server instances.
-          await this.proc.sendCommand({ type: "extension_ui_response", targetId: id, ...rest }, GET_STATE_TIMEOUT_MS);
+          try {
+            await this.proc.sendCommand({ type: "extension_ui_response", targetId: id, ...rest }, GET_STATE_TIMEOUT_MS);
+          } catch (error) {
+            if (error instanceof Error && /already been settled/i.test(error.message)) {
+              this.forgetPendingUiRequest(id);
+              this.emit({ type: "extension_ui_request", id: `cancel:${id}`, method: "cancel", targetId: id });
+              notifyRunningChange();
+              return null;
+            }
+            throw error;
+          }
         } else {
           this.proc.sendFrame({ type: "extension_ui_response", id, ...rest });
         }
         this.forgetPendingUiRequest(id);
         this.emit({ type: "extension_ui_request", id: `cancel:${id}`, method: "cancel", targetId: id });
+        notifyRunningChange();
         return null;
       }
 
@@ -1895,9 +2141,11 @@ export class AgentSessionWrapper {
           throw new WebRpcError("Host tools are not supported on attached sessions", "attached_session_unsupported");
         }
         const tools = Array.isArray(command.tools) ? command.tools as Array<{ name?: unknown; [key: string]: unknown }> : [];
-        const valid = tools.filter((t) => typeof t.name === "string" && t.name);
+        // Server tools are omp-web's own; a browser tool cannot shadow one.
+        const valid = tools.filter((t) => typeof t.name === "string" && t.name && !getServerHostTools().has(t.name));
         this.hostToolNames = new Set(valid.map((t) => t.name as string));
-        await this.proc.sendCommand({ type: "set_host_tools", tools: valid });
+        // omp replaces the whole set, so server tools ride along every time.
+        await this.proc.sendCommand({ type: "set_host_tools", tools: [...valid, ...serverHostToolDefinitions()] });
         return null;
       }
 
@@ -2050,6 +2298,8 @@ export interface RunningSessionUpdate {
   ids: string[];
   runningSessions: RunningRpcSession[];
   exitedSessions: ExitedRpcSession[];
+  /** Dialogs sessions are blocked on until the user answers. */
+  attention: AttentionItem[];
   refreshSessionList: boolean;
 }
 
@@ -2060,6 +2310,7 @@ declare global {
   var __ompRunningListeners: Set<(update: RunningSessionUpdate) => void> | undefined;
   var __ompHostToolListeners: Set<(call: CrossSessionHostToolCall) => void> | undefined;
   var __ompExitedSessions: Map<string, ExitedRpcSession> | undefined;
+  var __ompServerHostTools: Map<string, ServerHostTool> | undefined;
 }
 
 function getExitedMap(): Map<string, ExitedRpcSession> {
@@ -2220,6 +2471,35 @@ export function getRunningRpcSessionIds(): string[] {
   return getRunningRpcSessions().map((s) => s.id);
 }
 
+export function getAttentionItems(): AttentionItem[] {
+  const items: AttentionItem[] = [];
+  for (const session of new Set(getRegistry().values())) {
+    if (session.isAlive()) items.push(...session.attentionItems());
+  }
+  return items;
+}
+
+export interface AgentProcess {
+  pid: number;
+  sessionId: string;
+  sessionName?: string;
+  cwd: string;
+  wrapper: AgentSessionWrapper;
+}
+
+/** Live omp processes, one per session. */
+export function getAgentProcesses(): AgentProcess[] {
+  const processes: AgentProcess[] = [];
+  for (const session of new Set(getRegistry().values())) {
+    if (session.isAttached) continue;
+    const pid = session.pid;
+    if (pid === undefined) continue;
+    const name = session.askpassIdentity().sessionName;
+    processes.push({ pid, sessionId: session.sessionId, ...(name ? { sessionName: name } : {}), cwd: session.cwd, wrapper: session });
+  }
+  return processes;
+}
+
 /** Stop all live omp children after an explicit runtime update. The browser will
  * reconnect sessions on demand and start them with the updated executable. */
 export async function restartAllRpcSessions(): Promise<number> {
@@ -2257,9 +2537,29 @@ export function subscribeRunningSessions(listener: (update: RunningSessionUpdate
 // Cross-session host tool calls
 //
 // A registered host tool called while no tab watches its session goes to every
-// open omp-web tab (over /api/agent/running/events) instead of being rejected.
+// open omp-web tab (over /api/agent/host-tools/events) instead of being rejected.
 // ----------------------------------------------------------------------------
 
+/** A tool omp-web itself answers (no browser involved). The handler gets the
+ * CALLING session, so a tool can scope what it does to that session. */
+export interface ServerHostTool {
+  definition: { name: string; description: string; parameters: Record<string, unknown> };
+  run: (caller: { sessionId: string; cwd: string }, args: Record<string, unknown>) => Promise<string>;
+}
+
+function getServerHostTools(): Map<string, ServerHostTool> {
+  globalThis.__ompServerHostTools ??= new Map();
+  return globalThis.__ompServerHostTools;
+}
+
+function serverHostToolDefinitions(): ServerHostTool["definition"][] {
+  return [...getServerHostTools().values()].map((tool) => tool.definition);
+}
+
+/** Offer a server-answered tool to every omp child started from now on. */
+export function registerServerHostTool(tool: ServerHostTool): void {
+  getServerHostTools().set(tool.definition.name, tool);
+}
 function getHostToolListeners(): Set<(call: CrossSessionHostToolCall) => void> {
   if (!globalThis.__ompHostToolListeners) globalThis.__ompHostToolListeners = new Set();
   return globalThis.__ompHostToolListeners;
@@ -2278,7 +2578,7 @@ export function subscribeHostToolCalls(listener: (call: CrossSessionHostToolCall
 }
 
 // Starts at the empty state so an idle server never broadcasts "nothing changed".
-let lastRunningSnapshot = "[[],[]]";
+let lastRunningSnapshot = "[[],[],[]]";
 
 /**
  * Recompute the running-session-id set and, when it changes, broadcast it.
@@ -2288,13 +2588,14 @@ let lastRunningSnapshot = "[[],[]]";
 export function notifyRunningChange({ refreshSessionList = false }: { refreshSessionList?: boolean } = {}): void {
   const runningSessions = getRunningRpcSessions();
   const exitedSessions = getExitedRpcSessions();
+  const attention = getAttentionItems();
   const ids = runningSessions.map((s) => s.id);
   const byId = (a: { id: string }, b: { id: string }) => a.id.localeCompare(b.id);
-  const snapshot = JSON.stringify([runningSessions.slice().sort(byId), exitedSessions.slice().sort(byId)]);
+  const snapshot = JSON.stringify([runningSessions.slice().sort(byId), exitedSessions.slice().sort(byId), attention.slice().sort(byId)]);
   if (snapshot === lastRunningSnapshot && !refreshSessionList) return;
   lastRunningSnapshot = snapshot;
   syncInterruptibleSessions();
-  const update: RunningSessionUpdate = { ids, runningSessions, exitedSessions, refreshSessionList };
+  const update: RunningSessionUpdate = { ids, runningSessions, exitedSessions, attention, refreshSessionList };
   for (const listener of getRunningListeners()) {
     try { listener(update); } catch { /* ignore listener errors */ }
   }
@@ -2330,6 +2631,81 @@ export async function resumeInterruptedSessions(): Promise<void> {
   }));
 }
 
+/**
+ * Deliver a scheduled message (lib/scheduled-messages.ts) the way the composer
+ * would: a new prompt when the session is idle, a follow-up when a run is in
+ * progress (it then lands after that run). Starts the session's omp if needed.
+ */
+export async function deliverScheduledMessage(sessionId: string, message: string, advisor: boolean): Promise<void> {
+  let session = getRpcSession(sessionId);
+  if (!session?.isAlive()) {
+    const filePath = await resolveSessionPath(sessionId);
+    if (!filePath) throw new Error("Session not found");
+    try {
+      session = await tryAttachLiveSession(sessionId, filePath);
+    } catch {}
+    if (!session?.isAlive()) {
+      const owner = readSessionMetadata(filePath);
+      if (owner.status === "live" || owner.status === "invalid") {
+        throw new WebRpcError("Session is owned by an external process", "session_owned_externally");
+      }
+      const header = readSessionHeader(filePath);
+      const targetSessionId = header?.id ?? sessionId;
+      const leaseCheck = await inspectNativeSessionLease(targetSessionId, undefined, getAgentEnvOverrides());
+      if (leaseCheck.error) {
+        throw new WebRpcError(`Cannot safely verify session ownership: ${leaseCheck.error}`, "session_lease_inspect_failed");
+      }
+      if (leaseCheck.active) {
+        throw new WebRpcError("Session is owned by an external process", "session_owned_externally");
+      }
+      const { cwd } = resolveSpawnCwdResult(header?.cwd);
+      session = (await startRpcSession(sessionId, filePath, cwd, undefined, advisor, header?.cwd)).session;
+    }
+  }
+  await session.send(session.isRunning() ? { type: "follow_up", message } : { type: "prompt", message });
+}
+
+export interface NewSessionOptions {
+  cwd: string;
+  toolNames?: string[];
+  advisor?: boolean;
+  provider?: string;
+  modelId?: string;
+  thinkingLevel?: string;
+}
+
+/**
+ * Spawn a brand-new omp session in `cwd` and apply the chosen model and
+ * thinking level (RPC set_model / set_thinking_level, so failures surface as
+ * command errors and the live model catalog is consulted). The caller sends
+ * the first command and must `destroyAndWait()` the session if that fails;
+ * a failure here already cleans up.
+ */
+export async function spawnNewSession(options: NewSessionOptions): Promise<{ session: AgentSessionWrapper; realSessionId: string }> {
+  // Must be unique per request: startRpcSession coalesces concurrent callers
+  // that share a key onto one session. Date.now() (ms resolution) collides for
+  // requests in the same millisecond, merging two new sessions into one.
+  const tempKey = `__new__${randomUUID()}`;
+  const { session, realSessionId } = await startRpcSession(tempKey, "", options.cwd, options.toolNames, options.advisor === true);
+  // Keep the files-route allowed roots in sync so the new cwd is readable via
+  // /api/files at once instead of 403ing for up to the cache TTL.
+  allowFileRoot(options.cwd);
+  invalidateSessionListCache();
+  try {
+    if (options.provider && options.modelId) {
+      await session.send({ type: "set_model", provider: options.provider, modelId: options.modelId });
+    }
+    if (options.thinkingLevel) {
+      await session.send({ type: "set_thinking_level", level: options.thinkingLevel });
+    }
+  } catch (error) {
+    // Without this a failed preset leaves an orphaned omp process and a
+    // registry entry nobody will ever use.
+    await session.destroyAndWait();
+    throw error;
+  }
+  return { session, realSessionId };
+}
 /** Look up the workspace-registered launch config; unregistered projects attach none. */
 function launchConfigForCwd(cwd: string): ProjectLaunchConfig | undefined {
   let canonical = cwd;
@@ -2506,12 +2882,23 @@ export async function startRpcSession(
     // The wrapper needs the process and the process's onExit needs the wrapper;
     // the holder breaks that cycle (onExit only fires once the child dies).
     const holder: { wrapper?: AgentSessionWrapper } = {};
+    const askpass = await prepareAskpassSpawn(() => holder.wrapper?.askpassIdentity() ?? { sessionId, cwd });
     const proc = new RpcProcess({
       cwd,
-      // User-configured variables for MCP servers and generated configs (#104).
-      env: getAgentEnvOverrides(),
-      extraArgs: buildSessionSpawnArgs(sessionFile, toolNames, advisor === true, launchConfig),
-      onExit: (info) => holder.wrapper?.handleProcessExit(info, proc),
+      extraArgs: withWebAskpassPrompt(
+        buildSessionSpawnArgs(sessionFile, toolNames, advisor === true, launchConfig, ompWebDefaultConfigArgs(cwd)),
+        cwd,
+        askpass !== null,
+      ),
+      env: {
+        ...getAgentEnvOverrides(),
+        ...askpass?.env,
+        OMP_WEB_AGENT_INSTRUCTIONS_FILE: agentInstructionsPath(),
+      },
+      onExit: (info) => {
+        askpass?.revoke();
+        holder.wrapper?.handleProcessExit(info, proc);
+      },
     });
     const created = new AgentSessionWrapper(
       proc,
@@ -2521,6 +2908,7 @@ export async function startRpcSession(
       sessionFile ? sessionId : "",
     );
     holder.wrapper = created;
+    created.ompBinarySpawned = ompBinaryFingerprint();
     created.start();
     try {
       await created.waitUntilReady();

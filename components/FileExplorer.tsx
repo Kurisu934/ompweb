@@ -7,14 +7,25 @@ import {
   ChevronRight,
   CircleAlert,
   CircleMinus,
+  Copy,
   Download,
+  FileText,
+  FilePlus,
+  FolderPlus,
+  MoreHorizontal,
+  Pencil,
+  Trash2,
   Folder,
   FolderOpen,
   Loader2,
+  SquareTerminal,
   TriangleAlert,
   Upload,
   X,
 } from "lucide-react";
+import { contributeContextMenu, type ContextMenuItem } from "@/lib/context-menu";
+import { requestTerminalAt } from "@/lib/terminal-request";
+import { copyFromContextMenu } from "./ui/context-menu";
 import { getFileIcon } from "./FileIcons";
 import { Tooltip } from "./ui/primitives";
 import { translate, useI18n } from "@/lib/i18n";
@@ -29,6 +40,8 @@ import {
 import type { GitFileStatus, GitFileStatusKind, GitStatusResponse } from "@/lib/git-types";
 import { MAX_RESULT_LIMIT, type FileIndexEntry } from "@/lib/file-fuzzy";
 import { buildSearchRows } from "@/lib/search-results";
+import { FileOperationDialog, type FileOperationRequest } from "./FileOperationDialog";
+import { isFileWithinPath, type FileMutation } from "@/lib/file-editing";
 
 interface FileEntry {
   name: string;
@@ -64,6 +77,8 @@ interface Props {
   onRevealDone?: () => void;
   /** Reports the git changed-file count so the explorer header can badge it. */
   onGitStatusChange?: (changedCount: number, isRepo: boolean) => void;
+  onBeforeMutation?: (paths: string[]) => boolean;
+  onMutation?: (mutation: FileMutation) => void;
 }
 
 export interface FileExplorerHandle {
@@ -257,6 +272,7 @@ interface ExplorerRowProps {
   onActivate: (node: FileNode, index: number) => void;
   onKeyDown: (event: React.KeyboardEvent<HTMLDivElement>, node: FileNode, index: number) => void;
   onFocusRow: (index: number) => void;
+  onOperation: (request: FileOperationRequest) => void;
 }
 
 // Memoized: the parent re-renders on every scroll tick, but a row only
@@ -279,6 +295,7 @@ const ExplorerRow = memo(function ExplorerRow({
   onActivate,
   onKeyDown,
   onFocusRow,
+  onOperation,
 }: ExplorerRowProps) {
   const { t } = useI18n();
   const [hovered, setHovered] = useState(false);
@@ -306,6 +323,43 @@ const ExplorerRow = memo(function ExplorerRow({
     <div
       className="wallpaper-surface"
       onClick={() => onActivate(node, index)}
+      onContextMenu={(event) => {
+        const relativePath = getRelativeFilePath(node.fullPath, cwd);
+        const items: ContextMenuItem[] = [
+          node.isDir
+            ? { id: "toggle", label: open ? t("contextMenu.collapse") : t("contextMenu.expand"), icon: open ? Folder : FolderOpen, onSelect: () => onActivate(node, index) }
+            : { id: "open", label: t("contextMenu.open"), icon: FileText, onSelect: () => onActivate(node, index) },
+        ];
+        if (onAtMention) items.push({ id: "mention", label: t("contextMenu.mention"), icon: AtSign, onSelect: () => onAtMention(relativePath, node.isDir) });
+        items.push(
+          { id: "copy-relative", label: t("contextMenu.copyRelativePath"), icon: Copy, onSelect: () => copyFromContextMenu(relativePath) },
+          { id: "copy-absolute", label: t("contextMenu.copyAbsolutePath"), icon: Copy, onSelect: () => copyFromContextMenu(node.fullPath) },
+        );
+        if (node.isDir) {
+          items.push({ id: "terminal", label: t("contextMenu.openInTerminal"), icon: SquareTerminal, onSelect: () => requestTerminalAt(node.fullPath) });
+        } else {
+          items.push({
+            id: "download",
+            label: t("contextMenu.download"),
+            icon: Download,
+            onSelect: () => {
+              const link = document.createElement("a");
+              link.href = `/api/files/${encodeFilePathForApi(node.fullPath)}?type=download`;
+              link.download = node.name;
+              link.click();
+            },
+          });
+        }
+        if (node.isDir) items.push(
+          { id: "new-file", label: t("fileEditing.create-file"), icon: FilePlus, onSelect: () => onOperation({ kind: "create-file", path: node.fullPath }) },
+          { id: "new-folder", label: t("fileEditing.create-directory"), icon: FolderPlus, onSelect: () => onOperation({ kind: "create-directory", path: node.fullPath }) },
+        );
+        items.push(
+          { id: "rename", label: t("fileEditing.rename"), icon: Pencil, onSelect: () => onOperation({ kind: "rename", path: node.fullPath, name: node.name }) },
+          { id: "delete", label: t("fileEditing.delete"), icon: Trash2, onSelect: () => onOperation({ kind: "delete", path: node.fullPath }) },
+        );
+        contributeContextMenu(event, { id: "file", title: node.name, items });
+      }}
       onKeyDown={(e) => onKeyDown(e, node, index)}
       onMouseEnter={() => setHovered(true)}
       onMouseLeave={() => setHovered(false)}
@@ -499,6 +553,12 @@ const ExplorerRow = memo(function ExplorerRow({
           </a>
         </Tooltip>
       )}
+      <button type="button" aria-label={t("fileEditing.actionsFor", { name: node.name })} title={t("fileEditing.actions")}
+        onClick={(event) => { event.stopPropagation(); onOperation({ kind: "actions", path: node.fullPath, name: node.name, isDir: node.isDir }); }}
+        onKeyDown={(event) => event.stopPropagation()}
+        style={{ display: "flex", alignItems: "center", justifyContent: "center", flexShrink: 0, width: 24, height: 24, border: "none", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text-muted)", cursor: "pointer" }}>
+        <MoreHorizontal size={14} />
+      </button>
     </div>
   );
 });
@@ -517,6 +577,8 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   revealPath = null,
   onRevealDone,
   onGitStatusChange,
+  onBeforeMutation,
+  onMutation,
 }, ref) {
   const { t, tn } = useI18n();
   const isMobile = useIsMobile();
@@ -545,6 +607,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   const [searchTruncated, setSearchTruncated] = useState(false);
   const [searchLoading, setSearchLoading] = useState(false);
   const [searchFailed, setSearchFailed] = useState(false);
+  const [operation, setOperation] = useState<FileOperationRequest | null>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const prevCwdRef = useRef<string | null>(null);
   const uploadInputRef = useRef<HTMLInputElement>(null);
@@ -1127,6 +1190,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
                   onActivate={handleActivateRow}
                   onKeyDown={handleRowKeyDown}
                   onFocusRow={setFocusedIndex}
+                  onOperation={setOperation}
                 />
               </div>
             );
@@ -1154,6 +1218,7 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
                 onActivate={handleActivateRow}
                 onKeyDown={handleRowKeyDown}
                 onFocusRow={setFocusedIndex}
+                onOperation={setOperation}
               />
             </div>
           );
@@ -1163,6 +1228,27 @@ export const FileExplorer = forwardRef<FileExplorerHandle, Props>(function FileE
   return (
     <div style={{ height: "100%", display: "flex", flexDirection: "column", minHeight: 0 }}>
       <input ref={uploadInputRef} type="file" multiple hidden onChange={handleUploadInput} />
+      <div role="toolbar" aria-label={t("fileEditing.actions")} style={{ display: "flex", gap: 8, padding: "6px 8px", borderBottom: "1px solid var(--border)", flexShrink: 0 }}>
+        <button className="file-edit-action" onClick={() => setOperation({ kind: "create-file", path: cwd })}><FilePlus size={14} /> {t("fileEditing.create-file")}</button>
+        <button className="file-edit-action" onClick={() => setOperation({ kind: "create-directory", path: cwd })}><FolderPlus size={14} /> {t("fileEditing.create-directory")}</button>
+      </div>
+      {operation && <FileOperationDialog key={`${operation.kind}:${operation.path}`} request={operation} onClose={() => setOperation(null)} onBeforeMutation={onBeforeMutation}
+        onComplete={(kind, newPath) => {
+          setExpandedPaths((previous) => {
+            const next = new Set<string>();
+            for (const expanded of previous) {
+              if ((kind === "rename" || kind === "delete") && isFileWithinPath(expanded, operation.path)) {
+                if (newPath) next.add(newPath + expanded.slice(operation.path.length));
+              } else next.add(expanded);
+            }
+            if (kind === "create-file" || kind === "create-directory") next.add(operation.path);
+            return next;
+          });
+          setTreeRefreshKey((key) => key + 1);
+          setOperation(null);
+          onMutation?.({ path: kind === "create-file" || kind === "create-directory" ? newPath! : operation.path, newPath });
+          if (kind === "create-file" && newPath) onOpenFile(newPath, newPath.split("/").pop() ?? newPath);
+        }} />}
       {/* Pinned: the result list scrolls, so an un-sticky box leaves you
           unable to edit the query that produced it. */}
       {fileSearchOpen && (

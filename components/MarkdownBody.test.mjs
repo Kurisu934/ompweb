@@ -39,12 +39,6 @@ test("opens non-file markdown links in a safe new tab", () => {
   assert.doesNotMatch(html, /\snode=/);
 });
 
-test("keeps local file markdown links in the app", () => {
-  const html = renderMarkdown("[file](components/MarkdownBody.tsx)");
-
-  assert.match(html, /<a href="components\/MarkdownBody\.tsx">file<\/a>/);
-  assert.doesNotMatch(html, /target=|rel=|\snode=/);
-});
 
 test("renders math as plain text until the lazy KaTeX pipeline loads", () => {
   const html = renderMarkdown(String.raw`射线为 \(r_c = K^{-1}p\)。`);

@@ -731,3 +731,142 @@ test("a job from another browser that vanishes stands down instead of erroring",
   assert.equal(view.result.current.isTranscribing, false);
   assert.equal(view.result.current.transcribeError, null);
 });
+
+test("immediate stop transcribes once without leaving review or live microphone tracks", async () => {
+  const { view, transcripts } = mountDictation();
+  await act(async () => { await view.result.current.start(); });
+  await act(async () => { view.result.current.stop({ immediateSend: true }); });
+  await waitUntil(() => transcripts.length === 1);
+  assert.deepEqual(transcripts, ["transcribed words"]);
+  assert.equal(view.result.current.isRecording, false);
+  assert.equal(view.result.current.isTranscribing, false);
+  assert.equal(view.result.current.isReviewing, false);
+  assert.ok(world.tracks[0].stopped);
+});
+
+test("cancel while permission is pending closes any late microphone stream", async () => {
+  let resolve;
+  navigator.mediaDevices.getUserMedia = () => new Promise(r => { resolve = r; });
+  const { view, errors } = mountDictation();
+  act(() => { void view.result.current.start(); });
+  assert.equal(view.result.current.isStarting, true);
+  act(() => { view.result.current.cancel(); });
+  assert.equal(view.result.current.isStarting, false);
+  await act(async () => { resolve({ getTracks: () => world.tracks }); });
+  assert.equal(view.result.current.isRecording, false);
+  assert.equal(world.recorders.length, 0);
+  assert.ok(world.tracks[0].stopped);
+  assert.deepEqual(errors, []);
+});
+
+test("unmount while permission is pending cannot start an orphan recorder", async () => {
+  let resolve;
+  navigator.mediaDevices.getUserMedia = () => new Promise(r => { resolve = r; });
+  const { view } = mountDictation();
+  act(() => { void view.result.current.start(); });
+  view.unmount();
+  await act(async () => { resolve({ getTracks: () => world.tracks }); });
+  assert.equal(world.recorders.length, 0);
+  assert.ok(world.tracks[0].stopped);
+});
+
+test("late permission rejection does not cancel a newer request or display an error", async () => {
+  const pending = [];
+  navigator.mediaDevices.getUserMedia = () => new Promise((resolve, reject) => pending.push({ resolve, reject }));
+  const { view, errors } = mountDictation();
+  act(() => { void view.result.current.start(); });
+  act(() => { view.result.current.cancel(); });
+  act(() => { void view.result.current.start(); });
+  await act(async () => { pending[0].reject(new Error("Microphone access denied")); });
+  assert.equal(view.result.current.isStarting, true);
+  assert.deepEqual(errors, []);
+  await act(async () => { pending[1].resolve({ getTracks: () => world.tracks }); });
+  assert.equal(view.result.current.isStarting, false);
+  assert.equal(view.result.current.isRecording, true);
+  assert.equal(world.recorders.length, 1);
+});
+
+test("late granted permission and recorder events cannot stop a newer capture", async () => {
+  const pending = [];
+  navigator.mediaDevices.getUserMedia = () => new Promise(resolve => pending.push(resolve));
+  const { view, transcripts } = mountDictation();
+  act(() => { void view.result.current.start(); });
+  act(() => { view.result.current.cancel(); });
+  act(() => { void view.result.current.start(); });
+  const newer = new FakeTrack();
+  await act(async () => { pending[1]({ getTracks: () => [newer] }); });
+  await act(async () => { pending[0]({ getTracks: () => world.tracks }); });
+  assert.equal(view.result.current.isRecording, true);
+  assert.equal(newer.stopped, false);
+  assert.ok(world.tracks[0].stopped);
+  const staleRecorder = world.recorders[0];
+  act(() => { view.result.current.cancel(); });
+  act(() => { void view.result.current.start(); });
+  const newest = new FakeTrack();
+  await act(async () => { pending[2]({ getTracks: () => [newest] }); });
+  act(() => { staleRecorder.onstop(); });
+  assert.equal(view.result.current.isRecording, true);
+  assert.equal(newest.stopped, false);
+  assert.deepEqual(transcripts, []);
+});
+
+test("cancelled transcription cannot deliver stale text or clear a newer transcription", async () => {
+  const pending = [];
+  override(globalThis, "fetch", async (url, init) => {
+    if (init?.method === "POST" && url === "/api/stt") {
+      return new Promise((resolve) => pending.push(resolve));
+    }
+    if (url.startsWith("/api/stt/")) {
+      return { ok: true, status: 200, json: async () => ({ status: "done", text: "current" }) };
+    }
+    return { ok: true, status: 200, json: async () => ({}) };
+  });
+  const { view, transcripts } = mountDictation();
+  await act(async () => { await view.result.current.start(); });
+  act(() => { view.result.current.stop({ immediateSend: true }); });
+  act(() => { view.result.current.cancel(); });
+  await act(async () => { await view.result.current.start(); });
+  act(() => { view.result.current.stop({ immediateSend: true }); });
+  await act(async () => { pending[0]({ ok: true, status: 202, json: async () => ({ jobId: "job-stale" }) }); });
+  assert.deepEqual(transcripts, []);
+  assert.equal(view.result.current.isTranscribing, true);
+  await act(async () => { pending[1]({ ok: true, status: 202, json: async () => ({ jobId: "job-current" }) }); });
+  await waitUntil(() => transcripts.length > 0, 5000);
+  assert.deepEqual(transcripts, ["current"]);
+  assert.equal(view.result.current.isTranscribing, false);
+});
+
+test("confirming during asynchronous recorder shutdown waits for final audio and never reopens review", async () => {
+  const { view, transcripts } = mountDictation();
+  let uploads = 0;
+  override(globalThis, "fetch", async (url, init) => {
+    if (init?.method === "POST" && url === "/api/stt") {
+      uploads++;
+      return { ok: true, status: 202, json: async () => ({ jobId: "job-1" }) };
+    }
+    if (url === "/api/stt/job-1") {
+      return { ok: true, status: 200, json: async () => ({ status: "done", text: "complete recording" }) };
+    }
+    if (init?.method === "DELETE") {
+      return { ok: true, status: 200, json: async () => ({ status: "done", text: "complete recording" }) };
+    }
+    return { ok: true, status: 200, json: async () => ({}) };
+  });
+  await act(async () => { await view.result.current.start(); });
+  const recorder = world.recorders[0];
+  recorder.stop = () => { recorder.state = "inactive"; };
+  recorder.requestData();
+  act(() => { view.result.current.stop(); });
+  assert.equal(view.result.current.isReviewing, true);
+  act(() => { view.result.current.confirmTranscribe(); });
+  assert.equal(uploads, 0, "partial capture must not be uploaded");
+  assert.equal(view.result.current.isTranscribing, true);
+  assert.equal(view.result.current.isReviewing, false);
+  await act(async () => { recorder.requestData(); recorder.onstop(); });
+  assert.equal(uploads, 1);
+  await waitUntil(() => transcripts.length > 0, 5000);
+  assert.deepEqual(transcripts, ["complete recording"]);
+  assert.equal(view.result.current.isReviewing, false);
+  assert.equal(view.result.current.isTranscribing, false);
+  assert.ok(world.tracks[0].stopped);
+});

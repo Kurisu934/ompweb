@@ -97,6 +97,12 @@ export function versionFingerprint(bin: string): string | null {
   }
 }
 
+/** Identity of the installed omp executable; changes when an update replaces it. */
+export function ompBinaryFingerprint(): string | null {
+  const bin = resolveOmpBin();
+  return bin ? versionFingerprint(bin) : null;
+}
+
 async function probeOmpVersion(): Promise<string | null> {
   const bin = resolveOmpBin();
   const fingerprint = bin ? versionFingerprint(bin) : null;

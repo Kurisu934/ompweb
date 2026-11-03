@@ -22,7 +22,7 @@ import {
 } from "@/components/ui/field";
 import { Plus, Trash2, RefreshCw, AlertCircle, Cpu, Settings, Sparkles, Check as CheckIcon, Layers, RotateCcw, SlidersHorizontal, BookOpen, Search, KeyRound, ArrowLeft } from "lucide-react";
 import { toast } from "@/components/ui/toast";
-import { SettingsTabs, type SettingsTab } from "./SettingsTabs";
+import { SettingsTabs, type ProvidersTab, type SettingsTab } from "./SettingsTabs";
 import { ModelCatalogPicker } from "./ModelCatalogPicker";
 import { ProviderAccounts } from "./ProviderAccounts";
 import {
@@ -58,7 +58,6 @@ import {
   RetryFallbackDetail,
   SectionTitle,
 } from "./ModelsConfig-panels";
-export { providerInitials } from "./ModelsConfig-types";
 
 
 
@@ -1036,8 +1035,17 @@ function OAuthDetail({ provider, onRefresh }: { provider: OAuthProvider; onRefre
 
 
 // ── Main component ────────────────────────────────────────────────────────────
+const PROVIDER_TABS: readonly ProvidersTab[] = ["connected", "custom", "system", "defaults"];
 
-export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }: { onClose: () => void; onSelectTab?: (tab: SettingsTab) => void; onSaved?: () => void; embedded?: boolean }) {
+export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false, subTab, onSubTabChange, defaultsPanel }: {
+  onClose: () => void;
+  onSelectTab?: (tab: SettingsTab) => void;
+  onSaved?: () => void;
+  embedded?: boolean;
+  subTab: ProvidersTab;
+  onSubTabChange: (tab: ProvidersTab) => void;
+  defaultsPanel: React.ReactNode;
+}) {
   const { t, tn } = useI18n();
   const isMobile = useIsMobile();
   const [config, setConfig] = useState<ModelsFileData>({ providers: {} });
@@ -1045,7 +1053,6 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
   const [savedOk, setSavedOk] = useState(false);
-  const [subTab, setSubTab] = useState<"connected" | "custom" | "system">("connected");
   const [systemTab, setSystemTab] = useState<"registry" | "picker" | "roles" | "fallbacks">("registry");
   const [selection, setSelection] = useState<Selection | null>(null);
   const [oauthProviders, setOauthProviders] = useState<OAuthProvider[]>([]);
@@ -1441,35 +1448,29 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
           </div>
           <button onClick={onClose} aria-label={t("modelsConfig.close")} title={t("modelsConfig.close")} className="ui-focus-ring" style={{ background: "none", border: "none", color: "var(--text-muted)", cursor: "pointer", fontSize: 20, lineHeight: 1, padding: "4px 8px", minWidth: "var(--control-height-sm)", minHeight: "var(--control-height-sm)", display: "flex", alignItems: "center", justifyContent: "center", borderRadius: "var(--radius-control)" }}>×</button>
         </div>)}
-        {!embedded && onSelectTab && <SettingsTabs active="models" onSelect={onSelectTab} />}
+        {!embedded && onSelectTab && <SettingsTabs active="providers" onSelect={onSelectTab} />}
 
         {/* Body */}
-        {parseError ? (
-          <div style={{ flex: 1, overflowY: "auto", padding: 24, display: "flex", flexDirection: "column", gap: 12 }}>
-            <div style={{ fontSize: 13, fontWeight: 600, color: "var(--status-error)" }}>{t("modelsConfig.parseErrorTitle")}</div>
-            <div style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.6 }}>{t("modelsConfig.parseErrorBody")}</div>
-            {parseError.path && (
-              <code style={{ fontSize: 11, color: "var(--text-dim)", fontFamily: "var(--font-mono)", wordBreak: "break-all" }}>{parseError.path}</code>
-            )}
-            <pre style={{
-              margin: 0, padding: "10px 12px", background: "var(--bg-panel)", border: "1px solid var(--border)",
-              borderRadius: 6, color: "var(--text-muted)", fontSize: 11, fontFamily: "var(--font-mono)",
-              whiteSpace: "pre-wrap", wordBreak: "break-word", overflowX: "auto",
-            }}>{parseError.message}</pre>
-            <button onClick={loadConfig} disabled={loading}
-              style={{ alignSelf: "flex-start", padding: "5px 12px", background: "none", border: "1px solid var(--border)", borderRadius: 5, color: "var(--text-muted)", cursor: loading ? "default" : "pointer", fontSize: 12 }}>
-              {loading ? t("modelsConfig.loading") : t("modelsConfig.reload")}
-            </button>
-          </div>
-        ) : (
           <div style={{ display: "flex", flexDirection: "column", minHeight: 0, width: "100%" }}>
             {/* Top Sub-navigation Segmented Control + Add Provider Action */}
             <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16, marginBottom: 20, flexWrap: "wrap" }}>
-              <div className="providers-segmented" style={{ marginBottom: 0 }}>
+              <div className="providers-segmented" role="tablist" aria-label={t("settingsTabs.providers.label")} aria-orientation="horizontal" style={{ marginBottom: 0 }}
+                onKeyDown={(event) => {
+                  const index = PROVIDER_TABS.indexOf(subTab);
+                  const nextIndex = event.key === "ArrowRight" ? (index + 1) % PROVIDER_TABS.length
+                    : event.key === "ArrowLeft" ? (index + PROVIDER_TABS.length - 1) % PROVIDER_TABS.length
+                      : event.key === "Home" ? 0 : event.key === "End" ? PROVIDER_TABS.length - 1 : null;
+                  if (nextIndex === null) return;
+                  event.preventDefault();
+                  document.getElementById(`providers-tab-${PROVIDER_TABS[nextIndex]}`)?.click();
+                  document.getElementById(`providers-tab-${PROVIDER_TABS[nextIndex]}`)?.focus();
+                }}
+              >
                 <button
                   type="button"
+                  role="tab" id="providers-tab-connected" aria-controls="providers-panel-connected" aria-selected={subTab === "connected"} tabIndex={subTab === "connected" ? 0 : -1}
                   className={`providers-segmented-btn${subTab === "connected" ? " active" : ""}`}
-                  onClick={() => { setSubTab("connected"); setSelection(null); }}
+                  onClick={() => { onSubTabChange("connected"); setSelection(null); }}
                 >
                   <KeyRound size={14} aria-hidden="true" />
                   <span>{t("modelsConfig.connectedAccounts")}</span>
@@ -1479,8 +1480,9 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                 </button>
                 <button
                   type="button"
+                  role="tab" id="providers-tab-custom" aria-controls="providers-panel-custom" aria-selected={subTab === "custom"} tabIndex={subTab === "custom" ? 0 : -1}
                   className={`providers-segmented-btn${subTab === "custom" ? " active" : ""}`}
-                  onClick={() => { setSubTab("custom"); setSelection(null); }}
+                  onClick={() => { onSubTabChange("custom"); setSelection(null); }}
                 >
                   <Cpu size={14} aria-hidden="true" />
                   <span>{t("modelsConfig.customProviders")}</span>
@@ -1490,11 +1492,21 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                 </button>
                 <button
                   type="button"
+                  role="tab" id="providers-tab-system" aria-controls="providers-panel-system" aria-selected={subTab === "system"} tabIndex={subTab === "system" ? 0 : -1}
                   className={`providers-segmented-btn${subTab === "system" ? " active" : ""}`}
-                  onClick={() => { setSubTab("system"); setSelection({ type: systemTab }); }}
+                  onClick={() => { onSubTabChange("system"); setSelection({ type: systemTab }); }}
                 >
                   <Layers size={14} aria-hidden="true" />
                   <span>{t("modelsConfig.ompSystemSection")}</span>
+                </button>
+                <button
+                  type="button"
+                  role="tab" id="providers-tab-defaults" aria-controls="providers-panel-defaults" aria-selected={subTab === "defaults"} tabIndex={subTab === "defaults" ? 0 : -1}
+                  className={`providers-segmented-btn${subTab === "defaults" ? " active" : ""}`}
+                  onClick={() => onSubTabChange("defaults")}
+                >
+                  <SlidersHorizontal size={14} aria-hidden="true" />
+                  <span>{t("modelsConfig.defaultParameters")}</span>
                 </button>
               </div>
 
@@ -1511,6 +1523,26 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
             </div>
 
             {/* Sub-tab content */}
+            <div role="tabpanel" id={`providers-panel-${subTab}`} aria-labelledby={`providers-tab-${subTab}`} style={{ minWidth: 0 }}>
+            {subTab === "defaults" ? defaultsPanel : parseError ? (
+              <div style={{ flex: 1, overflowY: "auto", padding: 24, display: "flex", flexDirection: "column", gap: 12 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, color: "var(--status-error)" }}>{t("modelsConfig.parseErrorTitle")}</div>
+                <div style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.6 }}>{t("modelsConfig.parseErrorBody")}</div>
+                {parseError.path && (
+                  <code style={{ fontSize: 11, color: "var(--text-dim)", fontFamily: "var(--font-mono)", wordBreak: "break-all" }}>{parseError.path}</code>
+                )}
+                <pre style={{
+                  margin: 0, padding: "10px 12px", background: "var(--bg-panel)", border: "1px solid var(--border)",
+                  borderRadius: 6, color: "var(--text-muted)", fontSize: 11, fontFamily: "var(--font-mono)",
+                  whiteSpace: "pre-wrap", wordBreak: "break-word", overflowX: "auto",
+                }}>{parseError.message}</pre>
+                <button onClick={loadConfig} disabled={loading}
+                  style={{ alignSelf: "flex-start", padding: "5px 12px", background: "none", border: "1px solid var(--border)", borderRadius: 5, color: "var(--text-muted)", cursor: loading ? "default" : "pointer", fontSize: 12 }}>
+                  {loading ? t("modelsConfig.loading") : t("modelsConfig.reload")}
+                </button>
+              </div>
+            ) : (
+              <>
             {subTab === "connected" && (
               selection && (selection.type === "oauth" || selection.type === "apikey") ? (
                 <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
@@ -1589,6 +1621,7 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                       </div>
                     </div>
                   )}
+
 
                   {/* Active API Key Providers */}
                   {activeApiKey.length > 0 && (
@@ -1960,8 +1993,10 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
                 </div>
               </div>
             )}
+              </>
+            )}
+            </div>
           </div>
-        )}
 
         {/* Save controls */}
         {(subTab === "custom" || !embedded) && (
@@ -2003,9 +2038,9 @@ export function ModelsConfig({ onClose, onSelectTab, onSaved, embedded = false }
       <AddProviderPicker
         oauthProviders={oauthProviders}
         apiKeyProviders={apiKeyProviders}
-        onSelectOAuth={(id) => { setSubTab("connected"); setSelection({ type: "oauth", providerId: id }); }}
-        onSelectApiKey={(id) => { setSubTab("connected"); setSelection({ type: "apikey", providerId: id }); }}
-        onAddCustom={() => { setSubTab("custom"); addCustomProvider(); }}
+        onSelectOAuth={(id) => { onSubTabChange("connected"); setSelection({ type: "oauth", providerId: id }); }}
+        onSelectApiKey={(id) => { onSubTabChange("connected"); setSelection({ type: "apikey", providerId: id }); }}
+        onAddCustom={() => { onSubTabChange("custom"); addCustomProvider(); }}
         onClose={() => setPickerOpen(false)}
       />
     )}

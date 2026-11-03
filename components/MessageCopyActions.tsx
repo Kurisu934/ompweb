@@ -31,6 +31,12 @@ function renderedText(body: HTMLElement, source: string): string {
   }
 }
 
+/** What Copy puts on the clipboard: each text block as rendered, blank-line separated. */
+export function messagePlainText(texts: string[], body: HTMLElement | null): string {
+  const bodies = body?.querySelectorAll<HTMLElement>("[data-message-text]");
+  return texts.map((text, index) => bodies?.[index] ? renderedText(bodies[index], text) : text).filter((text) => text.trim()).join("\n\n");
+}
+
 export function MessageCopyActions({ texts, bodyRef }: {
   texts: string[];
   bodyRef: RefObject<HTMLDivElement | null>;
@@ -40,10 +46,7 @@ export function MessageCopyActions({ texts, bodyRef }: {
   const markdown = useCopyFeedback();
   if (!texts.some((text) => text.trim())) return null;
 
-  const copyPlain = () => {
-    const bodies = bodyRef.current?.querySelectorAll<HTMLElement>("[data-message-text]");
-    plain.copy(texts.map((text, index) => bodies?.[index] ? renderedText(bodies[index], text) : text).filter((text) => text.trim()).join("\n\n"));
-  };
+  const copyPlain = () => plain.copy(messagePlainText(texts, bodyRef.current));
 
   return (
     <div className="message-copy-actions">

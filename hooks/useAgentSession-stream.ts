@@ -11,7 +11,7 @@ import type {
   SessionTreeNode,
 } from "@/lib/types";
 import type { ThinkingModelMeta } from "@/lib/thinking-levels";
-import type { QueuedMessages, RpcAvailableSlashCommand, SlowModeScope, TodoPhase, UsageLimitState } from "@/lib/pi-types";
+import type { QueuedMessageTimestamps, QueuedMessages, RpcAvailableSlashCommand, SlowModeScope, TodoPhase, UsageLimitState } from "@/lib/pi-types";
 import type {
   SubagentHistoryEntry,
   SubagentInfo,
@@ -19,6 +19,7 @@ import type {
 } from "@/lib/subagent-types";
 import { translate } from "@/lib/i18n";
 import type { SessionStreamCursor } from "@/lib/session-sync";
+import { encodeFilePathForApi, getFileName, resolveWorkspaceFilePath } from "@/lib/file-paths";
 
 export interface SessionData {
   sessionId: string;
@@ -176,6 +177,7 @@ export type AgentStateResponse = {
   extensionStatuses?: ExtensionStatusItem[];
   extensionWidgets?: ExtensionWidgetItem[];
   queuedMessages?: QueuedMessages;
+  queuedMessageTimestamps?: QueuedMessageTimestamps;
   /** Untrusted until parsed by parseSkillDiagnosticsSnapshot. */
   skillDiagnostics?: unknown;
   todoPhases?: TodoPhase[];
@@ -308,6 +310,9 @@ export interface HostToolHandlers {
   openUrl: (url: string) => string;
   /** Open a file tab; may return the result text reported to the agent. */
   openFile?: (path: string, name: string) => string | void;
+  cwd?: string | null;
+  sessionId?: string;
+  canOpenFile?: () => boolean;
 }
 
 /**
@@ -347,17 +352,26 @@ export async function runHostTool(
       return { text: "Notification shown", isError: false };
     }
     case "open_file": {
-      const path = str(args.path) ?? "";
-      if (!path) return { text: "No path provided", isError: true };
-      let text: string | void = undefined;
-      if (handlers.openFile) {
-        try {
-          text = handlers.openFile(path, path.split(/[\\/]/).pop() || path);
-        } catch {
-          // ignore navigation failures
-        }
+      const path = resolveWorkspaceFilePath(str(args.path) ?? "", handlers.cwd);
+      if (!path || !handlers.openFile) {
+        return { text: !path ? "Invalid file path or workspace unavailable" : "File viewer is unavailable", isError: true };
       }
-      return { text: text || `Opened ${path}`, isError: false };
+      try {
+        const query = new URLSearchParams({ type: "meta" });
+        if (handlers.sessionId) query.set("sessionId", handlers.sessionId);
+        const response = await fetch(`/api/files/${encodeFilePathForApi(path)}?${query}`, {
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (!response.ok) {
+          const detail = await response.json().catch(() => null);
+          throw new Error(typeof detail?.error === "string" ? detail.error : `File check failed (${response.status})`);
+        }
+        if (handlers.canOpenFile && !handlers.canOpenFile()) throw new Error("Session changed before opening the file");
+        const text = handlers.openFile(path, getFileName(path));
+        return { text: typeof text === "string" && text ? text : `Opened ${path}`, isError: false };
+      } catch (error) {
+        return { text: `Could not open ${path}: ${error instanceof Error ? error.message : String(error)}`, isError: true };
+      }
     }
     default:
       return { text: `Host tool "${toolName}" is not available in omp-web`, isError: true };

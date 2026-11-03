@@ -422,7 +422,7 @@ test("a prompt queued behind a running shell command drops the phantom turn and 
   // owns the session (see lib/rpc-manager.ts).
   const queuedReply = { success: true, data: { queued: true, queue: "followUp", reason: "shellRunning" } };
   const holdReply = () => world.holds.push({
-    match: (method, _url, body) => method === "POST" && (body?.type === "prompt" || body?.type === "steer"),
+    match: (method, _url, body) => method === "POST" && (body?.type === "prompt" || body?.type === "steer" || body?.type === "abort_and_prompt"),
     produce: () => Promise.resolve({ value: queuedReply }),
   });
   holdReply();

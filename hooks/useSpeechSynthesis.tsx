@@ -2,6 +2,7 @@
 
 import { createContext, useCallback, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { sanitizeTextForSpeech } from "@/lib/speech-sanitizer";
+import { matchesShortcut } from "@/lib/keyboard-shortcuts";
 
 export const TTS_AUTOPLAY_PREF_KEY = "omp-tts-autoplay";
 export const TTS_VOICE_PREF_KEY = "omp-tts-voice";
@@ -146,12 +147,13 @@ export function useSpeechSynthesis(): SpeechSynthesisState {
     broadcastState(null, false);
   }, []);
 
-  // Stop playback on Escape key
+  // Stop playback through the configurable shortcut.
   useEffect(() => {
     if (typeof window === "undefined") return;
 
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape" && currentSpeakingId !== null) {
+      if (matchesShortcut("stopSpeech", e) && currentSpeakingId !== null) {
+        e.preventDefault();
         stop();
       }
     };

@@ -959,7 +959,7 @@ export function SkillsConfig({
             ×
           </button>
         </div>)}
-        {!embedded && onSelectTab && <SettingsTabs active="skills" onSelect={onSelectTab} />}
+        {!embedded && onSelectTab && <SettingsTabs active="extensions" onSelect={onSelectTab} />}
         <div className="grid gap-1 border-b border-border px-3 py-2">
           <SkillDiagnosticsInspector sessionId={sessionId} />
         </div>

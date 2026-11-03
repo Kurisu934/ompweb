@@ -31,6 +31,8 @@ export type NativeSettings = {
   autolearn?: { enabled?: boolean; autoContinue?: boolean; minToolCalls?: number };
   mnemopi?: { scoping?: "global" | "per-project" | "per-project-tagged"; autoRecall?: boolean; autoRetain?: boolean; noEmbeddings?: boolean };
   mcp?: { enableProjectConfig?: boolean; renderMarkdownResults?: boolean; notifications?: boolean; notificationDebounceMs?: number };
+  /** omp's `generate_image.enabled`; unset means omp-web turns it on (lib/omp/web-defaults.ts). */
+  generate_image?: { enabled?: boolean };
 };
 
 const THINKING_LEVELS = new Set(["auto", "minimal", "low", "medium", "high", "xhigh", "max"]);
@@ -108,6 +110,7 @@ export function readNativeSettings(): { path: string; settings: NativeSettings }
   const autolearn = isRecord(data.autolearn) ? data.autolearn : {};
   const mnemopi = isRecord(data.mnemopi) ? data.mnemopi : {};
   const mcp = isRecord(data.mcp) ? data.mcp : {};
+  const generateImage = isRecord(data.generate_image) ? data.generate_image : {};
   const registryHasScopedEntries = [data.enabledModels, data.disabledProviders, data.modelProviderOrder]
     .some((value) => Array.isArray(value) && !value.every((item) => typeof item === "string"));
   return {
@@ -175,6 +178,7 @@ export function readNativeSettings(): { path: string; settings: NativeSettings }
         ...(typeof mcp.notifications === "boolean" ? { notifications: mcp.notifications } : {}),
         ...(typeof mcp.notificationDebounceMs === "number" && Number.isInteger(mcp.notificationDebounceMs) ? { notificationDebounceMs: mcp.notificationDebounceMs } : {}),
       } } : {}),
+      ...(typeof generateImage.enabled === "boolean" ? { generate_image: { enabled: generateImage.enabled } } : {}),
     },
   };
 }
@@ -200,6 +204,7 @@ export function writeNativeSettings(settings: NativeSettings): void {
   if (settings.skills && Object.keys(settings.skills).some((key) => key !== "showStartupDiagnostics")) {
     throw new Error("Unsupported skills setting");
   }
+  assertOptionalRecord(settings.generate_image, "generate_image");
   for (const [name, value] of Object.entries({
     hideThinkingBlock: settings.hideThinkingBlock,
     externalThinking: settings.externalThinking,
@@ -219,6 +224,7 @@ export function writeNativeSettings(settings: NativeSettings): void {
     "mcp.enableProjectConfig": settings.mcp?.enableProjectConfig,
     "mcp.renderMarkdownResults": settings.mcp?.renderMarkdownResults,
     "mcp.notifications": settings.mcp?.notifications,
+    "generate_image.enabled": settings.generate_image?.enabled,
   })) assertOptionalBoolean(value, name);
   if (settings.defaultThinkingLevel !== undefined && !THINKING_LEVELS.has(settings.defaultThinkingLevel)) throw new Error("Invalid default thinking level");
   if (settings.textVerbosity !== undefined && !TEXT_VERBOSITIES.has(settings.textVerbosity)) throw new Error("Invalid text verbosity");
@@ -276,6 +282,7 @@ export function writeNativeSettings(settings: NativeSettings): void {
   for (const [key, value] of Object.entries(settings.autolearn ?? {})) doc.setIn(["autolearn", key], value);
   for (const [key, value] of Object.entries(settings.mnemopi ?? {})) doc.setIn(["mnemopi", key], value);
   for (const [key, value] of Object.entries(settings.mcp ?? {})) doc.setIn(["mcp", key], value);
+  if (settings.generate_image?.enabled !== undefined) doc.setIn(["generate_image", "enabled"], settings.generate_image.enabled);
   const temp = `${path}.tmp-${process.pid}-${Date.now()}`;
   writeFileSync(temp, doc.toString(), "utf8");
   renameSync(temp, path);

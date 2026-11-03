@@ -18,7 +18,7 @@ import { randomUUID } from "crypto";
 import { tmpdir } from "os";
 import { dirname, join, posix, resolve, win32 } from "path";
 import { checkNpmUpdate, detectInstallMethod } from "./npm-update";
-import { checkOmpUpdate } from "./omp/updates";
+import { checkOmpUpdate, type OmpUpdateStatus } from "./omp/updates";
 import { DISABLE_AUTOUPDATE_ENV_VAR, isUpdateDisabled } from "./update-policy";
 
 const LEASE_MS = 30 * 60 * 1000;
@@ -313,7 +313,13 @@ export async function prepareSelfUpdate(kind: Kind = "app"): Promise<PrepareResu
   let currentVersion: string;
   let targetVersion: string;
   if (kind === "omp") {
-    const ompStatus = await checkOmpUpdate(true);
+    let ompStatus: OmpUpdateStatus;
+    try {
+      ompStatus = await checkOmpUpdate(true);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      throw new SelfUpdateError("check_failed", `Could not check for OMP updates: ${reason.slice(-400)}`, 502);
+    }
     if (!ompStatus.updateAvailable || !ompStatus.availableVersion) {
       throw new SelfUpdateError("no_update_available", "No OMP update available", 409);
     }

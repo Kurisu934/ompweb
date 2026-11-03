@@ -1,6 +1,6 @@
-.pet-settings { padding: 24px; gap: 20px; color: var(--text); }
+.pet-settings { display: flex; flex-direction: column; min-width: 0; gap: 20px; color: var(--text); }
 .pet-settings-header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
-.pet-settings h2 { margin: 0; font-size: 22px; letter-spacing: 0; }
+.pet-settings h3 { margin: 0; font-size: 19px; letter-spacing: 0; }
 .pet-settings-actions { display: flex; align-items: center; gap: 8px; }
 .pet-import-button { display: inline-flex; align-items: center; gap: 6px; padding: 8px 12px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-panel); color: var(--text); cursor: pointer; font-size: 13px; }
 .pet-settings button:disabled { opacity: .5; cursor: default; }
@@ -21,7 +21,7 @@
 .pet-options output { color: var(--text-muted); margin-left: 8px; }
 .pet-preview { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px; }
 .pet-preview label { display: flex; align-items: center; gap: 10px; font-size: 13px; }
-.pet-preview select { max-width: 170px; min-height: 34px; padding: 4px 8px; border: 1px solid var(--border); border-radius: 6px; background: var(--bg-panel); color: var(--text); }
+.pet-preview .form-select { max-width: 170px; min-height: 34px; padding: 4px 8px; }
 .pet-companion { position: fixed; z-index: 350; user-select: none; }
 .pet-body { display: block; border: 0; padding: 0; background: transparent; cursor: grab; touch-action: none; color: var(--text); }
 .pet-body:active { cursor: grabbing; }
@@ -32,5 +32,4 @@
 .pet-unavailable { position: fixed; right: 12px; bottom: 160px; z-index: 350; display: flex; align-items: center; background: var(--bg-panel); border: 1px solid var(--border); border-radius: 6px; padding: 6px; }
 .pet-unavailable button { background: none; border: 0; color: var(--text-muted); cursor: pointer; padding: 4px; }
 @media (hover: none) { .pet-controls { opacity: 1; } }
-@media (max-width: 600px) { .pet-settings { padding: 16px 14px 32px; } }
 @media (prefers-reduced-motion: reduce) { .pet-controls { transition: none; } }

@@ -28,6 +28,7 @@ export const BUILTIN_SLASH_COMMAND_DEFS: { name: string; descriptionKey: string;
   { name: "name", descriptionKey: "chatInput.cmdName" },
   { name: "session", descriptionKey: "chatInput.cmdSession" },
   { name: "copy", descriptionKey: "chatInput.cmdCopy" },
+  { name: "fast", descriptionKey: "chatInput.fastLabel" },
 ];
 
 export const CLIENT_BUILTIN_COMMAND_NAMES = new Set(BUILTIN_SLASH_COMMAND_DEFS.map((def) => def.name));

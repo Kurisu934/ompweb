@@ -16,6 +16,53 @@ const { buildSessionContext } = await jiti.import("../lib/session-reader.ts");
 const { collectToolResults, planTranscriptRows } = await jiti.import("../lib/chat-transcript-plan.ts");
 afterEach(cleanup);
 
+test("custom and compaction messages expose glass surfaces without losing their content", async (t) => {
+  let copied;
+  Object.defineProperty(navigator, "clipboard", { configurable: true, value: { writeText: async text => { copied = text; } } });
+  t.after(() => { delete navigator.clipboard; });
+  const content = "2 background jobs have completed.\n\nJob bg_15: done.";
+  const view = render(React.createElement(MessageView, { message: {
+    role: "custom", customType: "async-result", display: true, content, details: { jobs: 2 },
+  } }));
+  assert.ok(view.container.querySelector(".message-custom.wallpaper-surface"));
+  fireEvent.click(view.getByRole("button", { expanded: false }));
+  fireEvent.click(view.getByRole("button", { name: "Show details" }));
+  assert.equal(view.container.querySelector("pre").textContent, content);
+  assert.deepEqual(JSON.parse(view.container.querySelector(".message-custom > pre").textContent), { jobs: 2 });
+  await act(async () => { fireEvent.click(view.getByRole("button", { name: "Copy", exact: true })); });
+  assert.equal(copied, content);
+  fireEvent.click(view.getByRole("button", { name: "Hide details" }));
+  assert.equal(view.container.querySelector(".message-custom > pre"), null);
+  view.rerender(React.createElement(MessageView, { message: {
+    role: "custom", customType: "compaction", content: "Summary retained.", details: { tokensBefore: 1000, tokensAfter: 400 },
+  } }));
+  assert.ok(view.container.querySelector(".message-compaction.wallpaper-surface"));
+  assert.match(view.container.textContent, /Summary retained/);
+});
+
+test("hidden extension glass survives expand, details and collapse", () => {
+  const view = render(React.createElement(MessageView, { message: {
+    role: "custom", customType: "extension_debug", display: false,
+    content: "<note>Extension content.</note>", details: { state: "ready" },
+  } }));
+  const toggle = view.container.querySelector(".message-hidden-toggle.wallpaper-surface");
+  assert.ok(toggle);
+  fireEvent.click(toggle);
+  assert.ok(view.container.querySelector(".message-hidden-content.wallpaper-surface"));
+  fireEvent.click(view.getByRole("button", { name: "Show details" }));
+  assert.deepEqual(JSON.parse(view.container.querySelector("pre").textContent), { state: "ready" });
+  fireEvent.click(toggle);
+  assert.equal(view.container.querySelector(".message-hidden-content"), null);
+});
+
+test("standalone shell executions have their own glass surface", () => {
+  const view = render(React.createElement(MessageView, { message: {
+    role: "bashExecution", command: "echo ready", output: "ready", exitCode: 0,
+  } }));
+  assert.ok(view.container.querySelector(".message-execution.wallpaper-surface"));
+  assert.match(view.container.textContent, /echo ready/);
+});
+
 test("expanded thinking uses an inset surface and retains whitespace and streaming updates", () => {
   const props = thinking => ({
     message: { role: "assistant", content: [{ type: "thinking", thinking }] },
@@ -255,8 +302,9 @@ test("expanded tool calls show the compact command header", () => {
 });
 
 test("read paths with an internal URL scheme are not file links", () => {
-  const render = (path) => renderToStaticMarkup(React.createElement(MessageView, {
+  const render = (path, cwd) => renderToStaticMarkup(React.createElement(MessageView, {
     onOpenFile() {},
+    cwd,
     message: {
       role: "assistant",
       content: [{ type: "toolCall", toolCallId: "call-1", toolName: "read", input: { path } }],
@@ -264,9 +312,10 @@ test("read paths with an internal URL scheme are not file links", () => {
   }));
 
   for (const path of ["history://ScoutAgent", "proc://Job1", " local://notes.md", "ftp://example.com/a.ts", "javascript://x%0Aalert(1)", "file:///etc/passwd"]) {
-    assert.doesNotMatch(render(path), /activity-file-link|role="link"/, path);
+    assert.doesNotMatch(render(path, "/home/me/project"), /activity-file-link|role="link"/, path);
   }
-  assert.match(render("src/foo.ts:10"), /activity-file-link/);
+  assert.match(render("src/foo.ts:10", "/home/me/project"), /activity-file-link/);
+  assert.doesNotMatch(render("src/foo.ts:10"), /activity-file-link|role="link"/);
 });
 
 test("read paths with a web URL open the fetched page in a new tab without toggling the row", () => {
@@ -503,40 +552,49 @@ test("advisor custom messages use the localized advisor label", () => {
   assert.doesNotMatch(html, /customType/);
 });
 
-test("async-result notices start collapsed to their first line and expand to the exact line layout", () => {
-  const view = render(React.createElement(MessageView, {
-    message: {
-      role: "custom",
-      customType: "async-result",
-      content: "<system-notice>\nBackground job bg_1 has completed. Resume your work using the result below.\n/root/repo\n---\nWall time: 0.16 seconds\n</system-notice>",
-      display: true,
-    },
-  }));
+test("async-result previews expand to the full verbatim output and preserve expansion across updates", () => {
+  const output = "Background job bg_1 has completed.\n/root/repo\n---\n    indented output\n".repeat(5);
+  const message = {
+    role: "custom", customType: "async-result", display: true,
+    content: `<system-notice>\n${output}</system-notice>`,
+  };
+  const view = render(React.createElement(MessageView, { message }));
   assert.equal(view.container.querySelector("pre"), null);
-  assert.match(view.container.textContent, /Background job bg_1 has completed\. Resume your work using the result below\. …/);
-  assert.doesNotMatch(view.container.textContent, /Wall time/);
-
-  fireEvent.click(view.getByRole("button", { expanded: false }));
-  const pre = view.container.querySelector("pre");
-  assert.equal(pre.textContent, "Background job bg_1 has completed. Resume your work using the result below.\n/root/repo\n---\nWall time: 0.16 seconds");
-  assert.match(pre.getAttribute("style"), /white-space: pre;/);
-  assert.doesNotMatch(view.container.innerHTML, /system-notice|<h2/);
+  const preview = view.getByRole("button", { name: /^Background job bg_1/ });
+  assert.ok(preview.textContent.includes("Background job bg_1"));
+  assert.ok(preview.textContent.length < output.length);
+  fireEvent.click(preview);
+  assert.equal(view.container.querySelector("pre").textContent, output.trim());
+  assert.equal(view.container.querySelector("h2"), null);
+  view.rerender(React.createElement(MessageView, { message: {
+    ...message, content: `<system-notice>\n${output}Final result\n</system-notice>`,
+  } }));
+  assert.equal(view.container.querySelector("pre").textContent, `${output}Final result`);
+  const toggle = view.getByRole("button", { name: "async-result" });
+  assert.equal(toggle.getAttribute("aria-expanded"), "true");
+  fireEvent.click(toggle);
+  assert.equal(toggle.getAttribute("aria-expanded"), "false");
+  assert.equal(view.container.querySelector("pre"), null);
+  fireEvent.click(toggle);
+  assert.equal(toggle.getAttribute("aria-expanded"), "true");
+  assert.equal(view.container.querySelector("pre").textContent, `${output}Final result`);
 });
 
-test("late LSP diagnostic notices expand to their exact line layout", () => {
+test("late LSP diagnostic notices expand to their exact line layout without the wrapper tag", () => {
+  const content = "Late LSP diagnostics arrived after the edit returned:\n/repo/a.py — 0 error(s), 1 warning(s)\n/repo/a.py:8:1 [warning] [Ruff] Import block is un-sorted or un-formatted\n\nhelp: Organize imports (I001)";
   const view = render(React.createElement(MessageView, {
     message: {
       role: "custom",
       customType: "lsp-late-diagnostic",
-      content: "<system-notice>\nLate LSP diagnostics arrived after the edit returned:\n/repo/a.py — 0 error(s), 1 warning(s)\n/repo/a.py:8:1 [warning] [Ruff] Import block is un-sorted or un-formatted\n\nhelp: Organize imports (I001)\n</system-notice>",
+      content: `<system-notice>\n${content}\n</system-notice>`,
       display: true,
     },
   }));
+  assert.equal(view.container.querySelectorAll("pre").length, 0);
   fireEvent.click(view.getByRole("button", { expanded: false }));
-  assert.equal(
-    view.container.querySelector("pre").textContent,
-    "Late LSP diagnostics arrived after the edit returned:\n/repo/a.py — 0 error(s), 1 warning(s)\n/repo/a.py:8:1 [warning] [Ruff] Import block is un-sorted or un-formatted\n\nhelp: Organize imports (I001)",
-  );
+  const pre = view.container.querySelector("pre");
+  assert.equal(pre?.textContent, content);
+  assert.equal(pre?.style.whiteSpace, "pre");
   assert.doesNotMatch(view.container.innerHTML, /system-notice/);
 });
 
@@ -971,4 +1029,31 @@ test("user messages fork at their own entry and edit the prompt", async (t) => {
   await act(async () => { fireEvent.click(view.getByRole("button", { name: FORK_LABEL })); });
   assert.deepEqual(forked, ["user-7"]);
   view.unmount();
+});
+
+test("activity file links resolve against the current session workspace in independent rows", () => {
+  for (const adjacentTool of [false, true]) {
+    const opened = [];
+    const props = {
+      message: {
+        role: "assistant",
+        content: [
+          { type: "toolCall", toolCallId: "source", toolName: "read", input: { path: "lib/wallpaper-mesh.ts:35-220" } },
+          ...(adjacentTool ? [{ type: "toolCall", toolCallId: "internal", toolName: "read", input: { path: "xd://lsp" } }] : []),
+        ],
+      },
+      cwd: "/projects/first",
+      toolCallsDefaultCollapsed: false,
+      onOpenFile: path => opened.push(path),
+    };
+    const view = render(React.createElement(MessageView, props));
+    const links = () => view.container.querySelectorAll(".activity-file-link");
+    fireEvent.click(links()[0]);
+    assert.deepEqual(opened, ["/projects/first/lib/wallpaper-mesh.ts"]);
+    assert.equal(links().length, 1);
+    view.rerender(React.createElement(MessageView, { ...props, cwd: "/projects/second" }));
+    fireEvent.keyDown(links()[0], { key: "Enter" });
+    assert.deepEqual(opened, ["/projects/first/lib/wallpaper-mesh.ts", "/projects/second/lib/wallpaper-mesh.ts"]);
+    view.unmount();
+  }
 });

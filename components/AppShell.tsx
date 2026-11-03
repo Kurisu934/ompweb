@@ -4,6 +4,8 @@ import { useState, useCallback, useRef, useEffect, useLayoutEffect, useMemo } fr
 import dynamic from "next/dynamic";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useGlobalKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
+import { useShortcuts } from "@/hooks/useShortcuts";
+import { matchesShortcut, shortcutAria, shortcutHint, shortcutLabel } from "@/lib/keyboard-shortcuts";
 import { useSidebarHistory } from "@/hooks/useSidebarHistory";
 import { useModalDialog } from "@/hooks/useModalDialog";
 import { useNavigationHistory } from "@/hooks/useNavigationHistory";
@@ -13,11 +15,20 @@ import { SessionSidebar } from "./SessionSidebar";
 import type { WorktreeContext } from "./SessionSidebar-helpers";
 import { ToastProvider } from "./ui/toast";
 import { toast, toastHistory, useUnreadToastCount } from "./ui/toast";
-import { ConfirmDialog } from "./ui/field";
+import { ConfirmDialog, Select } from "./ui/field";
+import { ContextMenuHost } from "./ui/context-menu";
+import { quoteMarkdown, type ContextMenuSection } from "@/lib/context-menu";
+import { OPEN_TERMINAL_EVENT, type OpenTerminalDetail } from "@/lib/terminal-request";
 import { ChatWindow } from "./ChatWindow";
 import { PetCompanion } from "./PetCompanion";
 import { WallpaperBackground } from "./WallpaperBackground";
-import { WallpaperControls } from "./WallpaperControls";
+import { MemoPanel } from "./MemoPanel";
+import { ScheduledTasksPanel } from "./ScheduledTasksPanel";
+import { AskpassDialog } from "./AskpassDialog";
+import { AttentionCenter } from "./AttentionCenter";
+import { useAskpassRequests } from "@/hooks/useAskpassRequests";
+import { sortAttention, type AttentionItem } from "@/lib/attention";
+import { openMemos } from "@/lib/memos";
 import "./wallpapers.css";
 import "./pets.css";
 import type { PetActivity } from "@/lib/pets";
@@ -27,7 +38,7 @@ import type { RightPanelView } from "./RightPanel";
 import { BranchNavigator } from "./BranchNavigator";
 import { LanguageSwitcher } from "./LanguageSwitcher";
 import { CommandPaletteMount } from "./CommandPaletteMount";
-import { Check, ChevronDown, Command, Ellipsis, Folder, GitBranch, History, Menu, PanelLeft, PanelRight, Terminal, Wand2, Zap } from "lucide-react";
+import { Archive, Check, ChevronDown, Command, Ellipsis, Folder, GitBranch, History, Image as ImageIcon, Menu, MessageSquarePlus, PanelLeft, PanelRight, Settings, StickyNote, Terminal, Wand2, X, Zap } from "lucide-react";
 import { ThemeSwitcher } from "./ThemeSwitcher";
 import { translate, useI18n } from "@/lib/i18n";
 import { formatApiError } from "@/lib/i18n/api-error";
@@ -35,7 +46,9 @@ import { formatGenerationSpeed } from "@/lib/generation-speed";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { useIsCompactOverlay } from "@/hooks/useIsCompactOverlay";
 import { copyText } from "@/lib/clipboard";
-import { encodeFilePathForApi, getFileName, getRelativeFilePath } from "@/lib/file-paths";
+import { getFileName, getRelativeFilePath } from "@/lib/file-paths";
+import { getFileApiUrl } from "@/lib/file-urls";
+import { isFileWithinPath, type FileEditorStatus, type FileMutation } from "@/lib/file-editing";
 import { buildAtMentionText, buildFileAtMentionsText, buildFileLineMentionText } from "@/lib/file-fuzzy";
 import { getInitialNavigation } from "@/lib/initial-navigation";
 import { comparableProjectPath } from "@/lib/comparable-path";
@@ -52,7 +65,6 @@ import {
   AppUpdateTransportError,
   COMPLETED_APP_UPDATE_KEY,
   DISMISSED_APP_UPDATE_KEY,
-  DISMISSED_OMP_UPDATE_KEY,
   fetchAppUpdateJson,
   isExactLegacyTargetCompletion,
   readDismissedVersion,
@@ -78,8 +90,9 @@ import { runHostTool } from "@/hooks/useAgentSession-stream";
 import { sendAgentCommand } from "@/lib/agent-client";
 import type { ChatInputHandle } from "./ChatInput";
 import type { SessionStatsInfo, GenerationSpeedInfo } from "@/lib/pi-types";
-import type { SettingsTab } from "./SettingsTabs";
+import type { AppearanceTab, SettingsTab } from "./SettingsTabs";
 import { SettingsConfig } from "./SettingsConfig";
+import { GenerationSpeedPanel } from "./GenerationSpeedPanel";
 import {
   AppUpdateDialog,
   getAppUpdateStageIndex,
@@ -105,6 +118,7 @@ const EXPAND_THINKING_STORAGE_KEY = "omp-web:expand-thinking";
 const PROVIDER_USAGE_VISIBLE_STORAGE_KEY = "omp-web:provider-usage-visible";
 const NATIVE_SELECT_ALL_STORAGE_KEY = "omp-web:scope-native-select-all";
 const OPEN_URL_AUTOMATICALLY_STORAGE_KEY = "omp-web:open-url-automatically";
+const OPEN_FILE_AUTOMATICALLY_STORAGE_KEY = "omp-web:open-file-automatically";
 
 
 type AutoNameStatus =
@@ -138,8 +152,25 @@ export function AppShell({ appName }: { appName: string }) {
   const [explorerRefreshKey, setExplorerRefreshKey] = useState(0);
   const [explorerRefreshing, setExplorerRefreshing] = useState(false);
   const [settingsTab, setSettingsTab] = useState<SettingsTab | null>(null);
+  const [appearanceTab, setAppearanceTab] = useState<AppearanceTab>("display");
+  const shortcutBindings = useShortcuts();
   const [petActivity, setPetActivity] = useState<PetActivity>({ sessionKey: "", state: "idle" });
   const [archiveBrowserOpen, setArchiveBrowserOpen] = useState(false);
+  // "Needs you" items: session dialogs (from the sidebar's running stream) and sudo prompts.
+  const [sessionAttention, setSessionAttention] = useState<AttentionItem[]>([]);
+  const askpassRequests = useAskpassRequests();
+  const attentionItems = useMemo(() => sortAttention([
+    ...sessionAttention,
+    ...askpassRequests.map((request): AttentionItem => ({
+      id: request.id,
+      kind: "password",
+      sessionId: request.sessionId,
+      ...(request.sessionName ? { sessionName: request.sessionName } : {}),
+      cwd: request.cwd,
+      title: request.command.join(" "),
+      createdAt: request.createdAt,
+    })),
+  ]), [sessionAttention, askpassRequests]);
   const [modelsRefreshKey, setModelsRefreshKey] = useState(0);
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [mobileSidebarReady, setMobileSidebarReady] = useState(false);
@@ -165,6 +196,7 @@ export function AppShell({ appName }: { appName: string }) {
   const [providerUsageVisible, setProviderUsageVisible] = useState(true);
   const [scopeNativeSelectAll, setScopeNativeSelectAll] = useState(false);
   const [openUrlAutomatically, setOpenUrlAutomatically] = useState(false);
+  const [openFileAutomatically, setOpenFileAutomatically] = useState(false);
   const [sidebarResizing, setSidebarResizing] = useState(false);
   // Active drag handlers so an unmount mid-drag can detach them.
   const sidebarResizeHandlersRef = useRef<{ onMove: (ev: MouseEvent) => void; onUp: () => void } | null>(null);
@@ -182,6 +214,7 @@ export function AppShell({ appName }: { appName: string }) {
       setProviderUsageVisible(window.localStorage.getItem(PROVIDER_USAGE_VISIBLE_STORAGE_KEY) !== "false");
       setScopeNativeSelectAll(window.localStorage.getItem(NATIVE_SELECT_ALL_STORAGE_KEY) === "true");
       setOpenUrlAutomatically(window.localStorage.getItem(OPEN_URL_AUTOMATICALLY_STORAGE_KEY) === "true");
+      setOpenFileAutomatically(window.localStorage.getItem(OPEN_FILE_AUTOMATICALLY_STORAGE_KEY) === "true");
     } catch {
       // Keep the compact default when storage is unavailable.
     }
@@ -222,6 +255,14 @@ export function AppShell({ appName }: { appName: string }) {
     setOpenUrlAutomatically(enabled);
     try {
       window.localStorage.setItem(OPEN_URL_AUTOMATICALLY_STORAGE_KEY, String(enabled));
+    } catch {
+      // The preference still applies for this page load.
+    }
+  }, []);
+  const handleOpenFileAutomaticallyChange = useCallback((enabled: boolean) => {
+    setOpenFileAutomatically(enabled);
+    try {
+      window.localStorage.setItem(OPEN_FILE_AUTOMATICALLY_STORAGE_KEY, String(enabled));
     } catch {
       // The preference still applies for this page load.
     }
@@ -320,7 +361,7 @@ export function AppShell({ appName }: { appName: string }) {
     if (container && active instanceof HTMLElement && container.contains(active)) {
       active.blur();
     }
-  }, [sidebarOpen, mobileSidebarReady]);
+  }, [sidebarOpen, mobileSidebarReady, sidebarContainerRef]);
   useEffect(() => {
     const controller = new AbortController();
     void fetch("/api/omp-update", {
@@ -330,50 +371,11 @@ export function AppShell({ appName }: { appName: string }) {
       signal: controller.signal,
     })
       .then((response) => response.ok ? response.json() : null)
-      .then((data: { currentVersion?: string | null; availableVersion?: string | null; updateAvailable?: boolean; updateCommand?: string; updatesDisabled?: boolean } | null) => {
+      .then((data: { updateAvailable?: boolean; updatesDisabled?: boolean } | null) => {
+        // Background checks only update the settings badge. Keep update actions
+        // in Settings instead of interrupting startup or a return to this tab.
         setOmpUpdateAvailable(Boolean(data?.updateAvailable));
         setOmpUpdatesDisabled(Boolean(data?.updatesDisabled));
-        if (!data?.updateAvailable || !data.availableVersion) return;
-        // This check re-runs on every visibilitychange back to the tab, so a
-        // version the user already dismissed must not be re-announced.
-        if (readDismissedVersion(DISMISSED_OMP_UPDATE_KEY) === data.availableVersion) return;
-        const version = data.availableVersion;
-        const cmd = data.updateCommand || "omp update";
-        toast.info(
-          translate("appShell.ompUpdateAvailable"),
-          <div style={{ display: "flex", flexDirection: "column", gap: 6, marginTop: 4 }}>
-            <div>{translate("appShell.updateVersion", { current: data.currentVersion ?? "?", available: data.availableVersion })}</div>
-            <div style={{ display: "flex", alignItems: "center", gap: 6, flexWrap: "wrap" }}>
-              <code style={{ background: "var(--bg-panel)", padding: "3px 7px", borderRadius: "var(--radius-control)", fontSize: 11, fontFamily: "var(--font-mono)" }}>
-                {cmd}
-              </code>
-              <button
-                type="button"
-                onClick={() => {
-                  void copyText(cmd)
-                    .then(() => toast.success(translate("appShell.commandCopied")))
-                    .catch(() => toast.error(translate("appShell.commandCopyFailed")));
-                }}
-                style={{ padding: "3px 7px", border: "1px solid var(--border)", borderRadius: "var(--radius-control)", background: "var(--bg-panel)", color: "var(--text)", cursor: "pointer", fontSize: 11 }}
-              >
-                {translate("appShell.copyCommand")}
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setSettingsTab("system");
-                  toast.close(`omp-update-available:${version}`);
-                }}
-                style={{ padding: "3px 7px", border: "1px solid var(--accent-strong)", borderRadius: "var(--radius-control)", background: "var(--accent-strong)", color: "var(--on-accent)", cursor: "pointer", fontSize: 11, fontWeight: 600 }}
-              >
-                {translate("settingsConfig.ompUpdateAction")}
-              </button>
-            </div>
-          </div>,
-          // Version in the id: re-announcing the same version keeps its
-          // notification-center read state; a newer version is a new notice.
-          { id: `omp-update-available:${version}`, timeout: 0, onClose: () => rememberDismissedVersion(DISMISSED_OMP_UPDATE_KEY, version) }
-        );
       })
       .catch(() => {});
     return () => controller.abort();
@@ -655,9 +657,10 @@ export function AppShell({ appName }: { appName: string }) {
     }
   }, [advanceAppUpdateVisibleStage, monitorAppUpdate, resetAppUpdateVisibleStage, showAppUpdateFailure, showAppUpdateStagesThrough, submitAppUpdateCommit]);
 
+  const availableAppVersion = appUpdate?.availableVersion;
   const dismissAppUpdate = useCallback(() => {
-    if (appUpdatePhase === "idle" && appUpdate?.availableVersion) {
-      rememberDismissedVersion(DISMISSED_APP_UPDATE_KEY, appUpdate.availableVersion);
+    if (appUpdatePhase === "idle" && availableAppVersion) {
+      rememberDismissedVersion(DISMISSED_APP_UPDATE_KEY, availableAppVersion);
       toast.info(t("appUpdateDialog.settingsLater"));
     }
     setAppUpdateDialogOpen(false);
@@ -665,7 +668,7 @@ export function AppShell({ appName }: { appName: string }) {
     setAppUpdateError(null);
     appUpdateAttemptRef.current = null;
     resetAppUpdateVisibleStage();
-  }, [appUpdate?.availableVersion, appUpdatePhase, resetAppUpdateVisibleStage, t]);
+  }, [availableAppVersion, appUpdatePhase, resetAppUpdateVisibleStage, t]);
 
   const requestAppUpdateFromSettings = useCallback(() => {
     setSettingsTab(null);
@@ -730,7 +733,7 @@ export function AppShell({ appName }: { appName: string }) {
   }, []);
 
   // Single active panel — only one dropdown open at a time
-  const [activeTopPanel, setActiveTopPanel] = useState<"branches" | "system" | null>(null);
+  const [activeTopPanel, setActiveTopPanel] = useState<"branches" | "system" | "speed" | null>(null);
   const mobileToolsRef = useRef<HTMLDetailsElement>(null);
   const mobileToolsContentRef = useRef<HTMLDivElement>(null);
   const restoreToolsFocusRef = useRef(false);
@@ -765,7 +768,7 @@ export function AppShell({ appName }: { appName: string }) {
       document.removeEventListener("keydown", closeOnEscape);
     };
   }, [compactTopbar, activeTopPanel]);
-  const toggleTopPanel = useCallback((panel: "branches" | "system") => {
+  const toggleTopPanel = useCallback((panel: "branches" | "system" | "speed") => {
     if (isMobile) setSidebarOpen(false);
     setActiveTopPanel((cur) => cur === panel ? null : panel);
   }, [isMobile]);
@@ -867,7 +870,7 @@ export function AppShell({ appName }: { appName: string }) {
     sidebarResizeHandlersRef.current = { onMove, onUp };
     window.addEventListener("mousemove", onMove);
     window.addEventListener("mouseup", onUp);
-  }, [isMobile, sidebarWidth]);
+  }, [isMobile, sidebarWidth, sidebarContainerRef]);
 
   // If the app unmounts mid-drag, remove the window listeners and restore the
   // body cursor; otherwise the handlers leak and body stays cursor:col-resize.
@@ -881,122 +884,6 @@ export function AppShell({ appName }: { appName: string }) {
     document.body.style.userSelect = "";
   }, []);
 
-  const resetRightPanelWidth = useCallback(() => {
-    rightPanelRef.current?.style.removeProperty("--right-panel-width");
-    setRightPanelWidth(null);
-  }, []);
-
-  const changeRightPanelWidth = useCallback((delta: number) => {
-    setRightPanelWidth((prev) => {
-      // Keyboard steps from the fluid default start at the panel's live
-      // width so the first press doesn't jump to the clamp minimum.
-      const base = prev ?? rightPanelRef.current?.getBoundingClientRect().width ?? RIGHT_PANEL_MIN_WIDTH;
-      const next = clampRightPanelWidth(base + delta);
-      rightPanelRef.current?.style.setProperty("--right-panel-width", `${next}px`);
-      return next;
-    });
-  }, []);
-
-  const handleRightPanelResizeKey = useCallback((e: React.KeyboardEvent) => {
-    // The handle sits on the panel's left edge: left widens, right narrows.
-    if (e.key === "ArrowLeft") {
-      e.preventDefault();
-      changeRightPanelWidth(10);
-    } else if (e.key === "ArrowRight") {
-      e.preventDefault();
-      changeRightPanelWidth(-10);
-    } else if (e.key === "Enter" || e.key === " ") {
-      e.preventDefault();
-      resetRightPanelWidth();
-    }
-  }, [changeRightPanelWidth, resetRightPanelWidth]);
-
-  const handleRightPanelResizeStart = useCallback((e: React.MouseEvent) => {
-    if (isMobile) return;
-    e.preventDefault();
-    const startX = e.clientX;
-    // Live rect, not state: it always reflects the committed width (custom or
-    // fluid default), and keeps this callback above the state declarations
-    // without a TDZ cycle. The handle only exists while the panel is open.
-    const startWidth = rightPanelRef.current?.getBoundingClientRect().width
-      ?? RIGHT_PANEL_MIN_WIDTH;
-    // Same --ui-scale ground truth as the left sidebar handle: clientX is in
-    // viewport pixels while the panel width is zoomed layout pixels.
-    let uiScale = 1;
-    try {
-      const raw = getComputedStyle(document.documentElement).getPropertyValue("--ui-scale");
-      const value = parseFloat(raw);
-      if (Number.isFinite(value) && value > 0) uiScale = value;
-    } catch {
-      // SSR/unavailable: fall back to unscaled math.
-    }
-    setRightPanelResizing(true);
-    const onMove = (ev: MouseEvent) => {
-      // Dragging the left edge left grows the panel: inverse of the sidebar.
-      const next = clampRightPanelWidth(startWidth - (ev.clientX - startX) / uiScale);
-      // Write the CSS variable straight to the DOM: the flex row follows the
-      // pointer without re-rendering the whole AppShell on every mousemove.
-      rightPanelRef.current?.style.setProperty("--right-panel-width", `${next}px`);
-      pendingRightPanelWidthRef.current = next;
-    };
-    const onUp = () => {
-      window.removeEventListener("mousemove", onMove);
-      window.removeEventListener("mouseup", onUp);
-      rightResizeHandlersRef.current = null;
-      setRightPanelResizing(false);
-      // Commit the final width so state and the persisted value agree with
-      // what the user actually dragged to.
-      setRightPanelWidth(pendingRightPanelWidthRef.current);
-      document.body.style.cursor = "";
-      document.body.style.userSelect = "";
-    };
-    document.body.style.cursor = "col-resize";
-    document.body.style.userSelect = "none";
-    pendingRightPanelWidthRef.current = startWidth;
-    rightResizeHandlersRef.current = { onMove, onUp };
-    window.addEventListener("mousemove", onMove);
-    window.addEventListener("mouseup", onUp);
-  }, [isMobile]);
-
-  // If the app unmounts mid-drag, remove the window listeners and restore the
-  // body cursor; otherwise the handlers leak and body stays cursor:col-resize.
-  useEffect(() => () => {
-    const handlers = rightResizeHandlersRef.current;
-    if (!handlers) return;
-    window.removeEventListener("mousemove", handlers.onMove);
-    window.removeEventListener("mouseup", handlers.onUp);
-    rightResizeHandlersRef.current = null;
-    document.body.style.cursor = "";
-    document.body.style.userSelect = "";
-  }, []);
-
-
-  // Dismiss the topbar dropdowns on outside click or Escape. The Escape
-  // handler stops propagation so the global Esc (abort agent) does not fire
-  // while a panel is open.
-  useEffect(() => {
-    // The branch panel manages its own outside-click and Escape dismissal.
-    if (!activeTopPanel || activeTopPanel === "branches") return;
-    const onPointerDown = (event: MouseEvent) => {
-      if (event.target instanceof Element && event.target.closest("[data-top-panel]")) return;
-      setActiveTopPanel(null);
-    };
-    const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== "Escape") return;
-      event.stopPropagation();
-      setActiveTopPanel(null);
-    };
-    document.addEventListener("mousedown", onPointerDown);
-    document.addEventListener("keydown", onKeyDown);
-    return () => {
-      document.removeEventListener("mousedown", onPointerDown);
-      document.removeEventListener("keydown", onKeyDown);
-    };
-  }, [activeTopPanel]);
-
-  // Right panel tabs: Explorer | Git changes | open files (Tauri parity).
-  const [fileTabs, setFileTabs] = useState<Tab[]>([]);
-  const [activeFileTabId, setActiveFileTabId] = useState<string | null>(null);
   const [rightPanelOpen, setRightPanelOpen] = useState(false);
   const closeRightPanel = useCallback(() => {
     setRightPanelOpen(false);
@@ -1068,6 +955,136 @@ export function AppShell({ appName }: { appName: string }) {
       window.removeEventListener("keydown", preload, true);
     };
   }, []);
+  const resetRightPanelWidth = useCallback(() => {
+    rightPanelRef.current?.style.removeProperty("--right-panel-width");
+    setRightPanelWidth(null);
+  }, [rightPanelRef]);
+
+  const changeRightPanelWidth = useCallback((delta: number) => {
+    setRightPanelWidth((prev) => {
+      // Keyboard steps from the fluid default start at the panel's live
+      // width so the first press doesn't jump to the clamp minimum.
+      const base = prev ?? rightPanelRef.current?.getBoundingClientRect().width ?? RIGHT_PANEL_MIN_WIDTH;
+      const next = clampRightPanelWidth(base + delta);
+      rightPanelRef.current?.style.setProperty("--right-panel-width", `${next}px`);
+      return next;
+    });
+  }, [rightPanelRef]);
+
+  const handleRightPanelResizeKey = useCallback((e: React.KeyboardEvent) => {
+    // The handle sits on the panel's left edge: left widens, right narrows.
+    if (e.key === "ArrowLeft") {
+      e.preventDefault();
+      changeRightPanelWidth(10);
+    } else if (e.key === "ArrowRight") {
+      e.preventDefault();
+      changeRightPanelWidth(-10);
+    } else if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      resetRightPanelWidth();
+    }
+  }, [changeRightPanelWidth, resetRightPanelWidth]);
+
+  const handleRightPanelResizeStart = useCallback((e: React.MouseEvent) => {
+    if (isMobile) return;
+    e.preventDefault();
+    const startX = e.clientX;
+    // Live rect, not state: it always reflects the committed width (custom or
+    // fluid default), and keeps this callback above the state declarations
+    // without a TDZ cycle. The handle only exists while the panel is open.
+    const startWidth = rightPanelRef.current?.getBoundingClientRect().width
+      ?? RIGHT_PANEL_MIN_WIDTH;
+    // Same --ui-scale ground truth as the left sidebar handle: clientX is in
+    // viewport pixels while the panel width is zoomed layout pixels.
+    let uiScale = 1;
+    try {
+      const raw = getComputedStyle(document.documentElement).getPropertyValue("--ui-scale");
+      const value = parseFloat(raw);
+      if (Number.isFinite(value) && value > 0) uiScale = value;
+    } catch {
+      // SSR/unavailable: fall back to unscaled math.
+    }
+    setRightPanelResizing(true);
+    const onMove = (ev: MouseEvent) => {
+      // Dragging the left edge left grows the panel: inverse of the sidebar.
+      const next = clampRightPanelWidth(startWidth - (ev.clientX - startX) / uiScale);
+      // Write the CSS variable straight to the DOM: the flex row follows the
+      // pointer without re-rendering the whole AppShell on every mousemove.
+      rightPanelRef.current?.style.setProperty("--right-panel-width", `${next}px`);
+      pendingRightPanelWidthRef.current = next;
+    };
+    const onUp = () => {
+      window.removeEventListener("mousemove", onMove);
+      window.removeEventListener("mouseup", onUp);
+      rightResizeHandlersRef.current = null;
+      setRightPanelResizing(false);
+      // Commit the final width so state and the persisted value agree with
+      // what the user actually dragged to.
+      setRightPanelWidth(pendingRightPanelWidthRef.current);
+      document.body.style.cursor = "";
+      document.body.style.userSelect = "";
+    };
+    document.body.style.cursor = "col-resize";
+    document.body.style.userSelect = "none";
+    pendingRightPanelWidthRef.current = startWidth;
+    rightResizeHandlersRef.current = { onMove, onUp };
+    window.addEventListener("mousemove", onMove);
+    window.addEventListener("mouseup", onUp);
+  }, [isMobile, rightPanelRef]);
+
+  // If the app unmounts mid-drag, remove the window listeners and restore the
+  // body cursor; otherwise the handlers leak and body stays cursor:col-resize.
+  useEffect(() => () => {
+    const handlers = rightResizeHandlersRef.current;
+    if (!handlers) return;
+    window.removeEventListener("mousemove", handlers.onMove);
+    window.removeEventListener("mouseup", handlers.onUp);
+    rightResizeHandlersRef.current = null;
+    document.body.style.cursor = "";
+    document.body.style.userSelect = "";
+  }, []);
+
+
+  // Dismiss topbar dropdowns first; don't propagate into application shortcuts.
+  useEffect(() => {
+    // The branch panel manages its own outside-click and Escape dismissal.
+    if (!activeTopPanel || activeTopPanel === "branches") return;
+    const onPointerDown = (event: MouseEvent) => {
+      if (event.target instanceof Element && event.target.closest("[data-top-panel]")) return;
+      setActiveTopPanel(null);
+    };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.stopPropagation();
+      setActiveTopPanel(null);
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onKeyDown);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onKeyDown);
+    };
+  }, [activeTopPanel]);
+
+  // Right panel tabs: Explorer | Git changes | open files (Tauri parity).
+  const [fileTabs, setFileTabs] = useState<Tab[]>([]);
+  const [activeFileTabId, setActiveFileTabId] = useState<string | null>(null);
+  const [fileEditorStates, setFileEditorStates] = useState<Map<string, FileEditorStatus>>(new Map());
+  const [pendingFileClose, setPendingFileClose] = useState<string[] | null>(null);
+  const handleFileEditorState = useCallback((filePath: string, status: FileEditorStatus) => {
+    setFileEditorStates((previous) => {
+      if ((previous.get(filePath) ?? "clean") === status) return previous;
+      const next = new Map(previous);
+      if (status === "clean") next.delete(filePath); else next.set(filePath, status);
+      return next;
+    });
+  }, []);
+  useEffect(() => {
+    if (fileEditorStates.size === 0) return;
+    const warn = (event: BeforeUnloadEvent) => { event.preventDefault(); event.returnValue = ""; };
+    window.addEventListener("beforeunload", warn);
+    return () => window.removeEventListener("beforeunload", warn);
+  }, [fileEditorStates.size]);
   // One-shot request asking the explorer tab to expand + scroll to a file.
   const [revealPath, setRevealPath] = useState<string | null>(null);
   const [fileSearchOpen, setFileSearchOpen] = useState(false);
@@ -1177,6 +1194,8 @@ export function AppShell({ appName }: { appName: string }) {
     if (sessionProject && comparableProjectPath(sessionProject) === comparableProjectPath(newProject)) {
       return;
     }
+    // Already showing this cwd's new chat (handleOpenWorkspace got there first).
+    if (!selectedSession && newSessionCwd === cwd) return;
     // Close any session that belongs to a different project — it no longer
     // matches the selected project directory.
     setSelectedSession(null);
@@ -1191,7 +1210,7 @@ export function AppShell({ appName }: { appName: string }) {
     setSystemPromptLoading(false);
     setActiveTopPanel(null);
     router.replace("/", { scroll: false });
-  }, [router, selectedSession]);
+  }, [router, selectedSession, newSessionCwd]);
 
   const handleSelectSession = useCallback((session: SessionInfo, isRestore = false) => {
     // Re-picking the already-open session (sidebar double-click, palette
@@ -1226,7 +1245,7 @@ export function AppShell({ appName }: { appName: string }) {
     }
   }, [router, isMobile, selectedSession?.id]);
 
-  const handleNewSession = useCallback((_sessionId: string, cwd: string | null) => {
+  const showNewChat = useCallback((cwd: string | null) => {
     setSettingsTab(null);
     setSelectedSession(null);
     setNewSessionCwd(cwd);
@@ -1236,12 +1255,17 @@ export function AppShell({ appName }: { appName: string }) {
     setSystemPrompt(null);
     setSystemPromptLoading(false);
     setActiveTopPanel(null);
+
+    router.replace("/", { scroll: false });
+  }, [router]);
+
+  const handleNewSession = useCallback((_sessionId: string, cwd: string | null) => {
+    showNewChat(cwd);
     if (isMobile) {
       setSidebarOpen(false);
       requestAnimationFrame(() => chatInputRef.current?.focus());
     }
-    router.replace("/", { scroll: false });
-  }, [router, isMobile]);
+  }, [showNewChat, isMobile]);
 
   // ---- In-app Navigate back / forward over visited chat views ----
   // Own stack, not the browser History API (that one belongs to the mobile
@@ -1334,7 +1358,68 @@ export function AppShell({ appName }: { appName: string }) {
   }), [navigationHistory.canBack, navigationHistory.canForward, handleNavigateBack, handleNavigateForward, navIsMac]);
 
 
-  // Global keyboard shortcuts (handles Esc, Ctrl+Alt+N etc.)
+
+  // Workspace header click. Unlike the cwd sync it also leaves an open session
+  // of that same workspace; the mobile drawer stays open to browse its sessions.
+  const handleOpenWorkspace = useCallback((cwd: string) => {
+    if (!selectedSession && (newSessionCwd ?? activeCwd) === cwd) {
+      setSettingsTab(null);
+      return;
+    }
+    showNewChat(cwd);
+  }, [showNewChat, selectedSession, newSessionCwd, activeCwd]);
+
+  // Attention, scheduled runs and notifications share one navigation path.
+  // A failed sign-in must reach the login page rather than opening a stale view.
+  const openSessionById = useCallback(async (sessionId: string, cwd?: string, sessionName?: string) => {
+    window.focus();
+    setSettingsTab(null);
+    if (isCompactOverlay) setRightPanelOpen(false);
+    if (sessionId === selectedSession?.id) {
+      if (isMobile) setSidebarOpen(false);
+      return;
+    }
+    const sessionUrl = new URL(`/?session=${encodeURIComponent(sessionId)}`, window.location.origin).href;
+    try {
+      const response = await fetch("/api/sessions");
+      if (!response.ok) {
+        window.location.assign(sessionUrl);
+        return;
+      }
+      const session = (await response.json() as { sessions: SessionInfo[] }).sessions.find((s) => s.id === sessionId);
+      if (session) handleSelectSession(session);
+      else if (cwd) handleSelectSession({
+        id: sessionId,
+        path: "",
+        cwd,
+        ...(sessionName ? { name: sessionName } : {}),
+        created: "",
+        modified: "",
+        messageCount: 0,
+        firstMessage: "",
+      });
+      else toast.error(translate("notifications.sessionNotFound"));
+    } catch {
+      window.location.assign(sessionUrl);
+    }
+  }, [selectedSession?.id, isMobile, isCompactOverlay, handleSelectSession]);
+
+  // Jump to where an attention item can be answered: its session shows the
+  // pending dialog above the composer (replayed on connect).
+  const handleOpenAttention = useCallback(
+    (item: AttentionItem) => openSessionById(item.sessionId, item.cwd, item.sessionName),
+    [openSessionById],
+  );
+
+  const handleOpenScheduledRun = useCallback((sessionId: string, cwd: string) => {
+    void openSessionById(sessionId, cwd);
+  }, [openSessionById]);
+
+  // Session dialog notifications already use the preference-aware, deduplicated
+  // useNotifications channel below; the attention bell only supplies navigation.
+
+
+  // Configurable global shortcuts, including stop and new session.
   useGlobalKeyboardShortcuts({
     onNewSession: (cwd: string) => handleNewSession(`kb-${Date.now()}`, cwd),
     onNavigateBack: handleNavigateBack,
@@ -1372,29 +1457,6 @@ export function AppShell({ appName }: { appName: string }) {
     setExplorerRefreshKey((k) => k + 1);
   }, []);
 
-  // Notification clicks name a session id; the session list carries its cwd
-  // and project, which selecting needs. When the list cannot be read (the
-  // sign-in expired), load the session URL: sign-in carries it through.
-  const openSessionById = useCallback((sessionId: string) => {
-    window.focus();
-    // On narrow screens the file panel covers the chat it is about to show.
-    if (isCompactOverlay) setRightPanelOpen(false);
-    // A full load (not router navigation) so an expired sign-in reaches proxy.ts and the login page.
-    const sessionUrl = new URL(`/?session=${encodeURIComponent(sessionId)}`, window.location.origin).href;
-    void fetch("/api/sessions")
-      .then((r) => {
-        if (!r.ok) {
-          window.location.assign(sessionUrl);
-          return;
-        }
-        return (r.json() as Promise<{ sessions: SessionInfo[] }>).then((d) => {
-          const session = d.sessions.find((s) => s.id === sessionId);
-          if (session) handleSelectSession(session);
-          else toast.error(translate("notifications.sessionNotFound"));
-        });
-      })
-      .catch(() => window.location.assign(sessionUrl));
-  }, [handleSelectSession, isCompactOverlay]);
 
   // Full-page Settings hides the chat, so its session counts as not viewed.
   useNotifications({ sessionId: settingsTab ? null : selectedSession?.id ?? null, locale, onOpenSession: openSessionById });
@@ -1517,21 +1579,48 @@ export function AppShell({ appName }: { appName: string }) {
     void selectRestoredSession();
   }, [handleSelectSession, router]);
 
-  const handleCloseFileTab = useCallback((tabId: string) => {
-    // Compute everything from the current list outside the updaters: no side
-    // effect inside a state updater, and no stale-closure read (the callback
-    // is recreated whenever fileTabs changes, but a batched double-close
-    // would still have read the pre-close list from the closure).
-    const next = fileTabs.filter((t) => t.id !== tabId);
+  const closeFileTabs = useCallback((ids: string[]) => {
+    const closed = new Set(ids);
+    const next = fileTabs.filter((tab) => !closed.has(tab.id));
     setFileTabs(next);
-    // The panel now hosts the Explorer tab, so it stays open: closing the
-    // last file falls back to the explorer instead of hiding the panel.
     if (next.length === 0) setRightView("explorer");
-    setActiveFileTabId((cur) => {
-      if (cur !== tabId) return cur;
-      return next.length > 0 ? next[next.length - 1].id : null;
-    });
+    setActiveFileTabId((current) => current && closed.has(current) ? next.at(-1)?.id ?? null : current);
+    setPendingFileClose(null);
   }, [fileTabs]);
+
+  const requestCloseFileTabs = useCallback((ids: string[]) => {
+    const affected = fileTabs.filter((tab) => ids.includes(tab.id));
+    if (affected.some((tab) => fileEditorStates.get(tab.filePath) === "saving")) {
+      toast.info(t("fileEditing.saving"));
+    } else if (affected.some((tab) => fileEditorStates.has(tab.filePath))) {
+      setPendingFileClose(ids);
+    } else closeFileTabs(ids);
+  }, [fileTabs, fileEditorStates, closeFileTabs, t]);
+
+  const handleCloseFileTab = useCallback((id: string) => requestCloseFileTabs([id]), [requestCloseFileTabs]);
+
+  const handleBeforeFileMutation = useCallback((paths: string[]) => {
+    if ([...fileEditorStates.keys()].some((file) => paths.some((target) => isFileWithinPath(file, target)))) {
+      toast.error(t("fileEditing.finishEdits"));
+      return false;
+    }
+    return true;
+  }, [fileEditorStates, t]);
+
+  const handleFileMutation = useCallback(({ path, newPath }: FileMutation) => {
+    const remap = (tab: Tab): Tab | null => {
+      if (!isFileWithinPath(tab.filePath, path)) return tab;
+      if (!newPath) return null;
+      const filePath = newPath + tab.filePath.slice(path.length);
+      return { ...tab, filePath, id: `file:${filePath}`, label: getFileName(filePath) };
+    };
+    const next = [...new Map(fileTabs.map(remap).filter((tab): tab is Tab => tab !== null).map((tab) => [tab.id, tab])).values()];
+    const active = fileTabs.find((tab) => tab.id === activeFileTabId);
+    setFileTabs(next);
+    setActiveFileTabId(active ? remap(active)?.id ?? next.at(-1)?.id ?? null : null);
+    if (!next.length) setRightView("explorer");
+    setExplorerRefreshKey((key) => key + 1);
+  }, [fileTabs, activeFileTabId]);
 
   const handleOpenFile = useCallback((filePath: string, fileName: string, sourceSessionId?: string | null) => {
     const tabId = `file:${filePath}`;
@@ -1548,11 +1637,10 @@ export function AppShell({ appName }: { appName: string }) {
     if (isMobile) setSidebarOpen(false);
   }, [isMobile]);
 
-  // Agent open requests that wait for the user. URLs always ask unless the
-  // user opted into opening links from the viewed session automatically; URLs
-  // and files from a session this tab is not viewing always ask, so they cannot
-  // take over the current view. The click is also the user gesture that lets
-  // the new tab through pop-up blockers.
+  // URLs from other sessions always ask. Files from other sessions ask unless
+  // the user explicitly allows automatic file opening. The separate URL
+  // preference only covers the viewed session; confirmation supplies the
+  // user gesture needed by browser pop-up blockers.
   const [pendingOpens, setPendingOpens] = useState<Array<{ kind: "url" | "file"; target: string; name: string; sessionId: string; crossSession: boolean }>>([]);
   const pendingOpen = pendingOpens[0] ?? null;
   // Keep the last request on screen while the dialog animates closed.
@@ -1575,9 +1663,15 @@ export function AppShell({ appName }: { appName: string }) {
     // Full-page Settings hides the chat, so its session counts as not viewed.
     const viewing = call.sessionId === selectedSession?.id && !settingsTab;
     const { text, isError } = await runHostTool(call.toolName, call.arguments, {
+      cwd: call.cwd,
+      sessionId: call.sessionId,
       openUrl: (url) => requestOpenUrl(url, call.sessionId, !viewing),
       openFile: (path, name) => {
-        if (viewing) return handleOpenFile(path, name, call.sessionId);
+        if (viewing || openFileAutomatically) {
+          // Opening the file must reveal the panel, even from full-page Settings.
+          setSettingsTab(null);
+          return handleOpenFile(path, name, call.sessionId);
+        }
         setPendingOpens((queue) => [...queue, { kind: "file", target: path, name, sessionId: call.sessionId, crossSession: true }]);
         return `Asked the user to confirm opening ${path}; they are viewing another omp-web session.`;
       },
@@ -1592,7 +1686,7 @@ export function AppShell({ appName }: { appName: string }) {
     } catch (e) {
       console.error("Failed to send host tool result:", e);
     }
-  }, [handleOpenFile, requestOpenUrl, selectedSession?.id, settingsTab]);
+  }, [handleOpenFile, requestOpenUrl, selectedSession?.id, settingsTab, openFileAutomatically]);
   const crossSessionHostToolRef = useRef(handleCrossSessionHostTool);
   useEffect(() => { crossSessionHostToolRef.current = handleCrossSessionHostTool; }, [handleCrossSessionHostTool]);
   useEffect(() => {
@@ -1605,7 +1699,13 @@ export function AppShell({ appName }: { appName: string }) {
       try {
         const call = JSON.parse(e.data) as CrossSessionHostToolCall & { type?: string };
         if (call.type === "host_tool_call" && call.sessionId && call.id && call.toolName) {
-          void crossSessionHostToolRef.current({ sessionId: call.sessionId, id: call.id, toolName: call.toolName, arguments: call.arguments ?? {} });
+          void crossSessionHostToolRef.current({
+            sessionId: call.sessionId,
+            cwd: call.cwd,
+            id: call.id,
+            toolName: call.toolName,
+            arguments: call.arguments ?? {},
+          });
         } else if (call.type === "notification") {
           window.dispatchEvent(new CustomEvent(NOTIFICATION_MESSAGE_EVENT, { detail: call }));
         }
@@ -1616,7 +1716,6 @@ export function AppShell({ appName }: { appName: string }) {
     return () => source.close();
   }, [settingsTab]);
 
-  const activeFileTab = fileTabs.find((tab) => tab.id === activeFileTabId) ?? null;
   // Explorer, Git, and the file viewers follow the open session's folder, then
   // the sidebar's live cwd, then the new-session cwd. Relative paths (mention,
   // copy path) resolve against the same folder so they match the Explorer.
@@ -1635,37 +1734,41 @@ export function AppShell({ appName }: { appName: string }) {
     handleOpenFile(filePath, getFileName(filePath), selectedSession?.id ?? null);
   }, [handleOpenFile, selectedSession?.id]);
 
-  // File-panel integrations: every action works on the active tab so the right
-  // panel behaves like an editor toolbar, not just a tab strip.
-  const handleMentionActiveFile = useCallback(() => {
-    if (!activeFileTab) return;
-    handleAtMention(getRelativeFilePath(activeFileTab.filePath, explorerCwd ?? undefined), false);
-  }, [activeFileTab, explorerCwd, handleAtMention]);
+  // File-panel integrations act on a given tab: the toolbar passes the active
+  // one, a tab's right-click menu the tab that was clicked.
+  const handleMentionFileTab = useCallback((tabId: string) => {
+    const tab = fileTabs.find((item) => item.id === tabId);
+    if (!tab) return;
+    handleAtMention(getRelativeFilePath(tab.filePath, explorerCwd ?? undefined), false);
+  }, [fileTabs, explorerCwd, handleAtMention]);
 
-  const handleCopyActiveFilePath = useCallback(() => {
-    if (!activeFileTab) return;
-    const relative = getRelativeFilePath(activeFileTab.filePath, explorerCwd ?? undefined);
+  const handleCopyFileTabPath = useCallback((tabId: string) => {
+    const tab = fileTabs.find((item) => item.id === tabId);
+    if (!tab) return;
+    const relative = getRelativeFilePath(tab.filePath, explorerCwd ?? undefined);
     copyText(relative).then(
       () => toast.success(t("appShell.copied")),
       () => toast.error(t("appShell.commandCopyFailed")),
     );
-  }, [activeFileTab, explorerCwd, t]);
+  }, [fileTabs, explorerCwd, t]);
 
-  const handleDownloadActiveFile = useCallback(() => {
-    if (!activeFileTab) return;
+  const handleDownloadFileTab = useCallback((tabId: string) => {
+    const tab = fileTabs.find((item) => item.id === tabId);
+    if (!tab) return;
     const link = document.createElement("a");
-    link.href = `/api/files/${encodeFilePathForApi(activeFileTab.filePath)}?type=download`;
-    link.download = activeFileTab.label;
+    link.href = getFileApiUrl(tab.filePath, "download", tab.sourceSessionId);
+    link.download = tab.label;
     document.body.appendChild(link);
     link.click();
     link.remove();
-  }, [activeFileTab]);
-  const handleRevealActiveFile = useCallback(() => {
-    if (!activeFileTab) return;
-    setRevealPath(activeFileTab.filePath);
+  }, [fileTabs]);
+  const handleRevealFileTab = useCallback((tabId: string) => {
+    const tab = fileTabs.find((item) => item.id === tabId);
+    if (!tab) return;
+    setRevealPath(tab.filePath);
     setRightView("explorer");
     setRightPanelOpen(true);
-  }, [activeFileTab]);
+  }, [fileTabs]);
 
   const handleSelectFileTab = useCallback((tabId: string) => {
     setActiveFileTabId(tabId);
@@ -1677,6 +1780,43 @@ export function AppShell({ appName }: { appName: string }) {
     setRightView(view);
   }, []);
 
+  // Toggle the Terminal panel using the configured application shortcut.
+  const terminalShowingRef = useRef(false);
+  useEffect(() => {
+    terminalShowingRef.current = rightPanelOpen && rightView === "terminal";
+  }, [rightPanelOpen, rightView]);
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (!matchesShortcut("toggleTerminal", event)) return;
+      event.preventDefault();
+      if (terminalShowingRef.current) {
+        setRightPanelOpen(false);
+        return;
+      }
+      setSettingsTab(null);
+      setRightView("terminal");
+      setRightPanelOpen(true);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, []);
+
+  // "Open in terminal" from the sidebar, explorer or a context menu.
+  const [terminalRequest, setTerminalRequest] = useState<{ id: number; cwd: string } | null>(null);
+  useEffect(() => {
+    const onOpenTerminal = (event: Event) => {
+      const cwd = (event as CustomEvent<OpenTerminalDetail>).detail?.cwd;
+      if (!cwd) return;
+      setSettingsTab(null);
+      setRightView("terminal");
+      setRightPanelOpen(true);
+      if (isMobile) setSidebarOpen(false);
+      setTerminalRequest((previous) => ({ id: (previous?.id ?? 0) + 1, cwd }));
+    };
+    window.addEventListener(OPEN_TERMINAL_EVENT, onOpenTerminal);
+    return () => window.removeEventListener(OPEN_TERMINAL_EVENT, onOpenTerminal);
+  }, [isMobile]);
+
   const handleRevealDone = useCallback(() => {
     setRevealPath(null);
   }, []);
@@ -1685,16 +1825,13 @@ export function AppShell({ appName }: { appName: string }) {
     setFileSearchOpen((open) => !open);
   }, []);
 
-  const handleCloseOtherFileTabs = useCallback(() => {
-    if (!activeFileTab) return;
-    setFileTabs([activeFileTab]);
-  }, [activeFileTab]);
+  const handleCloseOtherFileTabs = useCallback((tabId: string) => {
+    requestCloseFileTabs(fileTabs.filter((tab) => tab.id !== tabId).map((tab) => tab.id));
+  }, [fileTabs, requestCloseFileTabs]);
 
   const handleCloseAllFileTabs = useCallback(() => {
-    setFileTabs([]);
-    setActiveFileTabId(null);
-    setRightView("explorer");
-  }, []);
+    requestCloseFileTabs(fileTabs.map((tab) => tab.id));
+  }, [fileTabs, requestCloseFileTabs]);
 
   const handleViewFullHistory = useCallback(() => {
     if (!selectedSession) return;
@@ -1735,7 +1872,6 @@ export function AppShell({ appName }: { appName: string }) {
         !["absolute", "fixed"].includes(getComputedStyle(child).position));
       const contentStyle = getComputedStyle(content);
       const headerStyle = getComputedStyle(header);
-      const rightStyle = getComputedStyle(right);
       // DOM rectangles include interface zoom; clientWidth and CSS gaps do not.
       const scale = header.getBoundingClientRect().width / header.offsetWidth || 1;
       const controlsWidth = children.reduce((width, child) => {
@@ -1789,7 +1925,12 @@ export function AppShell({ appName }: { appName: string }) {
   }, [sidebarHistory.exitNeedsNativeBack, t]);
 
   const activeCwdName = activeCwd ? getFileName(activeCwd) || activeCwd : null;
-  const windowTitle = activeCwdName ? `${activeCwdName} - ${appName}` : appName;
+  const windowTitle = `${attentionItems.length > 0 ? `(${attentionItems.length}) ` : ""}${activeCwdName ? `${activeCwdName} - ${appName}` : appName}`;
+  // Memoized: a fresh element each render would defeat SessionSidebar's memo.
+  const attentionBell = useMemo(
+    () => <AttentionCenter items={attentionItems} onOpen={(item) => void handleOpenAttention(item)} />,
+    [attentionItems, handleOpenAttention],
+  );
 
   useEffect(() => {
     const syncWindowTitle = () => {
@@ -1801,6 +1942,43 @@ export function AppShell({ appName }: { appName: string }) {
     observer.observe(document.head, { childList: true, subtree: true, characterData: true });
     return () => observer.disconnect();
   }, [windowTitle]);
+
+  // New chat from the palette or the app context menu: the active workspace,
+  // else the server's default cwd (~/omp-cwd-<date>). An empty cwd is truthy,
+  // so showChat would render the shell while useAgentSession refuses to start
+  // — every send a silent no-op.
+  const handleQuickNewSession = useCallback(() => {
+    if (activeCwd) {
+      handleNewSession(`palette-${Date.now()}`, activeCwd);
+      return;
+    }
+    void fetch("/api/default-cwd", { method: "POST" })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const data = (await response.json()) as { cwd?: string };
+        if (!data.cwd) throw new Error("Empty cwd returned");
+        handleNewSession(`palette-${Date.now()}`, data.cwd);
+      })
+      .catch(() => toast.error(translate("errors.generic")));
+  }, [activeCwd, handleNewSession]);
+
+  // Right-click on anything without a menu of its own.
+  const buildAppContextMenu = useCallback((): ContextMenuSection => ({
+    id: "app",
+    items: [
+      { id: "new-chat", label: t("contextMenu.newChat"), icon: MessageSquarePlus, onSelect: handleQuickNewSession },
+      { id: "command-palette", label: t("contextMenu.commandPalette"), icon: Command, shortcut: shortcutLabel("commandPalette", shortcutBindings), onSelect: () => window.dispatchEvent(new Event("omp:open-command-palette")) },
+      { id: "toggle-sidebar", label: t("contextMenu.toggleSidebar"), icon: PanelLeft, onSelect: handleSidebarToggle },
+      { id: "toggle-file-panel", label: t("contextMenu.toggleFilePanel"), icon: PanelRight, onSelect: () => { setSettingsTab(null); setRightPanelOpen((open) => !open); } },
+      { id: "terminal", label: t("contextMenu.terminal"), icon: Terminal, shortcut: shortcutLabel("toggleTerminal", shortcutBindings), onSelect: () => { setSettingsTab(null); setRightView("terminal"); setRightPanelOpen(true); } },
+      { id: "archive", label: t("contextMenu.archivedSessions"), icon: Archive, onSelect: () => setArchiveBrowserOpen(true) },
+      { id: "settings", label: t("contextMenu.settings"), icon: Settings, onSelect: () => setSettingsTab("general") },
+    ],
+  }), [t, handleQuickNewSession, handleSidebarToggle, shortcutBindings]);
+
+  const handleQuoteSelection = useCallback((text: string) => {
+    chatInputRef.current?.insertQuote(quoteMarkdown(text));
+  }, []);
 
   const sidebarContent = (
     <SessionSidebar
@@ -1816,6 +1994,9 @@ export function AppShell({ appName }: { appName: string }) {
       onSessionDeleted={handleSessionDeleted}
       selectedCwd={selectedSession?.cwd ?? newSessionCwd ?? null}
       onCwdChange={handleCwdChange}
+      onOpenWorkspace={handleOpenWorkspace}
+      onAttentionChange={setSessionAttention}
+      headerAccessory={attentionBell}
       onWorkspaceOptionsChange={handleWorkspaceOptionsChange}
       onWorktreeContextChange={setWorktreeCtx}
       addProjectOpen={addProjectOpen}
@@ -1833,6 +2014,17 @@ export function AppShell({ appName }: { appName: string }) {
   return (
     <>
     <ToastProvider>
+      <ConfirmDialog
+        open={pendingFileClose !== null}
+        onOpenChange={(open) => { if (!open) setPendingFileClose(null); }}
+        title={t("fileEditing.discardTitle")}
+        description={t("fileEditing.discardDescription")}
+        confirmLabel={t("fileEditing.discard")}
+        cancelLabel={t("fileEditing.cancel")}
+        danger
+        busy={fileTabs.some((tab) => pendingFileClose?.includes(tab.id) && fileEditorStates.get(tab.filePath) === "saving")}
+        onConfirm={() => { if (pendingFileClose) closeFileTabs(pendingFileClose); }}
+      />
       <ConfirmDialog
         open={sidebarHistory.exitConfirmationOpen}
         onOpenChange={(open) => { if (!open) sidebarHistory.cancelExit(); }}
@@ -1862,29 +2054,10 @@ export function AppShell({ appName }: { appName: string }) {
       />
       <CommandPaletteMount
         onSelectSession={handleSelectSession}
-        onNewSession={() => {
-          // An empty cwd is truthy, so showChat would render the shell while
-          // useAgentSession refuses to start — every send a silent no-op.
-          // Fall back to the server's default cwd (~/omp-cwd-<date>) instead.
-          if (activeCwd) {
-            handleNewSession(`palette-${Date.now()}`, activeCwd);
-            return;
-          }
-          void fetch("/api/default-cwd", { method: "POST" })
-            .then(async (response) => {
-              if (!response.ok) throw new Error(`HTTP ${response.status}`);
-              const data = (await response.json()) as { cwd?: string };
-              if (!data.cwd) throw new Error("Empty cwd returned");
-              return data;
-            })
-            .then((data) => {
-              if (!data.cwd) throw new Error("Empty cwd returned");
-              handleNewSession(`palette-${Date.now()}`, data.cwd);
-            })
-            .catch(() => toast.error(translate("errors.generic")));
-        }}
+        onNewSession={handleQuickNewSession}
         currentModel={null}
       />
+      <ContextMenuHost appSection={buildAppContextMenu} onQuote={showChat && !settingsTab ? handleQuoteSelection : null} />
     <style>{`
       @keyframes session-info-pop {
         0% {
@@ -1938,7 +2111,8 @@ export function AppShell({ appName }: { appName: string }) {
           transform: translateX(-100%);
         }
       }
-    `}</style>
+    `}
+    </style>
     <WallpaperBackground />
     <a href="#main-content" className="skip-link">{t("appShell.skipToContent")}</a>
     <div className="wallpaper-shell" style={{ display: "flex", height: "100%", flex: 1, minHeight: 0, minWidth: 0, overflow: "hidden", background: "var(--bg)" }}>
@@ -1947,8 +2121,8 @@ export function AppShell({ appName }: { appName: string }) {
         <>
       <nav
         id="workspace-sidebar"
-        role={isMobile ? "dialog" : undefined}
-        aria-modal={isMobile ? true : undefined}
+        role={isMobile && sidebarOpen ? "dialog" : undefined}
+        aria-modal={isMobile && sidebarOpen ? true : undefined}
         tabIndex={-1}
         ref={sidebarContainerRef}
         className={`sidebar-container${sidebarOpen ? " sidebar-open" : " sidebar-closed"}${mobileSidebarReady ? "" : " sidebar-mobile-pending"}${sidebarResizing ? " sidebar-resizing" : ""}`}
@@ -2005,6 +2179,8 @@ export function AppShell({ appName }: { appName: string }) {
         {settingsTab ? (
           <SettingsConfig
             activeTab={settingsTab}
+            appearanceTab={appearanceTab}
+            onAppearanceTabChange={setAppearanceTab}
             toolCallsDefaultCollapsed={toolCallsDefaultCollapsed}
             onToolCallsDefaultCollapsedChange={handleToolCallsDefaultCollapsedChange}
             expandThinkingByDefault={expandThinkingByDefault}
@@ -2016,10 +2192,11 @@ export function AppShell({ appName }: { appName: string }) {
             onScopeNativeSelectAllChange={handleScopeNativeSelectAllChange}
             openUrlAutomatically={openUrlAutomatically}
             onOpenUrlAutomaticallyChange={handleOpenUrlAutomaticallyChange}
+            openFileAutomatically={openFileAutomatically}
+            onOpenFileAutomaticallyChange={handleOpenFileAutomaticallyChange}
             cwd={activeCwd ?? selectedSession?.cwd ?? newSessionCwd}
             sessionId={selectedSession?.id ?? null}
             onModelsSaved={() => setModelsRefreshKey((k) => k + 1)}
-            onPluginsReloaded={() => setSessionKey((k) => k + 1)}
             appUpdate={appUpdate}
             ompUpdateAvailable={ompUpdateAvailable}
             ompUpdatesDisabled={ompUpdatesDisabled}
@@ -2049,6 +2226,7 @@ export function AppShell({ appName }: { appName: string }) {
               onClick={handleSidebarToggle}
               aria-expanded={sidebarOpen}
               aria-controls="workspace-sidebar"
+              data-attention={!sidebarOpen && attentionItems.length > 0 ? "true" : undefined}
               title={sidebarOpen ? t("appShell.hideSidebar") : t("appShell.showSidebar")}
               aria-label={sidebarOpen ? t("appShell.hideSidebar") : t("appShell.showSidebar")}
               className="shell-toolbar-btn ui-focus-ring"
@@ -2072,9 +2250,18 @@ export function AppShell({ appName }: { appName: string }) {
                 <Ellipsis size={16} strokeWidth={1.8} aria-hidden="true" />
               </summary>
               <div ref={mobileToolsContentRef} className="shell-topbar-overflow-content">
+                {showChat && (
+                  <span
+                    className="shell-mobile-context"
+                    title={`${projectLabel(selectedSession?.projectRoot ?? selectedSession?.cwd ?? activeCwd ?? "")} · ${selectedSession?.name || selectedSession?.firstMessage || t("appShell.newSession")}`}
+                  >
+                    {selectedSession?.name || selectedSession?.firstMessage || t("appShell.newSession")}
+                  </span>
+                )}
             <ThemeSwitcher />
-            <WallpaperControls onOpen={() => setSettingsTab("wallpapers")} />
+            <button type="button" onClick={() => { setAppearanceTab("wallpapers"); setSettingsTab("appearance"); }} title={t("appShell.wallpapers")} aria-label={t("appShell.wallpapers")} className="shell-toolbar-btn ui-focus-ring"><ImageIcon size={16} strokeWidth={1.8} aria-hidden="true" /></button>
             <LanguageSwitcher />
+            <button type="button" onClick={openMemos} title={shortcutHint(t("memos.title"), "toggleMemos", shortcutBindings)} aria-label={t("memos.title")} aria-keyshortcuts={shortcutAria("toggleMemos", shortcutBindings)} className="shell-toolbar-btn ui-focus-ring"><StickyNote size={16} strokeWidth={1.8} aria-hidden="true" /></button>
                 <button
                   type="button"
                   onClick={() => {
@@ -2084,9 +2271,9 @@ export function AppShell({ appName }: { appName: string }) {
                     }
                     window.dispatchEvent(new Event("omp:open-command-palette"));
                   }}
-                  title={`${t("commandPalette.label")} (Ctrl/⌘ K)`}
+                  title={shortcutHint(t("commandPalette.label"), "commandPalette", shortcutBindings)}
                   aria-label={t("commandPalette.label")}
-                  aria-keyshortcuts="Control+K Meta+K"
+                  aria-keyshortcuts={shortcutAria("commandPalette", shortcutBindings)}
                   className="shell-toolbar-btn ui-focus-ring"
                 >
                   <Command size={16} strokeWidth={1.8} aria-hidden="true" />
@@ -2344,10 +2531,14 @@ export function AppShell({ appName }: { appName: string }) {
               });
 
               return (
-                <div
+                <button
+                  type="button"
                   title={speedTitle}
-                  role="img"
                   aria-label={speedTitle}
+                  aria-pressed={activeTopPanel === "speed"}
+                  aria-expanded={activeTopPanel === "speed"}
+                  data-top-panel
+                  onClick={() => toggleTopPanel("speed")}
                   className="shell-metric-pill shell-pill-extra wallpaper-inset"
                   style={{
                     display: "inline-flex",
@@ -2356,14 +2547,14 @@ export function AppShell({ appName }: { appName: string }) {
                     height: 26,
                     padding: "0 8px",
                     borderRadius: "var(--radius-control)",
-                    border: "1px solid var(--border)",
-                    background: "var(--bg-subtle)",
+                    border: `1px solid ${activeTopPanel === "speed" ? "var(--accent)" : "var(--border)"}`,
+                    background: activeTopPanel === "speed" ? "var(--bg-selected)" : "var(--bg-subtle)",
                     color: isLive ? "var(--accent)" : "var(--text-muted)",
                     fontSize: 11,
                     fontFamily: "var(--font-mono)",
                     fontVariantNumeric: "tabular-nums",
                     whiteSpace: "nowrap",
-                    cursor: "default",
+                    cursor: "pointer",
                     width: "calc(10ch + 33px)",
                     flexShrink: 0,
                   }}
@@ -2377,7 +2568,7 @@ export function AppShell({ appName }: { appName: string }) {
                     <span style={{ width: "5ch", textAlign: "right" }}>{speed.value}</span>
                     <span style={{ width: "4ch" }}>{speed.unit}</span>
                   </span>
-                </div>
+                </button>
               );
             })()}
             </div>}
@@ -2414,6 +2605,19 @@ export function AppShell({ appName }: { appName: string }) {
               )}
             </button>
           </div>
+          {showChat && activeTopPanel === "speed" && generationSpeed && (
+            <div data-top-panel className="dropdown-surface" style={{
+              position: "absolute",
+              top: "calc(100% + 4px)",
+              right: rightPanelOpen ? 8 : 44,
+              width: "min(620px, calc(100vw - 16px))",
+              maxHeight: "min(70vh, calc(100dvh - 56px))",
+              overflowY: "auto",
+              zIndex: 500,
+            }}>
+              <GenerationSpeedPanel samples={generationSpeed.samples} />
+            </div>
+          )}
 
         </div>
 
@@ -2433,12 +2637,12 @@ export function AppShell({ appName }: { appName: string }) {
                     <span className="new-session-workspace-icon" aria-hidden="true">
                       <Folder size={17} strokeWidth={1.8} />
                     </span>
-                    <select
+                    <Select
                       id="new-session-workspace"
                       aria-describedby="new-session-workspace-path"
                       value={effectiveNewSessionCwd}
-                      onChange={(event) => {
-                        const cwd = event.target.value;
+                      onChange={(nextValue) => {
+                        const cwd = nextValue;
                         if (!cwd) {
                           setAddProjectOpen(true);
                           return;
@@ -2448,23 +2652,19 @@ export function AppShell({ appName }: { appName: string }) {
                         setActiveCwd(cwd);
                         handleNewSession("", cwd);
                       }}
-                    >
-                      {!workspaceOptions.projects.some((project) => comparableProjectPath(project.path) === comparableProjectPath(newSessionProject)) && (
-                        <option value={effectiveNewSessionCwd}>{projectLabel(effectiveNewSessionCwd)}</option>
-                      )}
-                      {workspaceOptions.projects.map((project) => {
+                      options={[
+                        { value: "", label: <>+ {t("projects.add")}</> },
+                        ...(!workspaceOptions.projects.some((project) => comparableProjectPath(project.path) === comparableProjectPath(newSessionProject)) ? [{ value: effectiveNewSessionCwd, label: projectLabel(effectiveNewSessionCwd) }] : []),
+                        ...workspaceOptions.projects.map((project) => {
                         const current = comparableProjectPath(project.path) === comparableProjectPath(newSessionProject);
                         const label = project.alias ?? projectLabel(project.path);
                         const duplicate = workspaceOptions.projects.some((other) => other.path !== project.path && (other.alias ?? projectLabel(other.path)) === label);
                         return (
-                          <option key={project.path} value={current ? effectiveNewSessionCwd : project.path}>
-                            {duplicate ? `${label} — ${project.path}` : label}
-                          </option>
+                          ({ value: current ? effectiveNewSessionCwd : project.path, label: duplicate ? `${label} — ${project.path}` : label })
                         );
-                      })}
-                      <option value="">+ {t("projects.add")}</option>
-                    </select>
-                    <ChevronDown className="new-session-workspace-chevron" size={16} strokeWidth={1.8} aria-hidden="true" />
+                      }),
+                      ]}
+                    />
                   </div>
                   {/* The workspace's worktrees: picking one sets where the new
                       session starts (same switch as the file panel's Worktrees tab). */}
@@ -2610,14 +2810,18 @@ export function AppShell({ appName }: { appName: string }) {
         isMobile={isMobile}
         isCompactOverlay={isCompactOverlay}
         onOpenFile={handleOpenFile}
+        fileEditorStates={fileEditorStates}
+        onEditorStateChange={handleFileEditorState}
+        onBeforeFileMutation={handleBeforeFileMutation}
+        onFileMutation={handleFileMutation}
         onSelectFileTab={handleSelectFileTab}
         onCloseFileTab={handleCloseFileTab}
         onCloseOtherFileTabs={handleCloseOtherFileTabs}
         onCloseAllFileTabs={handleCloseAllFileTabs}
-        onMentionActiveFile={handleMentionActiveFile}
-        onCopyActiveFilePath={handleCopyActiveFilePath}
-        onDownloadActiveFile={handleDownloadActiveFile}
-        onRevealActiveFile={handleRevealActiveFile}
+        onMentionFileTab={handleMentionFileTab}
+        onCopyFileTabPath={handleCopyFileTabPath}
+        onDownloadFileTab={handleDownloadFileTab}
+        onRevealFileTab={handleRevealFileTab}
         onExplorerRefresh={handleExplorerRefresh}
         onExplorerRefreshDone={handleExplorerRefreshDone}
         onAtMention={handleAtMention}
@@ -2627,35 +2831,33 @@ export function AppShell({ appName }: { appName: string }) {
         onResetRightPanelWidth={resetRightPanelWidth}
         onRightPanelResizeStart={handleRightPanelResizeStart}
         onRightPanelResizeKey={handleRightPanelResizeKey}
+        terminalRequest={terminalRequest}
       />
       )}
 
     </div>
     {!settingsTab && (
       <button
-      onClick={() => setRightPanelOpen((v) => !v)}
-      className="wallpaper-panel-toggle"
-      title={rightPanelOpen ? t("appShell.hideFilePanel") : t("appShell.showFilePanel")}
-      aria-label={rightPanelOpen ? t("appShell.hideFilePanel") : t("appShell.showFilePanel")}
-      style={{
-        position: "fixed", top: 0, right: 0, zIndex: 300,
-        display: "flex", alignItems: "center", justifyContent: "center",
-        width: isMobile ? 44 : 36, height: isMobile ? 44 : 36, padding: 0,
-        background: "var(--bg-panel)", border: "none", borderLeft: "1px solid var(--border)", borderBottom: "1px solid var(--border)",
-        color: rightPanelOpen ? "var(--text)" : "var(--text-muted)",
-        cursor: "pointer", transition: "color var(--dur-fast) var(--ease-out-warm)",
-      }}
-      onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
-      onMouseLeave={(e) => { e.currentTarget.style.color = rightPanelOpen ? "var(--text)" : "var(--text-muted)"; }}
-    >
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-        <rect x="3" y="3" width="18" height="18" rx="2" /><line x1="15" y1="3" x2="15" y2="21" />
-      </svg>
-    </button>
+        type="button"
+        className="wallpaper-panel-toggle shell-toolbar-btn shell-panel-toggle ui-focus-ring"
+        onClick={() => setRightPanelOpen((v) => !v)}
+        aria-expanded={rightPanelOpen}
+        aria-controls="workspace-file-panel"
+        aria-pressed={rightPanelOpen}
+        title={rightPanelOpen ? t("appShell.hideFilePanel") : t("appShell.showFilePanel")}
+        aria-label={rightPanelOpen ? t("appShell.hideFilePanel") : t("appShell.showFilePanel")}
+        style={{
+          position: "fixed", top: "env(safe-area-inset-top, 0px)", right: "env(safe-area-inset-right, 0px)", zIndex: 300,
+          width: isMobile ? 44 : 36, height: isMobile ? 44 : 36, padding: 0,
+          borderLeft: "1px solid var(--border)", borderBottom: "1px solid var(--border)",
+        }}
+      >
+        {rightPanelOpen ? <X size={16} strokeWidth={1.8} aria-hidden="true" /> : <PanelRight size={16} strokeWidth={1.8} aria-hidden="true" />}
+      </button>
     )}
     {!settingsTab && <PetCompanion
       activity={!settingsTab && petActivity.sessionKey === (selectedSession?.id ?? effectiveNewSessionCwd ?? "") ? petActivity : { sessionKey: "", state: "idle" }}
-      onSettings={() => setSettingsTab("pets")}
+      onSettings={() => { setAppearanceTab("pets"); setSettingsTab("appearance"); }}
     />}
     <AppUpdateDialog open={appUpdateDialogOpen} update={appUpdate} phase={appUpdatePhase} visibleStage={appUpdateVisibleStage} error={appUpdateError} onProceed={() => void proceedWithAppUpdate()} onNotNow={dismissAppUpdate} />
     {archiveBrowserOpen && (
@@ -2665,6 +2867,13 @@ export function AppShell({ appName }: { appName: string }) {
         onRestored={handleArchiveRestored}
       />
     )}
+    <MemoPanel />
+    <ScheduledTasksPanel
+      currentSessionId={selectedSession?.path ? selectedSession.id : null}
+      currentCwd={activeCwd ?? selectedSession?.cwd ?? newSessionCwd}
+      onOpenSession={handleOpenScheduledRun}
+    />
+    <AskpassDialog requests={askpassRequests} />
     </ToastProvider>
     </>
   );

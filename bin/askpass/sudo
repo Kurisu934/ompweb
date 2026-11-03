@@ -1,0 +1,37 @@
+#!/bin/sh
+# sudo for agent shells started by omp-web (first on their PATH only).
+# Agent commands have no terminal, so plain `sudo` cannot ask for a password.
+# This adds -A, which makes sudo ask $SUDO_ASKPASS (omp-web-askpass), and the
+# open omp-web tab shows the password dialog. Calls that already choose how to
+# authenticate (-A, -S, -n, or informational -h/-V/-K/-k-only) are passed through.
+real="${OMP_WEB_REAL_SUDO:-/usr/bin/sudo}"
+
+add_askpass=1
+skip_next=0
+for arg in "$@"; do
+  if [ "$skip_next" = 1 ]; then skip_next=0; continue; fi
+  case "$arg" in
+    --) break ;;
+    --askpass|--stdin|--non-interactive|--help|--version) add_askpass=0; break ;;
+    --close-from|--chdir|--group|--host|--prompt|--chroot|--role|--type|--command-timeout|--other-user|--user) skip_next=1 ;;
+    --*) ;;
+    -?*)
+      # Bundled short options, e.g. -nu or -u root; stop at a value option.
+      opts="${arg#-}"
+      while [ -n "$opts" ]; do
+        c="${opts%"${opts#?}"}"
+        opts="${opts#?}"
+        case "$c" in
+          A|S|n|h|V) add_askpass=0; break 2 ;;
+          C|D|g|p|R|r|t|T|U|u) [ -z "$opts" ] && skip_next=1; break ;;
+        esac
+      done
+      ;;
+    *) break ;;
+  esac
+done
+
+if [ "$add_askpass" = 1 ] && [ -n "$SUDO_ASKPASS" ]; then
+  exec "$real" -A "$@"
+fi
+exec "$real" "$@"

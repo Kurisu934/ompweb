@@ -12,6 +12,39 @@ const jiti = createJiti(import.meta.url, {
 const { ChatInput, ModelErrorBanner, filterModelOptions } = await jiti.import("./ChatInput.tsx");
 const { setDraft, clearDraft } = await jiti.import("@/lib/draft-store");
 
+test("populated composer notices, queued prompts and attachments use standalone glass", () => {
+  const draftKey = "composer-populated-glass-test";
+  setDraft(draftKey, { value: "", images: [], files: [{ name: "notes.txt", mimeType: "text/plain", content: "Notes", size: 5 }] });
+  try {
+    const html = renderToStaticMarkup(React.createElement(ChatInput, {
+      onSend() {}, onAbort() {}, isStreaming: true, draftKey,
+      modelError: "Model unavailable", retryInfo: { attempt: 1, maxAttempts: 3 },
+      compactResult: { tokensBefore: 12000, estimatedTokensAfter: 4000 },
+      activeGoal: { objective: "Review the output", startedAt: 0 },
+      activePlan: { objective: "Check all panels" },
+      queuedMessages: { followUp: ["Next task"], steering: [] },
+    }));
+    for (const name of ["model-error", "retry", "compaction-result", "goal", "plan", "queue-panel", "file-attachment"]) {
+      assert.ok(html.includes(`class="composer-${name} wallpaper-surface"`), `${name} glass`);
+    }
+    assert.match(html, /var\(--status-error\)/);
+    assert.match(html, /var\(--status-warning\)/);
+    assert.match(html, /var\(--status-success\)/);
+  } finally { clearDraft(draftKey); }
+});
+
+test("send, queue and stop all opt into inset glass styling", () => {
+  const draftKey = "chat-input-glass-action-test";
+  for (const [isStreaming, value] of [[false, ""], [false, "Send"], [true, ""], [true, "Queue"]]) {
+    setDraft(draftKey, { value, images: [], files: [] });
+    try {
+      const html = renderToStaticMarkup(React.createElement(ChatInput, {
+        onSend() {}, onAbort() {}, onFollowUp() {}, isStreaming, draftKey,
+      }));
+      assert.match(html, /class="composer-primary-action wallpaper-inset"/);
+    } finally { clearDraft(draftKey); }
+  }
+});
 
 test("provider-defined reasoning levels appear once in the trigger", () => {
   for (const thinkingLevel of ["ultra", "ultrathink-extended", "constructor"]) {
@@ -54,7 +87,27 @@ test("shows Queue instead of Stop for typed text during a run", () => {
   }
 });
 
+test("the run-time submit button steers by default, matching Enter", () => {
+  const draftKey = "chat-input-steer-action-test";
+  setDraft(draftKey, { value: "Use the other API instead", images: [], files: [] });
+  try {
+    const html = renderToStaticMarkup(
+      React.createElement(ChatInput, {
+        onSend() {},
+        onAbort() {},
+        onSteer() {},
+        onFollowUp() {},
+        isStreaming: true,
+        draftKey,
+      }),
+    );
 
+    assert.match(html, />(Steer|chatInput\.steer)</);
+    assert.doesNotMatch(html, />(Queue|chatInput\.queue)</);
+  } finally {
+    clearDraft(draftKey);
+  }
+});
 
 test("renders the upstream model error", () => {
   const html = renderToStaticMarkup(
@@ -393,7 +446,6 @@ test("renders live status bar attached to the composer top edge when statusText 
   assert.match(html, /role="status"/);
   assert.match(html, /class="composer-status-bar wallpaper-surface"/);
   assert.match(html, /Waiting for model\.\.\./);
-  assert.match(html, /live-status-dot/);
 });
 
 test("omits live status bar when statusText is absent or null", () => {
@@ -427,6 +479,5 @@ test("renders both queued prompts and attached status bar together", () => {
 
   assert.match(html, /Next prompt to run/);
   assert.match(html, /Waiting for model\.\.\./);
-  assert.match(html, /live-status-dot/);
   assert.match(html, /class="composer-status-bar wallpaper-surface"/);
 });
