@@ -49,6 +49,15 @@ interface PendingAsk {
   settle(result: AskResult | undefined): void;
 }
 
+/**
+ * The one bridge serving this process. Every load of this extension (another
+ * module instance after `/reload`, a rebound runner) shares it through
+ * `globalThis`, so a newer bridge retires a stale one instead of colliding with
+ * its record: an interactive process has a single top-level TUI session.
+ */
+const ACTIVE_BRIDGE = Symbol.for("ompweb.desktopBridge.active");
+type BridgeHost = typeof globalThis & { [ACTIVE_BRIDGE]?: { dispose(): void } };
+
 /** Runs inside the original desktop process; never owns or rewrites its journal. */
 class DesktopBridge {
   private readonly clients = new Set<Socket>();
@@ -60,8 +69,17 @@ class DesktopBridge {
   private context: Context;
   private compacting = false;
   private updating?: Promise<void>;
+  /** Bumped by every release; a publish started before it must not land. */
+  private generation = 0;
+  /** Set once retired; a retired bridge never publishes again. */
+  private retired = false;
 
-  constructor(private readonly api: ExtensionAPI, context: Context) { this.context = context; }
+  constructor(private readonly api: ExtensionAPI, context: Context) {
+    this.context = context;
+    const host = globalThis as BridgeHost;
+    if (host[ACTIVE_BRIDGE] !== this) host[ACTIVE_BRIDGE]?.dispose();
+    host[ACTIVE_BRIDGE] = this;
+  }
 
   async update(context: Context): Promise<void> {
     while (this.updating) await this.updating;
@@ -77,8 +95,10 @@ class DesktopBridge {
     if (!file) return;
     const sessionFile = canonicalSessionPath(file);
     const sessionId = context.sessionManager.getSessionId();
+    if (this.retired) return;
     if (this.metadata?.sessionFile === sessionFile && this.metadata.sessionId === sessionId) return;
-    this.dispose();
+    this.release();
+    const generation = this.generation;
     const dir = getDesktopSessionsDir();
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     const directory = lstatSync(dir);
@@ -104,6 +124,12 @@ class DesktopBridge {
       server.once("error", listening.reject);
       server.listen(socketPath, () => { server.removeListener("error", listening.reject); listening.resolve(); });
       await listening.promise;
+      if (generation !== this.generation) {
+        // Released (session change, shutdown, newer bridge) while listening.
+        server.close();
+        if (process.platform !== "win32") { try { unlinkSync(socketPath); } catch { /* already closed */ } }
+        return;
+      }
       server.on("error", (error) => this.api.logger.warn(`Desktop bridge: ${error.message}`));
       if (process.platform !== "win32") chmodSync(socketPath, 0o600);
       // Link publishes a complete, private record atomically; never overwrite a live owner.
@@ -114,7 +140,9 @@ class DesktopBridge {
         catch (error) {
           if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
           const previous = JSON.parse(readFileSync(metadataPath, "utf8")) as DesktopSessionMetadata;
-          if (isProcessAlive(previous.pid)) throw new Error(`Session already has a desktop bridge owner (PID ${previous.pid})`);
+          // This process runs one bridge (ACTIVE_BRIDGE), so a record carrying its
+          // own PID was left by a retired or orphaned bridge: take it over.
+          if (previous.pid !== process.pid && isProcessAlive(previous.pid)) throw new Error(`Session already has a desktop bridge owner (PID ${previous.pid})`);
           unlinkSync(metadataPath);
           linkSync(temporary, metadataPath);
         }
@@ -306,7 +334,17 @@ class DesktopBridge {
     return promise;
   }
 
+  /** Retire this bridge for good: a newer bridge or session shutdown replaced it. */
   dispose(): void {
+    this.retired = true;
+    const host = globalThis as BridgeHost;
+    if (host[ACTIVE_BRIDGE] === this) delete host[ACTIVE_BRIDGE];
+    this.release();
+  }
+
+  /** Drop connections and this bridge's own record; it may publish again later. */
+  private release(): void {
+    this.generation += 1;
     for (const ask of this.pending.values()) ask.settle(undefined);
     for (const socket of this.connections) socket.destroy();
     this.connections.clear();
